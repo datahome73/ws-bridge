@@ -1,0 +1,151 @@
+"""JSON file-backed persistence for pairing codes and approved users.
+
+Thread-safe: all reads/writes go through threading.Lock with atomic file writes.
+"""
+import json
+import threading
+import os
+from pathlib import Path
+
+_pairing_codes: dict = {}
+_approved_users: dict = {}
+_web_bind_codes: dict = {}
+_web_sessions: dict = {}
+_agent_active_channels: dict[str, str] = {}  # agent_id → channel_id
+
+_lock = threading.Lock()
+
+
+def _load_json(path: Path) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_json_atomic(path: Path, data: dict) -> None:
+    """Atomic write: write to temp file then rename."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.rename(path)
+
+
+def load_pairing_codes(data_dir: Path) -> None:
+    global _pairing_codes
+    _pairing_codes = _load_json(data_dir / "_pairing_codes.json")
+
+
+def save_pairing_codes(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_pairing_codes.json", _pairing_codes)
+
+
+def load_approved_users(data_dir: Path) -> None:
+    global _approved_users
+    _approved_users = _load_json(data_dir / "_approved_users.json")
+
+
+def save_approved_users(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_approved_users.json", _approved_users)
+
+
+def get_pairing_codes() -> dict:
+    with _lock:
+        return dict(_pairing_codes)
+
+
+def set_pairing_codes(codes: dict) -> None:
+    global _pairing_codes
+    with _lock:
+        _pairing_codes = dict(codes)
+
+
+def get_approved_users() -> dict:
+    with _lock:
+        return dict(_approved_users)
+
+
+def set_approved_users(users: dict) -> None:
+    global _approved_users
+    with _lock:
+        _approved_users = dict(users)
+
+
+# ── Web viewer bind codes & sessions ──────────────────────────────
+
+
+def load_web_bind_codes(data_dir: Path) -> None:
+    global _web_bind_codes
+    _web_bind_codes = _load_json(data_dir / "_web_bind_codes.json")
+
+
+def save_web_bind_codes(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_web_bind_codes.json", _web_bind_codes)
+
+
+def load_web_sessions(data_dir: Path) -> None:
+    global _web_sessions
+    _web_sessions = _load_json(data_dir / "_web_sessions.json")
+
+
+def save_web_sessions(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_web_sessions.json", _web_sessions)
+
+
+def get_web_bind_codes() -> dict:
+    with _lock:
+        return dict(_web_bind_codes)
+
+
+def set_web_bind_codes(codes: dict) -> None:
+    global _web_bind_codes
+    with _lock:
+        _web_bind_codes = dict(codes)
+
+
+def get_web_sessions() -> dict:
+    with _lock:
+        return dict(_web_sessions)
+
+
+def set_web_sessions(sessions: dict) -> None:
+    global _web_sessions
+    with _lock:
+        _web_sessions = dict(sessions)
+
+
+
+# ── Agent Active Channel ──────────────────────────────────────────────
+
+
+_agent_active_channels: dict[str, str] = {}  # agent_id → channel
+
+
+def load_agent_channels(data_dir: Path) -> None:
+    global _agent_active_channels
+    _agent_active_channels = _load_json(data_dir / "_agent_active_channels.json")
+
+
+def save_agent_channels(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_agent_active_channels.json", _agent_active_channels)
+
+
+def set_agent_channel(agent_id: str, channel: str) -> None:
+    with _lock:
+        _agent_active_channels[agent_id] = channel
+
+
+def get_agent_channel(agent_id: str) -> str | None:
+    with _lock:
+        return _agent_active_channels.get(agent_id)
+
+
+def reset_agent_channel(agent_id: str) -> None:
+    with _lock:
+        _agent_active_channels.pop(agent_id, None)
