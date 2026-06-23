@@ -41,8 +41,6 @@ async def recv_any_ignore(ws, timeout=5, ignore_types=None):
 async def test_a():
     ws_admin = await connect("r34-admin-a", "test-r34")
     ws_member = await connect("r34-member-a", "test-r34")
-    await recv_any(ws_admin)  # auth_ok
-    await recv_any(ws_member)  # auth_ok
 
     # --- A-T3: Non-admin workspace_reset → permission error ---
     await ws_member.send(json.dumps({
@@ -89,7 +87,6 @@ async def test_a():
 # ═══════════════════ Requirement B: ACK delivery ═══════════════════
 async def test_b():
     ws = await connect("r34-admin-b", "test-r34")
-    await recv_any(ws)  # auth_ok
 
     # --- B-T3: Rate limit → error, no ack ---
     # Send multiple rapid messages to trigger rate limit
