@@ -775,6 +775,7 @@ async def _api_health(request: web.Request) -> web.Response:
 
 
 def main():
+    from .persistence import load_agent_channels
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load persisted data
@@ -789,8 +790,7 @@ def main():
 
     # Initialise workspace module
     ws_mod.init()
-    # R7: Load agent channel bindings
-    from .persistence import load_agent_channels
+    # R7: Load agent channel bindings (already imported above)
     load_agent_channels(DATA_DIR)
     # Register workspace API
     from .web_viewer import setup_routes as _setup_routes
