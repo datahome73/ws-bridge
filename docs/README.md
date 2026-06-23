@@ -12,27 +12,39 @@ docs/
 ├── product-requirements.md  全局产品需求
 ├── chat-rules-test-items.md 规则测试项
 ├── README.md                本文件
+├── templates/               开发文档模板（新建轮次时参考）
+│   ├── R-work-plan.md
+│   ├── R-product-requirements.md
+│   ├── R-tech-plan.md
+│   ├── R-direction-review.md
+│   ├── R-code-review.md
+│   ├── R-test-report.md
+│   └── R-release-verification.md
 ├── R32/                     第32轮开发（最新）
 │   └── WORK_PLAN.md
 └── R{NN}/                   历史轮次（保留参考）
 ```
 
-## 文档模板
+## 开发文档模板
 
-完整开发轮次包含以下文档（参考历史轮次）：
+新建轮次时，从 `templates/` 复制对应模板，`R{NN}` 替换为实际轮次号。
 
-| 文档 | 用途 | 典型文件名 |
-|:----|:-----|:----------|
-| 📋 工作任务清单 | 任务拆解与进度追踪 | `R{NN}/WORK_PLAN.md` |
-| 📝 产品需求 | 需求分析与功能定义 | `R{NN}/product-requirements.md` |
-| 📐 技术方案 | 架构设计与实现方案 | `R{NN}/tech-plan.md` |
-| 🔍 源码审查 | 代码审查结果与改进点 | `R{NN}/code-review.md` |
-| 🧪 测试报告 | 自动化/手动验证结果 | `R{NN}/test-report.md` |
-| ✅ 生产验证 | 上线后功能验证清单 | `R{NN}/production-verification.md` |
+| 步骤 | 文档（`templates/`） | 用途 | 产出角色 |
+|:----|:--------------------|:-----|:--------|
+| Step 3 | `R-product-requirements.md` | 📝 产品需求文档 | 🧐 小谷 |
+| Step 4 | `R-tech-plan.md` | 📐 技术方案 | 🏗️ 小开 |
+| Step 5 | `R-direction-review.md` | 🔍 方向审查报告 | 🧐 小谷 |
+| Step 6 | R{NN} 编码 | 💻 编码实现 | 开发角色 |
+| Step 7 | `R-code-review.md` | 🔍 代码审查报告 | 审查角色 |
+| Step 8 | R{NN} Dev 部署 | ⚙️ 部署到 dev 环境 | 🦸 小爱 |
+| Step 9 | `R-test-report.md` | 🧪 Dev 测试报告 | 🦐 泰虾 |
+| Step 10 | `R-release-verification.md` | ✅ 上线验证报告 | 🦸 小爱+全员 |
+| Step 11 | 合并 main + 更新容器 | 🚀 生产发布 | 🦸 小爱 |
+| Step 12 | 关闭工作室 | 📦 归档轮次 | 🦸 小爱 |
 
 ## 命名规则
 
 - 每轮以 `R{NN}` 格式命名（两位数，如 R01、R15、R32）
-- 轮次文件夹内文档前缀统一用 `R{NN}/`
+- 轮次文件夹内文档统一以 `R{NN}-` 前缀开头
 - 根目录文档（WORKFLOW.md 等）为跨轮次全局文档，不放在轮次文件夹内
-- WORK_PLAN.md 为当前轮次首要入口文档
+- `WORK_PLAN.md` 为当前轮次首要入口文档
