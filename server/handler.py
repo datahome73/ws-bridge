@@ -146,6 +146,9 @@ async def handle_auth(ws, msg: dict) -> str | None:
         result = auth.approve(code)
         if result["type"] == "approve_ok":
             await _send(ws, {"type": "auth_ok", "agent_id": agent_id, "role": "member", p.FIELD_ACTIVE_CHANNEL: p.LOBBY})
+            # R36: Welcome on code auto-approval (纯文本, write_chat_log)
+            _agent_name_b4 = auth.get_users().get(agent_id, {}).get("name", agent_id[:12])
+            write_chat_log("系统", f"[核准] 验证码核准 — 欢迎 {_agent_name_b4}")
             logger.info("Agent %s auto-approved via code", agent_id[:20])
             if last_seen_ts > 0:
                 await _push_offline(ws, last_seen_ts)
@@ -168,6 +171,20 @@ async def handle_auth(ws, msg: dict) -> str | None:
         "pairing_code": new_code,
     })
     logger.info("Agent %s in registration channel (code=%s)", agent_id[:20], new_code)
+    # R36 B-1: Welcome message to unregistered agent (纯文本, write_chat_log)
+    _reg_name_b1 = msg.get("name", agent_id)
+    write_chat_log("系统", f"[注册] 新代理 {_reg_name_b1}（{agent_id[:16]}）已连接，配对码：{new_code}")
+    # R36 B-2: Notify all online admins via _persist_admin_response
+    _users_for_notify = auth.get_users()
+    _admin_ids = {aid for aid, u in _users_for_notify.items() if u.get("role") == "admin"}
+    _reg_name = msg.get("name", agent_id)
+    _notify_content = f"新代理注册请求：{_reg_name}（{agent_id[:16]}）配对码：{new_code} 使用 /approve 核准"
+    for _admin_aid in _admin_ids:
+        for _conn in list(_connections.get(_admin_aid, set())):
+            try:
+                await _persist_admin_response(_conn, "system", "系统", _notify_content)
+            except Exception:
+                pass
     return agent_id
 
 
@@ -215,7 +232,12 @@ async def handle_approve(data: dict) -> dict:
     if result["type"] == "approve_ok":
         persistence.save_pairing_codes(config.DATA_DIR)
         persistence.save_approved_users(config.DATA_DIR)
-        logger.info("Approved agent %s (role=%s)", result["agent_id"][:20], data.get("role", "member"))
+        # R36 B-4: Admin approval confirmation notification (persisted for web viewer)
+        _approved_id = result["agent_id"]
+        _approved_name = auth.get_users().get(_approved_id, {}).get("name", _approved_id[:12])
+        write_chat_log("系统",
+            f"[核准] 管理员已核准代理 {_approved_name}（{_approved_id[:16]}）角色={data.get('role', 'member')}")
+        logger.info("Approved agent %s (role=%s)", _approved_id[:20], data.get("role", "member"))
     return result
 
 
@@ -1978,6 +2000,9 @@ async def handler(ws):
                             }))
                     except Exception:
                         pass
+                # R36 B-3: Welcome message to newly registered agent (纯文本, write_chat_log)
+                _reg_name = users.get(target_id, {}).get("name", target_id[:12])
+                write_chat_log("系统", f"[注册] 注册成功 — 欢迎 {_reg_name}（使用 @点名 或 📋 等前缀与队友沟通）")
                 await _send(ws, {"type": "ok", "message": f"Agent {target_id[:20]} registered"})
                 logger.info("[REG] Agent %s registered by %s", target_id[:20], agent_id[:20])
 
