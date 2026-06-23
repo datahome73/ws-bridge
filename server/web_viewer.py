@@ -102,9 +102,13 @@ def read_today_log(channel: str = "lobby") -> list[dict]:
 
 def validate_token(token: str) -> str | None:
     sessions = persistence.get_web_sessions()
+    # R33: defensive — if sessions empty but token looks valid, log for debugging
     entry = sessions.get(token)
     if entry:
         return entry.get("name")
+    # R33: debug log when valid-looking token is rejected (deployment session loss)
+    if token and len(token) >= 8:
+        logger.debug("validate_token: token %s... not found in %d sessions", token[:8], len(sessions))
     return None
 
 
