@@ -85,6 +85,8 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 .tab:hover{color:#ccc;background:rgba(255,255,255,0.05);}
 .tab.active{color:#fff;border-bottom-color:#4fc3f7;background:rgba(79,195,247,0.1);}
 .tab.pending{color:#666;font-size:0.85rem;}
+.tab.admin-tab{color:#f0a040;}
+.tab.admin-tab.active{border-bottom-color:#f0a040;background:rgba(240,160,64,0.15);}
 .badge{background:#e53935;color:#fff;font-size:11px;border-radius:10px;padding:1px 6px;min-width:16px;text-align:center;}
 .msg-list{padding:12px 16px;max-width:800px;margin:0 auto;}
 .msg{padding:10px 12px;margin-bottom:6px;border-radius:8px;background:#161b22;border:1px solid #30363d;}
@@ -146,11 +148,13 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 <script>
 const TOKEN='__TOKEN__';
 
-// ── R20: Tab state model — fixed 3-slot architecture ──
+// ── R20: Tab state model — fixed 4-slot architecture (R35) ──
 const TAB_STATE = {
   tab1: { id: 'tab1', channel: 'lobby',       label: '🌐 大厅',     permanent: true,  visible: true },
   tab2: { id: 'tab2', channel: null,           label: '📋 活跃',     permanent: false, visible: false },
   tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史查看器', permanent: true,  visible: true },
+  // R35: admin tab (read-only, no input box)
+  tab4: { id: 'tab4', channel: '_admin',       label: '🔧 管理员',   permanent: true,  visible: true },
 };
 let activeTabId = 'tab1';
 let unreadCounts = { lobby: 0 };
@@ -212,21 +216,25 @@ function createMessageEl(m) {
   return div;
 }
 
-// ── R20: Fixed 3-tab rendering ──
+// ── R20/R35: Fixed 4-tab rendering (active | lobby | admin | history) ──
 
 function renderTabBar() {
   const bar = document.getElementById('tabBar');
   var html = '';
-
-  // Tab 1: 大厅 (always)
-  html += '<div class="tab' + (activeTabId === 'tab1' ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">' +
-    '🌐 大厅</div>';
 
   // Tab 2: 活跃工作室 (conditional)
   if (TAB_STATE.tab2.visible && TAB_STATE.tab2.channel) {
     html += '<div class="tab' + (activeTabId === 'tab2' ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
       '📋 ' + escapeHtml(TAB_STATE.tab2.label.replace('📋 ', '')) + '</div>';
   }
+
+  // Tab 1: 大厅 (always)
+  html += '<div class="tab' + (activeTabId === 'tab1' ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">' +
+    '🌐 大厅</div>';
+
+  // Tab 4: 管理员 🆕 (always, read-only viewer for project owner)
+  html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\'tab4\')">' +
+    '🔧 管理员</div>';
 
   // Tab 3: 历史查看器 (always, pending style when no content loaded)
   const tab3Class = 'tab' + (activeTabId === 'tab3' ? ' active' : '') + (!TAB_STATE.tab3.channel ? ' pending' : '');

@@ -9,6 +9,7 @@ import uuid
 from . import auth, config, persistence
 from . import message_store as ms
 from . import workspace as ws_mod
+from .audit import AuditLogger
 from .web_viewer import write_chat_log
 import shared.protocol as p
 
@@ -18,6 +19,9 @@ _connections: dict[str, set] = {}
 
 # P6: message send stats
 _send_stats: dict = {"total": 0, "total_latency": 0.0}
+
+# R35: Audit logger for admin commands
+_audit_logger = AuditLogger(config.DATA_DIR)
 
 _SILENT_PREFIXES = (
     "Operation interrupted",
@@ -215,6 +219,364 @@ async def handle_approve(data: dict) -> dict:
     return result
 
 
+# ── R35: Admin command infrastructure ────────────────────────────
+
+
+def _admin_msg(content: str) -> dict:
+    """Build a response message for the _admin channel."""
+    return {
+        "type": "broadcast",
+        "channel": p.ADMIN_CHANNEL,
+        "from_name": "系统",
+        "content": content,
+        "ts": time.time(),
+    }
+
+
+async def _persist_admin_response(ws, sender_id: str, from_name: str, content: str) -> None:
+    """Send admin response + persist to message store + chat log for web viewer."""
+    msg = _admin_msg(content)
+    await _send(ws, msg)
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent=sender_id, from_name=from_name,
+            content=content, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
+        )
+    except Exception:
+        pass
+    write_chat_log(from_name, content, channel=p.ADMIN_CHANNEL)
+
+
+def _parse_command(content: str) -> tuple[str | None, dict]:
+    """Parse '!<command> [args...]' into (command_name, params dict)."""
+    if not content.startswith("!"):
+        return None, {}
+
+    parts = content[1:].strip().split()
+    if not parts:
+        return None, {}
+
+    cmd = parts[0].lower()
+    params: dict = {"_raw": content}
+    positional: list[str] = []
+    i = 1
+    while i < len(parts):
+        token = parts[i]
+        if token.startswith("--"):
+            key = token[2:]
+            i += 1
+            if i < len(parts):
+                val = parts[i]
+                if (val.startswith('"') and val.endswith('"')) or \
+                   (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                params[key] = val
+            else:
+                params[key] = ""
+        else:
+            positional.append(token)
+        i += 1
+
+    if positional:
+        params["_positional"] = positional
+    return cmd, params
+
+
+def _is_any_workspace_admin(agent_id: str) -> bool:
+    """Check if agent is a workspace admin of ANY workspace (P3 level)."""
+    for ws in ws_mod.get_all_workspaces():
+        if agent_id in ws.admin_ids or agent_id == ws.owner_id:
+            return True
+    return False
+
+
+def _log_audit(
+    agent_id: str, command: str, params: dict,
+    result: str, detail: str = "",
+) -> None:
+    """Log an admin command execution to the audit logger."""
+    _audit_logger.log(agent_id, command, params, result, detail)
+
+
+def _check_command_permission(
+    agent_id: str, cmd_name: str, cmd: dict, params: dict,
+) -> tuple[bool, str]:
+    """Check if agent has permission to run this command."""
+    # P4 → always allowed
+    if auth.is_global_admin(agent_id):
+        return True, ""
+
+    min_role = cmd.get("min_role", 4)
+    ws_scope = cmd.get("workspace_scope", False)
+
+    # P3: verify actual workspace admin before allowing ws_scope commands
+    if min_role <= 3 and ws_scope:
+        if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
+            return True, ""
+        return False, "权限不足：仅工作区管理员或超级管理员可执行"
+
+    if min_role <= 3 and not ws_scope:
+        return False, "权限不足：该操作仅超级管理员可执行"
+
+    return False, "权限不足：管理操作仅限管理员"
+
+
+# ── R35: Admin command handlers ──────────────────────────────────
+
+
+async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
+    """Create a new workspace. P4 only."""
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法: !create_workspace <name> --members <ids>"
+    ws_name = positional[0]
+    member_ids_raw = params.get("members", "")
+    member_ids = [m.strip() for m in member_ids_raw.split(",") if m.strip()]
+    ws_id = f"{p.WORKSPACE_ID_PREFIX}{sender_id[:8]}-{ws_name[:20]}"
+    users = auth.get_users()
+    sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
+    result = ws_mod.create_workspace(ws_id, ws_name, sender_id, sender_name)
+    if not result:
+        return f"❌ 创建失败：{ws_name} 可能已存在，或管理员名下活跃工作区过多"
+    for mid in member_ids:
+        if mid in users:
+            ws_mod.add_member(ws_id, mid)
+    member_list = ", ".join(member_ids) if member_ids else "无"
+    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}"
+
+
+async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
+    """Close a workspace. P3+ (P3: own managed only)."""
+    ws_id = params.get("_positional", [None])[0] or params.get("workspace")
+    if not ws_id:
+        return "❌ 用法: !close_workspace <ws_id> [--reason <text>]"
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作室 {ws_id} 不存在"
+    if not auth.is_global_admin(sender_id):
+        if not (sender_id in ws.admin_ids or sender_id == ws.owner_id):
+            return "❌ 权限不足：你不是该工作室的管理员"
+    reason = params.get("reason", "管理操作")
+    ws_mod.close_workspace(ws_id)
+    return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
+
+
+async def _cmd_list_workspaces(sender_id: str, params: dict) -> str:
+    """List workspaces. P3 (own) / P4 (all)."""
+    all_ws = ws_mod.get_all_workspaces()
+    if auth.is_global_admin(sender_id):
+        visible = all_ws
+    else:
+        visible = [w for w in all_ws
+                   if sender_id in w.admin_ids or sender_id == w.owner_id]
+    if not visible:
+        return "📋 暂无工作室"
+    lines = ["📋 工作室列表："]
+    for w in visible:
+        status_icon = {"active": "🟢", "closing": "🟡", "archived": "⚫"}.get(
+            w.state.value if hasattr(w.state, 'value') else str(w.state), "⚪")
+        lines.append(f"  {status_icon} {w.id} \"{w.name}\" ({len(w.members)}人)")
+    return "\n".join(lines)
+
+
+async def _cmd_list_agents(sender_id: str, params: dict) -> str:
+    """List approved agents with online status."""
+    users = auth.get_users()
+    online_ids = set(_connections.keys())
+    role_filter = params.get("role", "").lower()
+    lines = [f"📋 共 {len(users)} 个已认证 agent："]
+    for aid, u in sorted(users.items()):
+        role = u.get("role", "member")
+        if role_filter and role != role_filter:
+            continue
+        name = u.get("name", aid[:12])
+        status = "🟢" if aid in online_ids else "🟡"
+        lines.append(f"  {status} {name} ({role})")
+    return "\n".join(lines)
+
+
+async def _cmd_agent_status(sender_id: str, params: dict) -> str:
+    """Show detailed agent info."""
+    target = params.get("_positional", [None])[0] or params.get("agent")
+    if not target:
+        return "❌ 用法: !agent_status <agent_id|agent_name>"
+    users = auth.get_users()
+    found_id = target if target in users else None
+    if not found_id:
+        for aid, u in users.items():
+            if u.get("name") == target:
+                found_id = aid
+                break
+    if not found_id:
+        return f"❌ 未找到 agent: {target}"
+    u = users[found_id]
+    channel = persistence.get_agent_channel(found_id) or "lobby"
+    online = "🟢" if found_id in _connections else "🟡"
+    ws_list = ws_mod.get_workspaces_for_agent(found_id)
+    ws_names = ", ".join(w.id for w in ws_list) if ws_list else "无"
+    return (f"🔍 {u.get('name', found_id)}：\n"
+            f"  角色={u.get('role', 'member')}\n"
+            f"  活跃频道={channel}\n"
+            f"  所属工作室={ws_names}\n"
+            f"  在线={online}")
+
+
+async def _cmd_approve_pairing(sender_id: str, params: dict) -> str:
+    """Approve a pairing code. P4 only."""
+    code = params.get("_positional", [None])[0]
+    if not code:
+        return "❌ 用法: !approve_pairing <code> [--role <role>]"
+    role = params.get("role", "member")
+    result = auth.approve(code, role)
+    if result["type"] == "approve_ok":
+        persistence.save_pairing_codes(config.DATA_DIR)
+        persistence.save_approved_users(config.DATA_DIR)
+        return f"✅ 配对码 {code} 已确认，{result['agent_id'][:12]} 已获得 {role} 角色。"
+    return f"❌ {result.get('error', '审批失败')}"
+
+
+async def _cmd_approve_ws_admin(sender_id: str, params: dict) -> str:
+    """Approve workspace admin request. P4 only."""
+    ws_id = params.get("workspace", "")
+    agent = params.get("agent", "")
+    if not ws_id or not agent:
+        return "❌ 用法: !approve_ws_admin --workspace <ws_id> --agent <agent>"
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作室 {ws_id} 不存在"
+    result = ws_mod.approve_admin_request(ws_id, agent)
+    if result:
+        return f"✅ {agent} 已升级为 {ws_id} 的工作室管理员。"
+    return f"❌ 审批失败：{agent} 没有待审批的管理员申请。"
+
+
+async def _cmd_reject_ws_admin(sender_id: str, params: dict) -> str:
+    """Reject workspace admin request. P4 only."""
+    ws_id = params.get("workspace", "")
+    agent = params.get("agent", "")
+    reason = params.get("reason", "未说明原因")
+    if not ws_id or not agent:
+        return "❌ 用法: !reject_ws_admin --workspace <ws_id> --agent <agent> --reason <text>"
+    result = ws_mod.reject_admin_request(ws_id, agent)
+    if result:
+        return f"ℹ️ {agent} 的管理员申请已拒绝（原因：{reason}）。"
+    return f"❌ 拒绝失败：{agent} 没有待审批的管理员申请。"
+
+
+async def _cmd_list_pending(sender_id: str, params: dict) -> str:
+    """List pending admin requests. P4 only."""
+    pending = ws_mod.get_pending_requests()
+    if not pending:
+        return "📋 暂无待审批的管理员申请。"
+    lines = ["📋 待审批的管理员申请："]
+    for req in pending:
+        ws_id = req.get("workspace_id", "?")
+        agent = req.get("agent_id", "?")
+        lines.append(f"  - {agent} → {ws_id}")
+    return "\n".join(lines)
+
+
+async def _cmd_audit_log(sender_id: str, params: dict) -> str:
+    """Query audit log. P3 (own) / P4 (all)."""
+    limit_str = params.get("limit", "10")
+    try:
+        limit = int(limit_str)
+    except (ValueError, TypeError):
+        limit = 10
+    if auth.is_global_admin(sender_id):
+        entries = _audit_logger.query(tail=limit)
+    else:
+        all_entries = _audit_logger.query(tail=100)
+        entries = [e for e in all_entries
+                   if e.get("agent_id") == sender_id][:limit]
+    if not entries:
+        return "📋 暂无审计记录"
+    lines = [f"📋 最近 {len(entries)} 条操作记录："]
+    for i, e in enumerate(entries, 1):
+        ts_str = time.strftime("%H:%M", time.localtime(e.get("ts", 0)))
+        op = e.get("agent_id", "")[:12]
+        action = e.get("command", e.get("action", "?"))
+        result = e.get("result", "")
+        lines.append(f"  {i}. [{ts_str}] {op} → {action} ({result})")
+    return "\n".join(lines)
+
+
+async def _cmd_list_workspace_admins(sender_id: str, params: dict) -> str:
+    """List workspace admins. P3 (own) / P4 (all)."""
+    ws_id = params.get("workspace", "")
+    if ws_id:
+        ws = ws_mod.get_workspace(ws_id)
+        if not ws:
+            return f"❌ 工作室 {ws_id} 不存在"
+        workspaces = [ws]
+    else:
+        all_ws = ws_mod.get_all_workspaces()
+        if auth.is_global_admin(sender_id):
+            workspaces = all_ws
+        else:
+            workspaces = [w for w in all_ws
+                          if sender_id in w.admin_ids or sender_id == w.owner_id]
+    if not workspaces:
+        return "📋 暂无工作室管理员"
+    lines = ["📋 工作室管理员列表："]
+    for w in workspaces:
+        admins = list(w.admin_ids) if hasattr(w, 'admin_ids') else []
+        owner = w.owner_id if hasattr(w, 'owner_id') else ""
+        admin_names = ", ".join(admins) if admins else "无"
+        lines.append(f"  {w.id}: 管理员={admin_names}, 所有者={owner}")
+    return "\n".join(lines)
+
+
+# ── R35: Admin command registry ──────────────────────────────────
+
+_ADMIN_COMMANDS: dict[str, dict] = {
+    "create_workspace": {
+        "handler": _cmd_create_workspace, "min_role": 4, "workspace_scope": False,
+        "usage": "!create_workspace <name> --members <ids>",
+    },
+    "close_workspace": {
+        "handler": _cmd_close_workspace, "min_role": 3, "workspace_scope": True,
+        "usage": "!close_workspace <ws_id> [--reason <text>]",
+    },
+    "list_workspaces": {
+        "handler": _cmd_list_workspaces, "min_role": 3, "workspace_scope": True,
+        "usage": "!list_workspaces",
+    },
+    "list_agents": {
+        "handler": _cmd_list_agents, "min_role": 3, "workspace_scope": True,
+        "usage": "!list_agents [--role <role>]",
+    },
+    "agent_status": {
+        "handler": _cmd_agent_status, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_status <agent_id>",
+    },
+    "approve_pairing": {
+        "handler": _cmd_approve_pairing, "min_role": 4, "workspace_scope": False,
+        "usage": "!approve_pairing <code> [--role <role>]",
+    },
+    "approve_ws_admin": {
+        "handler": _cmd_approve_ws_admin, "min_role": 4, "workspace_scope": False,
+        "usage": "!approve_ws_admin --workspace <ws_id> --agent <agent>",
+    },
+    "reject_ws_admin": {
+        "handler": _cmd_reject_ws_admin, "min_role": 4, "workspace_scope": False,
+        "usage": "!reject_ws_admin --workspace <ws_id> --agent <agent> --reason <text>",
+    },
+    "list_pending": {
+        "handler": _cmd_list_pending, "min_role": 4, "workspace_scope": False,
+        "usage": "!list_pending",
+    },
+    "audit_log": {
+        "handler": _cmd_audit_log, "min_role": 3, "workspace_scope": True,
+        "usage": "!audit_log [--limit <n>]",
+    },
+    "list_workspace_admins": {
+        "handler": _cmd_list_workspace_admins, "min_role": 3, "workspace_scope": True,
+        "usage": "!list_workspace_admins [--workspace <ws_id>]",
+    },
+}
 
 async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     """Admin-relay mode:
@@ -243,13 +605,14 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         logger.info("Rate-limited %s in '%s' (retry after %ds)", sender_id[:12], channel, retry_after)
         return
 
-    # R12 P1.2: Nonsense message filter + duplicate detection
-    if _is_nonsense(content, sender_id, channel):
-        logger.info("Nonsense msg filtered from %s in '%s': %s", sender_id[:12], channel, content[:40])
-        return
-    if _is_duplicate(content, sender_id):
-        logger.info("Duplicate msg filtered from %s: %s", sender_id[:12], content[:40])
-        return
+    # R35: ! commands skip nonsense/duplicate filtering
+    if not content.startswith("!"):
+        if _is_nonsense(content, sender_id, channel):
+            logger.info("Nonsense msg filtered from %s in '%s': %s", sender_id[:12], channel, content[:40])
+            return
+        if _is_duplicate(content, sender_id):
+            logger.info("Duplicate msg filtered from %s: %s", sender_id[:12], content[:40])
+            return
 
     # Skip system/noise
     if any(content.startswith(p) for p in _SILENT_PREFIXES) or content.strip("🤐") == "":
@@ -274,12 +637,44 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             mention_names.add(name)
     is_task = bool(mention_names) or content.startswith("!")
 
-    # R26: 📢 admin-only check — non-admin agents cannot use 📢 prefix
-    if content.startswith("📢") and sender_id not in config.BROADCAST_ADMINS:
-        await _send(ws, {
-            "type": "error",
-            "error": "📢 公告仅管理员可用。如需广播请使用 @用户名 或 📋 点名前缀",
-        })
+    # ── R35: _admin channel intercept ──
+    if channel == p.ADMIN_CHANNEL:
+        # Persist the admin's command message for web viewer
+        msg_id = str(uuid.uuid4())
+        try:
+            ms.save_message(
+                msg_id=msg_id, msg_type="broadcast",
+                from_agent=sender_id, from_name=sender_name,
+                content=content, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
+            )
+        except Exception:
+            pass
+        write_chat_log(sender_name, content, channel=p.ADMIN_CHANNEL)
+
+        if not content.startswith("!"):
+            resp = "ℹ️ 管理频道仅支持 ! 命令"
+            await _persist_admin_response(ws, sender_id, "系统", resp)
+            return
+        cmd_name, params = _parse_command(content)
+        if not cmd_name or cmd_name not in _ADMIN_COMMANDS:
+            available = ", ".join(f"!{k}" for k in sorted(_ADMIN_COMMANDS))
+            await _persist_admin_response(ws, sender_id, "系统", f"❌ 未知命令。可用命令：{available}")
+            return
+        cmd = _ADMIN_COMMANDS[cmd_name]
+        allowed, reason = _check_command_permission(sender_id, cmd_name, cmd, params)
+        if not allowed:
+            await _persist_admin_response(ws, sender_id, "系统", f"❌ {reason}")
+            return
+        try:
+            result = await cmd["handler"](sender_id, params)
+            _log_audit(sender_id, cmd_name, params, "success", result)
+            await _persist_admin_response(ws, sender_id, "系统", result)
+        except Exception as e:
+            err_msg = f"❌ 执行失败: {e}"
+            _log_audit(sender_id, cmd_name, params, "error", err_msg)
+            logger.error("Admin cmd !%s failed: %s", cmd_name, e)
+            await _persist_admin_response(ws, sender_id, "系统", err_msg)
         return
 
     # ── Channel resolution (fall back to lobby for unknown channels) ──
@@ -882,6 +1277,16 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     # L4 global admin: any channel
     if auth.is_global_admin(agent_id):
         return True, ""
+
+    # R35: _admin channel — only admins (P3/P4) can send
+    if channel == p.ADMIN_CHANNEL:
+        if auth.is_global_admin(agent_id):
+            return True, ""
+        if _is_any_workspace_admin(agent_id):
+            return True, ""
+        users = auth.get_users()
+        name = users.get(agent_id, {}).get("name", agent_id[:12])
+        return False, f"{name} 无权访问管理频道"
 
     # R23: registration channel → allow (admin-relay handles routing)
     if channel == p.REGISTRATION_CHANNEL:

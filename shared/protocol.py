@@ -161,6 +161,9 @@ MSG_REGISTER_AGENT = "register_agent"
 MSG_REGISTRATION_CONFIRMED = "registration_confirmed"
 ROLE_UNREGISTERED = "unregistered"
 
+# ── R35: Admin Channel ──────────────────────────────────────────
+ADMIN_CHANNEL = "_admin"
+
 
 def normalize_ws_url(raw: str) -> str:
     """Normalize a URL to WebSocket scheme."""
