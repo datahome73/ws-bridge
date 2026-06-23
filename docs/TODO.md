@@ -81,6 +81,7 @@
 | F-7 | **🔴 Web 端下拉刷新 Tab 丢失** — 有活跃工作室时 3 tab，下拉刷新页面后回退到 2 tab（大厅+历史工作室），需手动点活跃工作室才恢复。期望：刷新只刷新消息，Tab 状态保持 | 🟡 P2 | `server/templates.py`（前端 JS 状态管理） | 待分配 | ⬜ 待启动 |
 | F-8 | **容器重建后历史聊天记录丢失** — `docker stop + rm + run` 重建容器时，Docker named volume 被重建，`messages.db` 所有历史消息清空。需建立部署前数据卷备份/恢复机制 | 🔴 P1 | 部署流程 | 待分配 | ⬜ 待启动 |
 | F-9 | **`!approve_ws_admin` 缺少 `reviewer_id` 参数** — R35 实现的 `!approve_ws_admin` handler 调用 `approve_admin_request()` 时未传入 `reviewer_id`，导致执行失败。影响：无法通过 `!` 命令将 agent 升级为工作室管理员 | 🟡 P2 | `server/handler.py`（`_handle_admin_cmd` 分支） | 待分配 | ⬜ 待启动 |
+| F-10 | **PM 未使用 `_admin` 频道执行管理操作** — R36 中 PM 仍用旧方式（直接改 JSON）设管理员，未走 `!` 命令通道，导致 `_admin` 频道无操作记录。R36 结束后需改写群聊规则，强制管理操作必须走 `!` 命令 + `_admin` 频道 | 🟡 P2 | `docs/WORKSPACE_RULES.md` | R36 结束 | ⬜ 待启动 |
 
 ---
 
