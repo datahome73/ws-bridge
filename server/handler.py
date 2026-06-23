@@ -585,8 +585,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     # R34 B: Send ACK with delivery stats (lobby path)
     if msg_id:
         _online = set(_connections.keys())
-        # targets = routed online recipients (already built above)
-        lobby_sent_list = [users.get(aid, {}).get("name", aid[:12]) for aid, _ in targets]
+        # targets = routed online recipients (already built above, but may include sender)
+        lobby_sent_list = [users.get(aid, {}).get("name", aid[:12]) for aid, _ in targets if aid != sender_id]
         # Offline: all users (except sender) minus online = the ones not reachable
         lobby_all_non_sender = {aid for aid in users if aid != sender_id}
         lobby_offline_ids = lobby_all_non_sender - _online

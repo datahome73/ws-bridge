@@ -40,7 +40,7 @@ async def recv_any_ignore(ws, timeout=5, ignore_types=None):
 # ═══════════════════ Requirement A: workspace_reset ═══════════════════
 async def test_a():
     ws_admin = await connect("r34-admin-a", "test-r34")
-    ws_member = await connect("r34-member-a", "test-r34")
+    ws_member = await connect("r34-test-member", "test-r34")
 
     # --- A-T3: Non-admin workspace_reset → permission error ---
     await ws_member.send(json.dumps({
@@ -71,7 +71,7 @@ async def test_a():
 
     # --- R29 compatibility: admin workspace_reset target ---
     await ws_admin.send(json.dumps({
-        "type": "workspace_reset", "target": "r34-member-a"
+        "type": "workspace_reset", "target": "r34-admin-a"
     }))
     resp = await recv_any(ws_admin)
     check("R29: target → ACK",
@@ -94,9 +94,8 @@ async def test_b():
     for i in range(5):
         await ws.send(json.dumps({
             "type": "message",
-            "content": "📢 R34 rate-limit-test",
-            "channel": "__lobby__",
-            "id": f"r34-{uuid.uuid4().hex[:8]}"
+            "content": f"🆘 R34 rate-limit-test {i}",
+                        "id": f"r34-{uuid.uuid4().hex[:8]}"
         }))
         try:
             resp = await recv_any(ws, timeout=5)
@@ -116,8 +115,7 @@ async def test_b():
     await ws.send(json.dumps({
         "type": "message",
         "content": "普通文本无前缀",
-        "channel": "__lobby__",
-        "id": f"r34-{uuid.uuid4().hex[:8]}"
+                "id": f"r34-{uuid.uuid4().hex[:8]}"
     }))
     resp = await recv_any(ws, timeout=10)
     check("B-T4: 无前缀大厅消息 → error",
@@ -128,8 +126,7 @@ async def test_b():
     await ws.send(json.dumps({
         "type": "message",
         "content": "📢 R34 delivery-test-b1",
-        "channel": "__lobby__",
-        "id": f"r34-{uuid.uuid4().hex[:8]}"
+                "id": f"r34-{uuid.uuid4().hex[:8]}"
     }))
     resp = await recv_any_ignore(ws, timeout=15)
     has_delivery = "delivery" in resp
