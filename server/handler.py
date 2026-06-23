@@ -146,6 +146,18 @@ async def handle_auth(ws, msg: dict) -> str | None:
         result = auth.approve(code)
         if result["type"] == "approve_ok":
             await _send(ws, {"type": "auth_ok", "agent_id": agent_id, "role": "member", p.FIELD_ACTIVE_CHANNEL: p.LOBBY})
+            # R32 B-4: Welcome message on code auto-approval
+            try:
+                _agent_name_b4 = auth.get_users().get(agent_id, {}).get("name", agent_id[:12])
+                await _send(ws, {
+                    "type": "broadcast",
+                    "from_name": "系统",
+                    "agent_id": "",
+                    "content": f"✅ 验证码核准！欢迎 {_agent_name_b4} 🎉",
+                    "ts": time.time(),
+                })
+            except Exception:
+                pass
             logger.info("Agent %s auto-approved via code", agent_id[:20])
             if last_seen_ts > 0:
                 await _push_offline(ws, last_seen_ts)
@@ -168,6 +180,37 @@ async def handle_auth(ws, msg: dict) -> str | None:
         "pairing_code": new_code,
     })
     logger.info("Agent %s in registration channel (code=%s)", agent_id[:20], new_code)
+    # R32 B-1: Send welcome message to unregistered agent
+    try:
+        await _send(ws, {
+            "type": "broadcast",
+            "from_name": "系统",
+            "agent_id": "",
+            "content": f"👋 欢迎 {msg.get('name', agent_id)}！您的配对码为：{new_code}。\n请将此码发给管理员完成注册，之后可正常使用。",
+            "ts": time.time(),
+        })
+    except Exception:
+        pass
+    # R32 B-2: Notify all online admins of new registration
+    _users_for_notify = auth.get_users()
+    _admin_ids = {aid for aid, u in _users_for_notify.items() if u.get("role") == "admin"}
+    _reg_name = msg.get("name", agent_id)
+    _notify_payload = json.dumps({
+        "type": "broadcast",
+        "from_name": "系统",
+        "agent_id": "",
+        "content": f"📋 新代理注册请求：{_reg_name}（{agent_id[:16]}）\n配对码：{new_code}\n使用 /approve 核准",
+        "ts": time.time(),
+    })
+    for _admin_aid in _admin_ids:
+        for _conn in list(_connections.get(_admin_aid, set())):
+            try:
+                if hasattr(_conn, "send_str"):
+                    await _conn.send_str(_notify_payload)
+                elif hasattr(_conn, "send"):
+                    await _conn.send(_notify_payload)
+            except Exception:
+                pass
     return agent_id
 
 
@@ -1976,6 +2019,23 @@ async def handler(ws):
                                 "type": p.MSG_REGISTRATION_CONFIRMED,
                                 p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
                             }))
+                    except Exception:
+                        pass
+                # R32 B-3: Send welcome message to newly registered agent
+                _reg_name = users.get(target_id, {}).get("name", target_id[:12])
+                _welcome = json.dumps({
+                    "type": "broadcast",
+                    "from_name": "系统",
+                    "agent_id": "",
+                    "content": f"✅ 注册成功！欢迎 {_reg_name} 🎉\n请使用 @点名 或 📋 等前缀与队友沟通。",
+                    "ts": time.time(),
+                })
+                for _conn2 in list(_connections.get(target_id, set())):
+                    try:
+                        if hasattr(_conn2, "send_str"):
+                            await _conn2.send_str(_welcome)
+                        elif hasattr(_conn2, "send"):
+                            await _conn2.send(_welcome)
                     except Exception:
                         pass
                 await _send(ws, {"type": "ok", "message": f"Agent {target_id[:20]} registered"})
