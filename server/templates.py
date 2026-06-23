@@ -270,6 +270,9 @@ function switchToActiveTab(wsId, wsName) {
   TAB_STATE.tab2.visible = true;
   if (!(wsId in unreadCounts)) unreadCounts[wsId] = 0;
   if (!(wsId in msgContainers)) msgContainers[wsId] = [];
+  // R33: persist tab2 state to localStorage
+  try { localStorage.setItem('ws_tab2_channel', wsId); } catch(e) {}
+  try { localStorage.setItem('ws_tab2_label', wsName); } catch(e) {}
   renderTabBar();
   selectTab('tab2');
 }
@@ -281,7 +284,14 @@ async function loadMessages(channel) {
   list.innerHTML = '<div class="empty">加载中...</div>';
   try {
     const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN));
-    if (!resp.ok) { list.innerHTML = '<div class="empty">加载失败</div>'; return; }
+    if (!resp.ok) {
+      // R33: token expired → clear and redirect to bind page
+      if (resp.status === 401) {
+        try { localStorage.removeItem('ws_bridge_token'); } catch(e) {}
+        location.href = '/chat';
+        return;
+      }
+      list.innerHTML = '<div class="empty">加载失败（请刷新重试）</div>'; return; }
     const data = await resp.json();
     const msgs = data.messages || [];
     list.innerHTML = '';
@@ -297,7 +307,7 @@ async function loadMessages(channel) {
       list.appendChild(el);
     }
   } catch(e) {
-    list.innerHTML = '<div class="empty">加载失败</div>';
+    list.innerHTML = '<div class="empty">加载失败（网络异常）</div>';
   }
 }
 
@@ -387,7 +397,20 @@ async function renderWsPanel() {
 // ── Initialization ──
 
 async function init() {
-  // 0. R28: Fetch workspaces first to determine Tab2 visibility immediately
+  // R33-0: Restore tab2 from localStorage (immediate, no network dependency)
+  var restoredTab2 = false;
+  try {
+    var savedChannel = localStorage.getItem('ws_tab2_channel');
+    var savedLabel = localStorage.getItem('ws_tab2_label');
+    if (savedChannel && savedLabel) {
+      TAB_STATE.tab2.channel = savedChannel;
+      TAB_STATE.tab2.label = '📋 ' + savedLabel;
+      TAB_STATE.tab2.visible = true;
+      restoredTab2 = true;
+    }
+  } catch(e) {}
+
+  // 0. R28: Fetch workspaces to verify tab2 state + update localStorage
   try {
     const resp = await fetch('/api/workspaces');
     const data = await resp.json();
@@ -397,8 +420,17 @@ async function init() {
       TAB_STATE.tab2.channel = activeWs[0].id;
       TAB_STATE.tab2.label = '📋 ' + (activeWs[0].name || activeWs[0].id);
       TAB_STATE.tab2.visible = true;
+      // Update localStorage with fresh data
+      try { localStorage.setItem('ws_tab2_channel', activeWs[0].id); } catch(e) {}
+      try { localStorage.setItem('ws_tab2_label', activeWs[0].name || activeWs[0].id); } catch(e) {}
+    } else if (!restoredTab2) {
+      // No active workspace and nothing restored from localStorage → keep 2 tabs
+      TAB_STATE.tab2.channel = null;
+      TAB_STATE.tab2.visible = false;
     }
-  } catch(e) {}
+  } catch(e) {
+    // API failed → keep whatever localStorage restored (graceful degradation)
+  }
 
   // 1. Render tab bar (fixed 3-slot, no fetch needed)
   renderTabBar();
@@ -425,7 +457,15 @@ async function init() {
         }
       } catch(_) {}
     };
-    ws.onclose = function() { setTimeout(connectWS, 3000); };
+    ws.onclose = function(e) {
+      // R33: auth failure (code 4000-4999) → don't retry, redirect to bind page
+      if (e.code >= 4000 && e.code < 5000) {
+        try { localStorage.removeItem('ws_bridge_token'); } catch(_) {}
+        location.href = '/chat';
+        return;
+      }
+      setTimeout(connectWS, 3000);
+    };
   }
   connectWS();
 
@@ -465,14 +505,18 @@ async function init() {
         // Current active workspace no longer active → hide Tab2
         TAB_STATE.tab2.channel = null;
         TAB_STATE.tab2.visible = false;
+        // R33: clear expired localStorage
+        try { localStorage.removeItem('ws_tab2_channel'); } catch(e) {}
+        try { localStorage.removeItem('ws_tab2_label'); } catch(e) {}
         if (activeTabId === 'tab2') {
           selectTab('tab1');
         } else {
           renderTabBar();
         }
       } else if (activeIds.length > 0 && !TAB_STATE.tab2.channel) {
-        // New active workspace appeared and Tab2 is empty → refresh tab bar
-        renderTabBar();
+        // R33: New active workspace appeared → full setup + localStorage
+        var ws = workspaces.find(function(w) { return w.id === activeIds[0]; });
+        switchToActiveTab(activeIds[0], ws ? ws.name : activeIds[0]);
       } else {
         renderTabBar();
       }
