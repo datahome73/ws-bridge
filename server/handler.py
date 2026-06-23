@@ -1242,6 +1242,10 @@ async def handler(ws):
                                 "content": reset_content,
                                 "ts": time.time(),
                             })
+                            if mid not in _offline_timers:
+                                _offline_timers[mid] = asyncio.create_task(
+                                    _flush_offline_push(mid)
+                                )
 
                         persistence.set_agent_channel(mid, workspace_id)
 

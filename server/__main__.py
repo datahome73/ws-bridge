@@ -495,7 +495,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 all_flag = data.get("all", False)
                 target_id = data.get("target", "").strip()
                 from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
-                from .handler import _offline_push_queue
+                from .handler import _offline_push_queue, _offline_timers, _flush_offline_push
 
                 # ── R34: Workspace-scoped reset ──────────────────
                 if workspace_id:
@@ -556,6 +556,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                                 "content": reset_content,
                                 "ts": time.time(),
                             })
+                            if mid not in _offline_timers:
+                                _offline_timers[mid] = asyncio.create_task(
+                                    _flush_offline_push(mid)
+                                )
 
                         _set_ch(mid, workspace_id)
 
