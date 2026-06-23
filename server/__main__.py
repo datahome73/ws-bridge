@@ -5,6 +5,7 @@ import json
 import logging
 import secrets
 import time
+import uuid
 
 from aiohttp import web
 
@@ -20,7 +21,7 @@ from .persistence import (
     save_pairing_codes, save_approved_users,
     save_web_bind_codes, save_web_sessions,
 )
-from .web_viewer import setup_routes, _ws_clients
+from .web_viewer import setup_routes, _ws_clients, write_chat_log
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
@@ -484,17 +485,104 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     logger.info("Admin %s task-switch target '%s' not found (silently ignored)", agent_id[:12], data.get("target", "")[:20])
                 # Fire-and-forget: no ACK
 
-            # ── R29: workspace_reset (only admin) ────────────────────
+            # ── R29/R34: workspace_reset (only admin) ────────────
             elif msg_type == p.MSG_WORKSPACE_RESET and agent_id:
                 users = await _get_users()
                 if users.get(agent_id, {}).get("role") != "admin":
                     await ws.send_json({"type": "error", "error": "权限不足：仅管理员可执行 workspace_reset"})
                     continue
+                workspace_id = data.get("workspace_id", "").strip()
                 all_flag = data.get("all", False)
                 target_id = data.get("target", "").strip()
                 from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
+                from .handler import _offline_push_queue, _offline_timers, _flush_offline_push
 
-                if all_flag:
+                # ── R34: Workspace-scoped reset ──────────────────
+                if workspace_id:
+                    ws_info = ws_mod.get_workspace(workspace_id)
+                    if not ws_info:
+                        await ws.send_json({"type": "error", "error": f"工作室 '{workspace_id}' 不存在"})
+                        continue
+                    if ws_info.state == ws_mod.WorkspaceState.CLOSING:
+                        await ws.send_json({"type": "error", "error": f"工作室 '{workspace_id}' 正在关闭中，无法重置"})
+                        continue
+                    if ws_info.state == ws_mod.WorkspaceState.ARCHIVED:
+                        await ws.send_json({"type": "error", "error": f"工作室 '{workspace_id}' 已归档，无法重置"})
+                        continue
+
+                    sender_name = users.get(agent_id, {}).get("name", agent_id[:12])
+                    member_ids = ws_info.members
+
+                    reset_content = f"⚠️ 工作室 {workspace_id} 已重置，请各成员确认就位 🫡"
+                    broadcast_payload = {
+                        "type": "broadcast",
+                        "channel": workspace_id,
+                        "subtype": "workspace_reset",
+                        "force": True,
+                        "from_name": sender_name,
+                        "agent_id": agent_id,
+                        "from": sender_name,
+                        "from_agent": agent_id,
+                        "content": reset_content,
+                        "ts": time.time(),
+                    }
+
+                    sent = 0
+                    offline = 0
+                    target_names = []
+                    offline_names = []
+                    _online = set(_connections.keys())
+
+                    for mid in member_ids:
+                        name = users.get(mid, {}).get("name", mid[:12])
+                        if mid in _online:
+                            for conn in list(_connections.get(mid, set())):
+                                try:
+                                    await conn.send_json(broadcast_payload)
+                                    sent += 1
+                                except Exception:
+                                    pass
+                            target_names.append(name)
+                        else:
+                            offline += 1
+                            offline_names.append(name)
+                            _offline_push_queue.setdefault(mid, []).append({
+                                "type": "broadcast",
+                                "channel": workspace_id,
+                                "subtype": "workspace_reset",
+                                "force": True,
+                                "from_name": sender_name,
+                                "agent_id": agent_id,
+                                "content": reset_content,
+                                "ts": time.time(),
+                            })
+                            if mid not in _offline_timers:
+                                _offline_timers[mid] = asyncio.create_task(
+                                    _flush_offline_push(mid)
+                                )
+
+                        _set_ch(mid, workspace_id)
+
+                    _save_ch(DATA_DIR)
+                    write_chat_log(sender_name, reset_content, channel=workspace_id)
+
+                    reset_id = str(uuid.uuid4())
+                    await ws.send_json({
+                        "type": "ack",
+                        "id": reset_id,
+                        "delivery": {
+                            "total": len(member_ids),
+                            "sent": sent,
+                            "offline": offline,
+                            "targets": target_names,
+                            "offline_targets": offline_names,
+                        }
+                    })
+                    logger.info("Admin %s reset workspace '%s': %d sent, %d offline",
+                                 agent_id[:12], workspace_id, sent, offline)
+
+                # ── R29: Global reset (all: true) ────────────────
+                elif all_flag:
                     for aid in users:
                         if aid != agent_id:
                             _set_ch(aid, p.LOBBY)
@@ -502,6 +590,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     logger.info("Admin %s reset ALL agents to lobby", agent_id[:12])
                     await ws.send_json({"type": "ack", "status": "ok",
                                         "message": f"✅ 已重置全部 {len(users)} 个成员到 lobby"})
+
+                # ── R29: Single-target reset ─────────────────────
                 elif target_id:
                     if target_id not in users:
                         for aid, u in users.items():
@@ -517,8 +607,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                                             "message": f"✅ 已重置 {target_name} 到 lobby"})
                     else:
                         await ws.send_json({"type": "error", "error": f"目标成员 '{data.get('target', '')}' 不存在"})
+
                 else:
-                    await ws.send_json({"type": "error", "error": "请指定 target 或设置 all: true"})
+                    await ws.send_json({"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
 
             else:
                 await ws.send_json({"type": "error", "error": "Unknown msg or not authenticated"})
@@ -684,6 +775,7 @@ async def _api_health(request: web.Request) -> web.Response:
 
 
 def main():
+    from .persistence import load_agent_channels
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load persisted data
@@ -698,8 +790,7 @@ def main():
 
     # Initialise workspace module
     ws_mod.init()
-    # R7: Load agent channel bindings
-    from .persistence import load_agent_channels
+    # R7: Load agent channel bindings (already imported above)
     load_agent_channels(DATA_DIR)
     # Register workspace API
     from .web_viewer import setup_routes as _setup_routes
