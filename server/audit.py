@@ -47,8 +47,11 @@ class AuditLogger:
             "result": result,
             "detail": detail[:200],
         }
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.error("Audit log write failed: %s", e)
 
     def query(
         self,
