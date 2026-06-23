@@ -597,7 +597,11 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     write_chat_log(sender_name, content)
 
     # R29: 📋 roll-call — send online member list to admin
-    if sender_role == "admin" and content.startswith("📋"):
+    # R33-1: Also allow workspace admin_ids (e.g. 泰虾) to call roll-call
+    is_ws_admin = (resolved_workspace is not None and
+                   (sender_id in resolved_workspace.admin_ids or
+                    sender_id == resolved_workspace.owner_id))
+    if (sender_role == "admin" or is_ws_admin) and content.startswith("📋"):
         online_list = _build_online_list(users)
         await _send(ws, {
             "type": "broadcast",
