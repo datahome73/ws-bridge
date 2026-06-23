@@ -40,7 +40,7 @@ async def recv_any_ignore(ws, timeout=5, ignore_types=None):
 # ═══════════════════ Requirement A: workspace_reset ═══════════════════
 async def test_a():
     ws_admin = await connect("r34-admin-a", "test-r34")
-    ws_member = await connect("r34-test-member", "test-r34")
+    ws_member = await connect("r34-member-a", "test-r34")
 
     # --- A-T3: Non-admin workspace_reset → permission error ---
     await ws_member.send(json.dumps({
@@ -70,6 +70,7 @@ async def test_a():
           str(resp)[:80])
 
     # --- R29 compatibility: admin workspace_reset target ---
+    # Use an agent_id known to exist in the system (r34-admin-a was approved)
     await ws_admin.send(json.dumps({
         "type": "workspace_reset", "target": "r34-admin-a"
     }))
@@ -94,19 +95,32 @@ async def test_b():
     for i in range(5):
         await ws.send(json.dumps({
             "type": "message",
-            "content": f"🆘 R34 rate-limit-test {i}",
-                        "id": f"r34-{uuid.uuid4().hex[:8]}"
+            "content": f"🆘 R34 rate-limit-test-{i}",
+            "id": f"r34-{uuid.uuid4().hex[:8]}"
         }))
+    # Drain all responses (each 🆘 generates broadcast + ack + maybe delivery_status)
+    for _ in range(20):
         try:
-            resp = await recv_any(ws, timeout=5)
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
             if resp.get("type") == "rate_limited":
                 rate_limit_hit = True
                 check("B-T3: 限速触发 → rate_limited error", True)
                 break
-        except asyncio.TimeoutError:
-            pass
+            elif resp.get("type") == "error" and "rate" in resp.get("error", "").lower():
+                rate_limit_hit = True
+                check("B-T3: 限速触发 → rate_limited error", True)
+                break
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            break
     if not rate_limit_hit:
         check("B-T3: 限速", None, "未触发限速（可能窗口已重置）")
+
+    # Drain all remaining messages before B-T4
+    for _ in range(10):
+        try:
+            await asyncio.wait_for(ws.recv(), timeout=0.5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            break
 
     # Wait for rate limit to clear
     await asyncio.sleep(12)
@@ -115,20 +129,28 @@ async def test_b():
     await ws.send(json.dumps({
         "type": "message",
         "content": "普通文本无前缀",
-                "id": f"r34-{uuid.uuid4().hex[:8]}"
+        "id": f"r34-{uuid.uuid4().hex[:8]}"
     }))
     resp = await recv_any(ws, timeout=10)
     check("B-T4: 无前缀大厅消息 → error",
           resp.get("type") == "error",
           resp.get("error", "")[:60])
 
-    # --- B-T1: 📢 broadcast → ACK with delivery field ---
+    # Drain any remaining messages before B-T1
+    for _ in range(5):
+        try:
+            await asyncio.wait_for(ws.recv(), timeout=0.3)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            break
+
+    # --- B-T1: 🆘 help → ACK with delivery field ---
+    # Use 🆘 instead of 📢 because 📢 requires BROADCAST_ADMINS whitelist (env config)
     await ws.send(json.dumps({
         "type": "message",
-        "content": "📢 R34 delivery-test-b1",
-                "id": f"r34-{uuid.uuid4().hex[:8]}"
+        "content": "🆘 R34 delivery-test-b1",
+        "id": f"r34-{uuid.uuid4().hex[:8]}"
     }))
-    resp = await recv_any_ignore(ws, timeout=15)
+    resp = await recv_any_ignore(ws, timeout=15, ignore_types=["delivery_status", "workspace_ready", "broadcast"])
     has_delivery = "delivery" in resp
     if has_delivery:
         d = resp["delivery"]
