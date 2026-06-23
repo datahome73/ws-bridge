@@ -3,7 +3,7 @@
 > **审查人：** 🧐 [角色名]
 > **日期：** [日期]
 > **审查对象：** `docs/R{NN}/R{NN}-tech-plan.md` v1.0 (commit `xxxxxxx`)
-> **依据：** `docs/R{NN}/R{NN}-product-requirements.md` v1.0 ✅ 大宏审核通过
+> **依据：** `docs/R{NN}/R{NN}-product-requirements.md` v1.0 ✅ 项目负责人审核通过
 
 ---
 

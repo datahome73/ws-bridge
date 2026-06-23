@@ -31,16 +31,16 @@ docs/
 
 | 步骤 | 文档（`templates/`） | 用途 | 产出角色 |
 |:----|:--------------------|:-----|:--------|
-| Step 3 | `R-product-requirements.md` | 📝 产品需求文档 | 🧐 小谷 |
-| Step 4 | `R-tech-plan.md` | 📐 技术方案 | 🏗️ 小开 |
-| Step 5 | `R-direction-review.md` | 🔍 方向审查报告 | 🧐 小谷 |
-| Step 6 | R{NN} 编码 | 💻 编码实现 | 开发角色 |
-| Step 7 | `R-code-review.md` | 🔍 代码审查报告 | 审查角色 |
-| Step 8 | R{NN} Dev 部署 | ⚙️ 部署到 dev 环境 | 🦸 小爱 |
-| Step 9 | `R-test-report.md` | 🧪 Dev 测试报告 | 🦐 泰虾 |
-| Step 10 | `R-release-verification.md` | ✅ 上线验证报告 | 🦸 小爱+全员 |
-| Step 11 | 合并 main + 更新容器 | 🚀 生产发布 | 🦸 小爱 |
-| Step 12 | 关闭工作室 | 📦 归档轮次 | 🦸 小爱 |
+| Step 3 | `R-product-requirements.md` | 📝 产品需求文档 | 🧐 需求分析师 |
+| Step 4 | `R-tech-plan.md` | 📐 技术方案 | 🏗️ 架构师 |
+| Step 5 | `R-direction-review.md` | 🔍 方向审查报告 | 🧐 需求分析师 |
+| Step 6 | R{NN} 编码 | 💻 编码实现 | 开发工程师 |
+| Step 7 | `R-code-review.md` | 🔍 代码审查报告 | 审查工程师 |
+| Step 8 | R{NN} Dev 部署 | ⚙️ 部署到 dev 环境 | 🦸 项目管理 |
+| Step 9 | `R-test-report.md` | 🧪 Dev 测试报告 | 🦐 测试工程师 |
+| Step 10 | `R-release-verification.md` | ✅ 上线验证报告 | 🦸 项目管理+全员 |
+| Step 11 | 合并 main + 更新容器 | 🚀 生产发布 | 🦸 项目管理 |
+| Step 12 | 关闭工作室 | 📦 归档轮次 | 🦸 项目管理 |
 
 ## 命名规则
 
