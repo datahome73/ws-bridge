@@ -4,9 +4,12 @@ Migrated from scripts/admin/lib/audit.py with adapted signature for server-side 
 """
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("ws-bridge.audit")
 
 
 class AuditLogger:
