@@ -311,9 +311,11 @@ def _check_command_permission(
     min_role = cmd.get("min_role", 4)
     ws_scope = cmd.get("workspace_scope", False)
 
-    # P3 → check min_role and workspace_scope
+    # P3: verify actual workspace admin before allowing ws_scope commands
     if min_role <= 3 and ws_scope:
-        return True, ""
+        if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
+            return True, ""
+        return False, "权限不足：仅工作区管理员或超级管理员可执行"
 
     if min_role <= 3 and not ws_scope:
         return False, "权限不足：该操作仅超级管理员可执行"
@@ -634,14 +636,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         if any(users.get(aid, {}).get("name") == name for aid in users):
             mention_names.add(name)
     is_task = bool(mention_names) or content.startswith("!")
-
-    # R26: 📢 admin-only check — non-admin agents cannot use 📢 prefix
-    if content.startswith("📢") and sender_id not in config.BROADCAST_ADMINS:
-        await _send(ws, {
-            "type": "error",
-            "error": "📢 公告仅管理员可用。如需广播请使用 @用户名 或 📋 点名前缀",
-        })
-        return
 
     # ── R35: _admin channel intercept ──
     if channel == p.ADMIN_CHANNEL:
