@@ -387,9 +387,30 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                 # R11 P1.1: Mark delivery
                 _delivery_status[msg_id][agent_id] = p.DELIVERY_SENT
 
-            # Send ACK
+            # R34 B: Send ACK with delivery stats (workspace path)
             if msg_id:
-                await _send(ws, {"type": "ack", "id": msg_id})
+                _online = set(_connections.keys())
+                sent_list = []
+                offline_list = []
+                for aid in member_ids:
+                    if aid == sender_id:
+                        continue
+                    name = users.get(aid, {}).get("name", aid[:12])
+                    if aid in _online:
+                        sent_list.append(name)
+                    else:
+                        offline_list.append(name)
+                await _send(ws, {
+                    "type": "ack",
+                    "id": msg_id,
+                    "delivery": {
+                        "total": len(member_ids) - 1,  # exclude sender
+                        "sent": len(sent_list),
+                        "offline": len(offline_list),
+                        "targets": sent_list,
+                        "offline_targets": offline_list,
+                    }
+                })
 
             # R11 P1.1: Send delivery_status to admin senders in workspace
             if sender_role == "admin" and msg_id:
@@ -561,9 +582,26 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                     _flush_offline_push(offline_id)
                 )
 
-    # Send ACK to the original sender
+    # R34 B: Send ACK with delivery stats (lobby path)
     if msg_id:
-        await _send(ws, {"type": "ack", "id": msg_id})
+        _online = set(_connections.keys())
+        # targets = routed online recipients (already built above, but may include sender)
+        lobby_sent_list = [users.get(aid, {}).get("name", aid[:12]) for aid, _ in targets if aid != sender_id]
+        # Offline: all users (except sender) minus online = the ones not reachable
+        lobby_all_non_sender = {aid for aid in users if aid != sender_id}
+        lobby_offline_ids = lobby_all_non_sender - _online
+        lobby_offline_list = [users.get(aid, {}).get("name", aid[:12]) for aid in lobby_offline_ids]
+        await _send(ws, {
+            "type": "ack",
+            "id": msg_id,
+            "delivery": {
+                "total": len(lobby_all_non_sender),
+                "sent": len(lobby_sent_list),
+                "offline": len(lobby_offline_list),
+                "targets": lobby_sent_list,
+                "offline_targets": lobby_offline_list,
+            }
+        })
     # R11 P1.1: Send delivery_status to admin senders
     if sender_role == "admin" and msg_id:
         online = set(_connections.keys())
@@ -1130,17 +1168,107 @@ async def handler(ws):
                                  agent_id[:12], msg.get("target", "")[:20])
                 # Fire-and-forget: 不回复 ACK
 
-            # ── R29: workspace_reset ───────────────────────────────
+            # ── R29/R34: workspace_reset ──────────────────────────
             elif msg_type == p.MSG_WORKSPACE_RESET and agent_id:
                 _users = auth.get_users()
                 if _users.get(agent_id, {}).get("role") != "admin":
                     await _send(ws, {"type": "error", "error": "权限不足：仅管理员可执行 workspace_reset"})
                     continue
 
+                workspace_id = msg.get("workspace_id", "").strip()
                 all_flag = msg.get("all", False)
                 target_id = msg.get("target", "").strip()
 
-                if all_flag:
+                # ── R34: Workspace-scoped reset ──────────────────
+                if workspace_id:
+                    ws_info = ws_mod.get_workspace(workspace_id)
+                    if not ws_info:
+                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 不存在"})
+                        continue
+                    if ws_info.state == ws_mod.WorkspaceState.CLOSING:
+                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 正在关闭中，无法重置"})
+                        continue
+                    if ws_info.state == ws_mod.WorkspaceState.ARCHIVED:
+                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 已归档，无法重置"})
+                        continue
+
+                    sender_name = _users.get(agent_id, {}).get("name", agent_id[:12])
+                    member_ids = ws_info.members
+
+                    reset_content = f"⚠️ 工作室 {workspace_id} 已重置，请各成员确认就位 🫡"
+                    broadcast_payload = {
+                        "type": "broadcast",
+                        "channel": workspace_id,
+                        "subtype": "workspace_reset",
+                        "force": True,
+                        "from_name": sender_name,
+                        "agent_id": agent_id,
+                        "from": sender_name,
+                        "from_agent": agent_id,
+                        "content": reset_content,
+                        "ts": time.time(),
+                    }
+                    broadcast_json = json.dumps(broadcast_payload)
+
+                    sent = 0
+                    offline = 0
+                    target_names = []
+                    offline_names = []
+                    _online = set(_connections.keys())
+
+                    for mid in member_ids:
+                        name = _users.get(mid, {}).get("name", mid[:12])
+                        if mid in _online:
+                            for conn in list(_connections.get(mid, set())):
+                                try:
+                                    if hasattr(conn, "send_str"):
+                                        await conn.send_str(broadcast_json)
+                                    elif hasattr(conn, "send"):
+                                        await conn.send(broadcast_json)
+                                    sent += 1
+                                except Exception:
+                                    pass
+                            target_names.append(name)
+                        else:
+                            offline += 1
+                            offline_names.append(name)
+                            _offline_push_queue.setdefault(mid, []).append({
+                                "type": "broadcast",
+                                "channel": workspace_id,
+                                "subtype": "workspace_reset",
+                                "force": True,
+                                "from_name": sender_name,
+                                "agent_id": agent_id,
+                                "content": reset_content,
+                                "ts": time.time(),
+                            })
+                            if mid not in _offline_timers:
+                                _offline_timers[mid] = asyncio.create_task(
+                                    _flush_offline_push(mid)
+                                )
+
+                        persistence.set_agent_channel(mid, workspace_id)
+
+                    persistence.save_agent_channels(config.DATA_DIR)
+                    write_chat_log(sender_name, reset_content, channel=workspace_id)
+
+                    reset_id = str(uuid.uuid4())
+                    await _send(ws, {
+                        "type": "ack",
+                        "id": reset_id,
+                        "delivery": {
+                            "total": len(member_ids),
+                            "sent": sent,
+                            "offline": offline,
+                            "targets": target_names,
+                            "offline_targets": offline_names,
+                        }
+                    })
+                    logger.info("Admin %s reset workspace '%s': %d sent, %d offline",
+                                 agent_id[:12], workspace_id, sent, offline)
+
+                # ── R29: Global reset (all: true) ────────────────
+                elif all_flag:
                     for aid in _users:
                         if aid != agent_id:
                             persistence.set_agent_channel(aid, p.LOBBY)
@@ -1148,6 +1276,8 @@ async def handler(ws):
                     logger.info("Admin %s reset ALL agents to lobby", agent_id[:12])
                     await _send(ws, {"type": "ack", "status": "ok",
                                      "message": f"✅ 已重置全部 {len(_users)} 个成员到 lobby"})
+
+                # ── R29: Single-target reset ─────────────────────
                 elif target_id:
                     if target_id not in _users:
                         for aid, u in _users.items():
@@ -1163,8 +1293,9 @@ async def handler(ws):
                                          "message": f"✅ 已重置 {target_name} 到 lobby"})
                     else:
                         await _send(ws, {"type": "error", "error": f"目标成员 '{msg.get('target', '')}' 不存在"})
+
                 else:
-                    await _send(ws, {"type": "error", "error": "请指定 target 或设置 all: true"})
+                    await _send(ws, {"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
 
             # ── R12 P0.3: Task ACK ──────────────────────────────
             elif msg_type == p.MSG_TASK_ACK and agent_id:
