@@ -43,6 +43,7 @@
 
 ### Step 4 — 方案 🏗️ 架构师
 产出：→ `docs/R33/tech-plan.md`
+- ✅ `4a0a5a3` — `docs(R33): Step 4 技术方案 — Web端三Bug修复`
 
 ### Step 5 — 方向审查 🧐 需求分析师
 产出：→ `docs/R33/direction-review.md`
