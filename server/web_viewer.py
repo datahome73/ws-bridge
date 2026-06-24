@@ -155,12 +155,12 @@ async def handle_api_check(request: web.Request) -> web.Response:
         # R8: Set session cookie (7 days) so client restores login on reopen
         resp = web.json_response({
             "approved": True,
-            "token": entry["token"],
+            "token": entry.get("token", ""),
             "name": entry.get("name", ""),
         })
         resp.set_cookie(
             "ws_im_session",
-            entry["token"],
+            entry.get("token", ""),
             max_age=604800,     # 7 days
             httponly=True,
             samesite="Lax",
