@@ -1,7 +1,7 @@
 # R38 开发计划 — 流水线任务状态机 + Agent 协作体系
 
-> **版本：** v0.1（草稿，待项目负责人审批）
-> **状态：** 📋 草稿
+> **版本：** v0.2
+> **状态：** ✅ Step 3 完成 — 技术方案 `156ac2d`，进入全员评审
 > **日期：** 2026-06-24
 > **需求文档：** [R38-product-requirements.md](R38-product-requirements.md)
 > **参考：** [A2A 协议调研报告](../A2A-Protocols-Research-Report.md)
@@ -55,21 +55,11 @@
 | 关键操作 | MSG_SET_ACTIVE_CHANNEL → ws:R38开发工作室 |
 | 全员回复 | 「已切」确认后点名完成 |
 
-#### ⬜ Step 3 — 技术方案 🏗️ arch-bot
+#### ✅ Step 3 — 技术方案 🏗️ arch-bot
 
-**需要覆盖的内容：**
-
-| # | 主题 | 涉及文件 | 参考 |
-|:-:|:-----|:---------|:-----|
-| ① | `TaskState` 枚举 + 协议常量 | `shared/protocol.py` | S-1, S-2 |
-| ② | Task 实例数据模型 + SQLite `task_store` 表 | `server/handler.py`, `server/message_store.py` | S-3, S-10 |
-| ③ | `_ADMIN_COMMANDS` 扩展（4 条新命令） | `server/handler.py` | S-4~S-9, S-12 |
-| ④ | `MSG_TASK_NOTIFY` 推送 | `server/handler.py` | S-11 |
-| ⑤ | Agent Card 配置文件/持久化表 | `server/` 或配置文件 | S-14, S-15 |
-| ⑥ | Web 端进度 Tab（新增 W-1~W-5） | `server/web_viewer.py`, `server/templates.py` | W-1~W-5 |
-| ⑦ | Web 端 Tab 排序规则（W-6） | `server/templates.py` | W-6 |
-| ⑧ | Web 端下拉刷新规则（W-7） | `server/templates.py` | W-7 |
-| ⑨ | 双入口同步 | `server/handler.py`, `server/__main__.py` | S-13 |
+- **产出：** `docs/R38/R38-tech-plan.md`（674 行）— `156ac2d`
+- 9 大主题全覆盖：TaskStore SQLite、_ADMIN_COMMANDS 4 条新命令、Agent Card 配置、Web 进度 Tab、Tab 排序/刷新规则、双入口同步
+- 20 条验收标准全覆盖映射表（§3）
 
 **PM 评审：** 方案提交后在工作室群内全员讨论，评审意见记录在方案文档中（不再出独立方向审查文档）
 
