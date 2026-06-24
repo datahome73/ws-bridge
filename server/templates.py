@@ -228,25 +228,25 @@ function renderTabBar() {
 
   // Tab 2: 活跃工作室 (conditional) — W-6: first, most-used
   if (TAB_STATE.tab2.visible && TAB_STATE.tab2.channel) {
-    html += '<div class="tab' + (activeTabId === 'tab2' ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\\'tab2\\')">' +
+    html += '<div class="tab' + (activeTabId === 'tab2' ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
       '📋 ' + escapeHtml(TAB_STATE.tab2.label.replace('📋 ', '')) + '</div>';
   }
 
   // Tab 1: 大厅 (always) — W-6: second
-  html += '<div class="tab' + (activeTabId === 'tab1' ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\\'tab1\\')">' +
+  html += '<div class="tab' + (activeTabId === 'tab1' ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">' +
     '🌐 大厅</div>';
 
   // Tab 4: 管理员 (always) — W-6: third
-  html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\\'tab4\\')">' +
+  html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\'tab4\')">' +
     '🔧 管理员</div>';
 
   // R38: Tab 5 — 📊 进度 (always) — W-6: fourth
-  html += '<div class="tab' + (activeTabId === 'tab5' ? ' active' : '') + '" data-tab="tab5" onclick="selectTab(\\'tab5\\')">' +
+  html += '<div class="tab' + (activeTabId === 'tab5' ? ' active' : '') + '" data-tab="tab5" onclick="selectTab(\'tab5\')">' +
     '📊 进度</div>';
 
   // Tab 3: 历史查看器 (always, pending style when no content loaded) — W-6: last
   const tab3Class = 'tab' + (activeTabId === 'tab3' ? ' active' : '') + (!TAB_STATE.tab3.channel ? ' pending' : '');
-  html += '<div class="' + tab3Class + '" data-tab="tab3" onclick="selectTab(\\'tab3\\')">' +
+  html += '<div class="' + tab3Class + '" data-tab="tab3" onclick="selectTab(\'tab3\')">' +
     '🗂️ ' + (TAB_STATE.tab3.channel ? escapeHtml(TAB_STATE.tab3.label.replace('🗂️ ', '')) : '历史查看器') + '</div>';
 
   bar.innerHTML = html;
@@ -320,6 +320,11 @@ async function loadMessages(channel) {
     }
     msgContainers[channel] = msgs;
     for (let i = 0; i < msgs.length; i++) {
+      // 🔧 F-8: Dedup by content hash (shared _seenMsgHashes with appendMessage)
+      const hash = (msgs[i].ts || '') + '|' + (msgs[i].sender || msgs[i].from_name || '') + '|' + (msgs[i].content || '').substring(0, 80);
+      const chKey = channel + '|' + hash;
+      if (_seenMsgHashes[chKey]) continue;
+      _seenMsgHashes[chKey] = true;
       const el = createMessageEl(msgs[i]);
       el.classList.add('new-msg');
       list.appendChild(el);

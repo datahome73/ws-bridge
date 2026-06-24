@@ -35,8 +35,11 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     """Append a chat message to channel-specific daily log file + buffer."""
     global _ws_clients, _chat_buffers
     ict_now = datetime.now(timezone.utc) + timedelta(hours=7)
-    ts = ict_now.strftime("%H:%M:%S")
-    line = f"[{ts}] {sender_name}: {content}"
+    # 🔧 F-8: Use numeric ts (time.time()) for dedup consistency with DB path
+    # Keep human-readable format for log file line
+    ts_human = ict_now.strftime("%H:%M:%S")
+    ts = time.time()
+    line = f"[{ts_human}] {sender_name}: {content}"
     safe_channel = channel.replace("/", "_").replace(":", "_")
 
     # Write to per-channel daily log file
@@ -198,12 +201,12 @@ async def handle_api_check(request: web.Request) -> web.Response:
         # R8: Set session cookie (7 days) so client restores login on reopen
         resp = web.json_response({
             "approved": True,
-            "token": entry["token"],
+            "token": entry.get("token", ""),
             "name": entry.get("name", ""),
         })
         resp.set_cookie(
             "ws_im_session",
-            entry["token"],
+            entry.get("token", ""),
             max_age=604800,     # 7 days
             httponly=True,
             samesite="Lax",
