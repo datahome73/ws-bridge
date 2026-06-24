@@ -486,7 +486,7 @@ async function renderProgressTab() {
         '<th style="padding:6px 12px;text-align:left;">环节</th>' +
         '<th style="padding:6px 12px;text-align:left;">状态</th></tr>';
       items.forEach(function(t) {
-        const icon = STATE_ICONS[t.transition.split(' → ').pop()] || '⬜';
+        const icon = STATE_ICONS[t.transition.split(' → ').pop().toLowerCase()] || '⬜';
         html += '<tr style="border-bottom:1px solid #21262d;">' +
           '<td style="padding:4px 12px;color:#8b949e;">' + icon + '</td>' +
           '<td style="padding:4px 12px;">' + escapeHtml(t.name) + '</td>' +
