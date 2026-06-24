@@ -169,6 +169,52 @@ MSG_ADMIN_AUDIT = "admin_audit"    # Server → Web: audit feed
 MSG_ROLLCALL_CONFIRM = "rollcall_confirm"   # Agent → Server: rollcall channel confirm
 MSG_ROLLCALL_VERIFY = "rollcall_verify"     # Server → Agent: rollcall verification
 
+# ── R38: Task State Machine ───────────────────────────────────────────
+from enum import Enum
+
+class TaskState(str, Enum):
+    """Task lifecycle states — pure-rule transitions enforced server-side."""
+    SUBMITTED = "submitted"          # ⬜ 已排入流水线，等待执行者
+    WORKING = "working"              # ▶ 正在处理
+    COMPLETED = "completed"          # ✅ 完成（终态）
+    FAILED = "failed"                # ❌ 锁定失败（终态）
+    CANCELED = "canceled"            # ⛔ 已取消（终态）
+    INPUT_REQUIRED = "input_required"  # 🟡 退回修复
+
+# Valid state transitions (pure-rule matrix per §2.1 requirements)
+TASK_VALID_TRANSITIONS = {
+    TaskState.SUBMITTED:       {TaskState.WORKING},
+    TaskState.WORKING:         {TaskState.COMPLETED, TaskState.INPUT_REQUIRED,
+                                 TaskState.FAILED, TaskState.CANCELED},
+    TaskState.INPUT_REQUIRED:  {TaskState.WORKING, TaskState.FAILED},
+    # COMPLETED, FAILED, CANCELED are terminal — no outgoing transitions
+}
+
+# State → display icon mapping (for WORK_PLAN alignment)
+TASK_STATE_ICONS = {
+    "submitted": "⬜",
+    "working": "▶",
+    "completed": "✅",
+    "failed": "❌",
+    "canceled": "⛔",
+    "input_required": "🟡",
+}
+
+# R38: Task state machine message types
+MSG_TASK_CREATE = "task_create"    # Create new Task instance
+MSG_TASK_UPDATE = "task_update"    # Update Task state (validated transition)
+MSG_TASK_QUERY = "task_query"      # Query Tasks by context
+MSG_TASK_NOTIFY = "task_notify"    # Push notification on state change
+
+# R38: Task-specific field constants
+FIELD_CONTEXT_ID = "context_id"       # Round ID (e.g. "R38")
+FIELD_TASK_STATE = "state"            # Current TaskState value
+FIELD_TASK_NAME = "name"              # Task display name
+FIELD_ASSIGNED_ROLE = "assigned_role" # Executor role ID
+FIELD_OUTPUT_REFS = "output_refs"     # Output references (JSON array)
+FIELD_REJECT_COUNT = "reject_count"   # Rejection counter (max 2)
+
+
 def normalize_ws_url(raw: str) -> str:
     """Normalize a URL to WebSocket scheme."""
     raw = raw.strip().rstrip("/")
