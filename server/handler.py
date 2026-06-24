@@ -884,6 +884,27 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
             logger.info("Channel [%s] %s→%s: %s", channel, sender_name, ",".join(target_names), content[:60])
             write_chat_log(sender_name, content, channel=channel)
+
+            # ── R37 B-2: Parse "已切" confirmation during active roll-call ──
+            if content.strip() == "已切" and resolved_workspace:
+                ws_ch = resolved_workspace.id
+                if _rollcall_active.get(ws_ch, False):
+                    _rollcall_confirmed.setdefault(ws_ch, set()).add(sender_id)
+                    confirmed = len(_rollcall_confirmed[ws_ch])
+                    total = len(resolved_workspace.members)
+                    await _send(ws, {
+                        "type": "broadcast",
+                        "channel": ws_ch,
+                        "from_name": "系统",
+                        "from": "系统",
+                        "content": f"✅ 已确认 {confirmed}/{total} 成员切换。",
+                        "ts": time.time(),
+                    })
+                    # Auto-check: if all confirmed, run verification
+                    if confirmed >= total:
+                        asyncio.create_task(_notify_rollcall_complete(ws_ch))
+                        logger.info("R37: All %d members confirmed channel switch for '%s'", total, ws_ch)
+
             return
     # ── R24: Lobby routing with prefix classification ─────────────────
     if channel == p.LOBBY:
@@ -1142,26 +1163,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                 "R37: Auto MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
                 target_ch, online_switch,
             )
-
-    # R37 B-2: Parse "已切" confirmation during active roll-call
-    if content.strip() == "已切" and resolved_workspace:
-        ws_ch = resolved_workspace.id
-        if _rollcall_active.get(ws_ch, False):
-            _rollcall_confirmed.setdefault(ws_ch, set()).add(sender_id)
-            confirmed = len(_rollcall_confirmed[ws_ch])
-            total = len(resolved_workspace.members)
-            await _send(ws, {
-                "type": "broadcast",
-                "channel": ws_ch,
-                "from_name": "系统",
-                "from": "系统",
-                "content": f"✅ 已确认 {confirmed}/{total} 成员切换。",
-                "ts": time.time(),
-            })
-            # Auto-check: if all confirmed, run verification
-            if confirmed >= total:
-                asyncio.create_task(_notify_rollcall_complete(ws_ch))
-                logger.info("R37: All %d members confirmed channel switch for '%s'", total, ws_ch)
 
 
 # ── R11 P2.2: Membership change notification ────────────────────
