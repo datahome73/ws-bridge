@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import uuid
+
 import aiohttp
 from aiohttp import web
 
@@ -55,6 +57,20 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
         _chat_buffers[channel] = []
     entry = {"ts": ts, "sender": sender_name, "content": content}
     _chat_buffers[channel].append(entry)
+    # R36 D-1: Persist to message store for DB-backed retrieval
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="broadcast",
+            from_agent=sender_name,
+            from_name=sender_name,
+            content=content,
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+            channel=channel,
+        )
+    except Exception:
+        pass
     if len(_chat_buffers[channel]) > _MAX_BUFFER:
         _chat_buffers[channel][:100] = []
 
@@ -73,31 +89,61 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     _ws_clients -= dead
 
 
-def read_today_log(channel: str = "lobby") -> list[dict]:
-    """Read today's chat log from channel-specific file."""
+def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
+    """Read chat logs from channel-specific files, spanning multiple days.
+    
+    Args:
+        channel: Channel name (default "lobby").
+        days: Number of days to look back (default 1 = today only).
+              Specify 7 for a week's worth of logs.
+    
+    Returns:
+        List of message dicts, newest first.
+    """
+    # Try in-memory buffer first (always has latest)
     if channel in _chat_buffers and _chat_buffers[channel]:
-        return list(_chat_buffers[channel])
-    today = _today_str()
-    safe_channel = channel.replace("/", "_").replace(":", "_")
-    path = config.CHAT_LOG_DIR / f"chat_{today}_{safe_channel}.log"
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        result = list(_chat_buffers[channel])
+    else:
         result = []
-        for line in lines:
-            if not line:
-                continue
-            if line.startswith("[") and "] " in line:
-                rest = line[1:].split("] ", 1)
-                ts = rest[0]
-                rest2 = rest[1].split(": ", 1) if len(rest) > 1 else ["", ""]
-                sender = rest2[0] if len(rest2) > 0 else ""
-                content = rest2[1] if len(rest2) > 1 else ""
-                result.append({"ts": ts, "sender": sender, "content": content})
-        return result
-    except OSError:
-        return []
+
+    safe_channel = channel.replace("/", "_").replace(":", "_")
+    seen_entries = set()
+    # Dedup: mark buffer entries so we don't double-add from files
+    for e in result:
+        seen_entries.add((e["ts"], e["sender"], e["content"], "buffer"))
+
+    # Read from log files, going back 'days' days
+    for offset in range(days):
+        d = datetime.now(timezone.utc) + timedelta(hours=7) - timedelta(days=offset)
+        day_str = d.strftime("%Y-%m-%d")
+        path = config.CHAT_LOG_DIR / f"chat_{day_str}_{safe_channel}.log"
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").strip().split("\n")
+            for line in reversed(lines):
+                if not line:
+                    continue
+                if line.startswith("[") and "] " in line:
+                    rest = line[1:].split("] ", 1)
+                    ts = rest[0]
+                    rest2 = rest[1].split(": ", 1) if len(rest) > 1 else ["", ""]
+                    sender = rest2[0] if len(rest2) > 0 else ""
+                    msg_content = rest2[1] if len(rest2) > 1 else ""
+                    key = (ts, sender, msg_content, day_str)
+                    if key not in seen_entries:
+                        seen_entries.add(key)
+                        result.append({"ts": ts, "sender": sender, "content": msg_content})
+        except OSError:
+            continue
+
+    # Return newest first (most recent = last appended to result list)
+    result.reverse()
+    return result
+
+
+# R36 D-2: Keep backward-compat alias
+read_today_log = read_channel_logs
 
 
 # ── Auth helpers ──────────────────────────────────────────────────
@@ -188,8 +234,8 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     except Exception:
         pass
 
-    # Fallback to log file (log returns oldest→newest, reverse for newest→oldest)
-    messages = read_today_log(channel)
+    # Fallback to log file — R36 D-2: multi-day fallback (days=7 for broader history)
+    messages = read_channel_logs(channel, days=7)
     if messages:
         msgs = messages[-limit:]
         msgs.reverse()
