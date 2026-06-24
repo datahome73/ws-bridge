@@ -611,6 +611,22 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 else:
                     await ws.send_json({"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
 
+            # ── R38: MSG_TASK_NOTIFY relay ──────────────────────────
+            elif msg_type == p.MSG_TASK_NOTIFY and agent_id:
+                # Server-side push — relay to Web clients via write_chat_log
+                # (agent-side handling is done in handler.py's _broadcast_task_notify)
+                task_info = data.get("task", {})
+                transition = data.get("transition", "")
+                name = task_info.get("name", "?")
+                ctx = task_info.get("context_id", "?")
+                state = task_info.get("state", "?")
+                notify_text = f"📊 {ctx} {name}: {transition}"
+                write_chat_log("系统", notify_text, channel=p.ADMIN_CHANNEL)
+                logger.info(
+                    "R38 task_notify relayed to web: %s/%s → %s",
+                    ctx, name, state,
+                )
+
             else:
                 await ws.send_json({"type": "error", "error": "Unknown msg or not authenticated"})
 
@@ -787,6 +803,12 @@ def main():
 
     # Initialise message store
     init_db(DATA_DIR)
+
+    # R38: Initialise Task store + Agent Cards
+    from .task_store import init_db as init_task_store
+    init_task_store(DATA_DIR)
+    from .agent_card import load_cards
+    load_cards()
 
     # Initialise workspace module
     ws_mod.init()

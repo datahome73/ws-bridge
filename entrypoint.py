@@ -42,6 +42,12 @@ app.router.add_get("/api/workspaces", _ws_api.api_workspaces)
 # Init message store DB
 init_db(cfg.DATA_DIR)
 
+# R38: Init Task store + Agent Cards
+from server.task_store import init_db as init_task_store
+init_task_store(cfg.DATA_DIR)
+from server.agent_card import load_cards
+load_cards()
+
 print(f"READY: http://{HOST}:{PORT}/", flush=True)
 
 web.run_app(app, host=HOST, port=PORT, print=lambda *a: None)
