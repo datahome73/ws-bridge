@@ -1,11 +1,15 @@
 # R38 技术方案 — 流水线任务状态机 + Agent 协作体系
 
-> **版本：** v1.0
-> **状态：** ✅ 初次提交
+> **版本：** v1.1
+> **状态：** ✅ 小谷审查通过（2 条建议已采纳）
 > **架构师：** 🏗️ 小开
 > **日期：** 2026-06-24
 > **需求文档：** [R38-product-requirements.md](R38-product-requirements.md)
 > **开发计划：** [WORK_PLAN.md](WORK_PLAN.md)
+
+**v1.0 → v1.1 变更（审查建议采纳）：**
+- `_cmd_task_update` 增加自质量门校验：发送者必须是 Task 的 `assigned_role` 或全局管理员
+- Agent Card 配置路径修正：项目根目录 `config/agent_cards.json`（不再放 `data/` 下）
 
 ---
 
@@ -158,7 +162,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
 
 **权限设计：**
 - `task_create` — P3（工作室管理员），工作区范围
-- `task_update` — P3（工作室管理员），工作区范围
+- `task_update` — P3（工作室管理员），工作区范围。**注意：** handler 内部额外校验发送者必须是 Task 的 `assigned_role` 或全局管理员（自质量门），P3 仅控制能否进入命令处理器
 - `task_query` — P1（全部成员），无工作区限制
 - `task_list` — P1（全部成员），无工作区限制
 
@@ -202,6 +206,11 @@ async def _cmd_task_update(sender_id: str, params: dict) -> str:
     task = task_store.get_task(task_id)
     if not task:
         return f"❌ Task {task_id} 不存在"
+
+    # R38 v1.1: 自质量门 — 发送者必须是 Task 的 assigned_role 或全局管理员
+    if task.get("assigned_role") and not auth.is_global_admin(sender_id):
+        if sender_id != task["assigned_role"]:
+            return f"❌ 权限不足：Task 分配给 {task['assigned_role']}，你不可更新"
     
     success = task_store.update_task_state(task_id, new_state)
     if not success:
@@ -363,17 +372,22 @@ import json
 from pathlib import Path
 
 _cards: dict = {}
-_CARDS_PATH = Path("config/agent_cards.json")
+# 项目根目录下的 config/agent_cards.json（与 data/ 同级）
+_CARDS_PATH = Path(__file__).parent.parent / "config" / "agent_cards.json"
 
 def load_cards(data_dir: Path) -> None:
-    """Load Agent Card definitions from config file."""
+    """Load Agent Card definitions from config file.
+
+    Looks for config/agent_cards.json at project root.
+    'data_dir' parameter kept for signature compatibility with init_task_store.
+    """
     global _cards
-    path = data_dir / _CARDS_PATH
-    if path.exists():
-        _cards = json.loads(path.read_text())
+    if _CARDS_PATH.exists():
+        _cards = json.loads(_CARDS_PATH.read_text())
     else:
         _cards = {}
-    logger.info("Loaded %d agent cards", len(_cards))
+        logger.warning("Agent Card config not found at %s, using empty set", _CARDS_PATH)
+    logger.info("Loaded %d agent cards from %s", len(_cards), _CARDS_PATH)
 
 def get_agent_card(agent_id: str) -> dict | None:
     """Get Agent Card by ID. Returns None if not found."""
