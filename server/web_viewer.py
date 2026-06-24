@@ -33,8 +33,11 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     """Append a chat message to channel-specific daily log file + buffer."""
     global _ws_clients, _chat_buffers
     ict_now = datetime.now(timezone.utc) + timedelta(hours=7)
-    ts = ict_now.strftime("%H:%M:%S")
-    line = f"[{ts}] {sender_name}: {content}"
+    # 🔧 F-8: Use numeric ts (time.time()) for dedup consistency with DB path
+    # Keep human-readable format for log file line
+    ts_human = ict_now.strftime("%H:%M:%S")
+    ts = time.time()
+    line = f"[{ts_human}] {sender_name}: {content}"
     safe_channel = channel.replace("/", "_").replace(":", "_")
 
     # Write to per-channel daily log file

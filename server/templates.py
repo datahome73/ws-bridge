@@ -320,6 +320,11 @@ async function loadMessages(channel) {
     }
     msgContainers[channel] = msgs;
     for (let i = 0; i < msgs.length; i++) {
+      // 🔧 F-8: Dedup by content hash (shared _seenMsgHashes with appendMessage)
+      const hash = (msgs[i].ts || '') + '|' + (msgs[i].sender || msgs[i].from_name || '') + '|' + (msgs[i].content || '').substring(0, 80);
+      const chKey = channel + '|' + hash;
+      if (_seenMsgHashes[chKey]) continue;
+      _seenMsgHashes[chKey] = true;
       const el = createMessageEl(msgs[i]);
       el.classList.add('new-msg');
       list.appendChild(el);
