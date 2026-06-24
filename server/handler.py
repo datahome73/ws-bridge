@@ -596,7 +596,7 @@ async def _cmd_task_create(sender_id: str, params: dict) -> str:
     context_id = params.get("context", "")
     name = params.get("name", "")
     if not context_id or not name:
-        return f"❌ 用法：!task_create --context <R{N}> --name <step> [--role <role>]"
+        return "❌ 用法：!task_create --context <R{N}> --name <step> [--role <role>]"
     assigned_role = params.get("role", "")
     task = ts.create_task(
         context_id=context_id, name=name,
