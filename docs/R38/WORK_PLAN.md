@@ -1,7 +1,7 @@
 # R38 开发计划 — 流水线任务状态机 + Agent 协作体系
 
-> **版本：** v0.2
-> **状态：** ✅ Step 3 完成 — 技术方案 `156ac2d`，进入全员评审
+> **版本：** v1.0
+> **状态：** ✅ Step 3 完成 — 技术方案 `156ac2d`，进入全员评审 → Step 4
 > **日期：** 2026-06-24
 > **需求文档：** [R38-product-requirements.md](R38-product-requirements.md)
 > **参考：** [A2A 协议调研报告](../A2A-Protocols-Research-Report.md)
@@ -55,7 +55,7 @@
 | 关键操作 | MSG_SET_ACTIVE_CHANNEL → ws:R38开发工作室 |
 | 全员回复 | 「已切」确认后点名完成 |
 
-#### ✅ Step 3 — 技术方案 🏗️ arch-bot
+#### ✅ Step 3 — 技术方案 🏗️ arch-bot (156ac2d)
 
 - **产出：** `docs/R38/R38-tech-plan.md`（674 行）— `156ac2d`
 - 9 大主题全覆盖：TaskStore SQLite、_ADMIN_COMMANDS 4 条新命令、Agent Card 配置、Web 进度 Tab、Tab 排序/刷新规则、双入口同步
