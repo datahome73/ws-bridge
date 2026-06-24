@@ -54,7 +54,11 @@
 | 关键操作 | MSG_SET_ACTIVE_CHANNEL → ws:R39开发工作室 |
 | 全员回复 | 「已切」确认后点名完成 |
 
-#### ⬜ Step 3 — 验证方案 🏗️ arch-bot
+#### ✅ Step 3 — 验证方案 🏗️ arch-bot ✅
+
+> 产出：`docs/R39/R39-verification-plan.md` (e0e7de6)
+> 
+> 覆盖 V-1~V-12 全部验证项，含 Part A（验证步骤+期望结果+代码追踪）和 Part B（条件性修复方案 FIX-A~FIX-D）。
 
 由于本轮是「先验证再决定修不修」，技术方案分为两部分：
 
