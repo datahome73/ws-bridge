@@ -767,7 +767,6 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
 }
 
-
 # ── R38: Task notify broadcast ─────────────────────────────────────
 
 
@@ -776,7 +775,10 @@ async def _broadcast_task_notify(
         transition: str,
         ) -> None:
         """Broadcast MSG_TASK_NOTIFY to workspace members of the task's context.
-        transition is a short description e.g. 'SUBMITTED → IN_PROGRESS'."""
+
+        transition is a short description e.g. 'SUBMITTED → WORKING'.
+        Also pushes to web viewer WS clients for live progress updates.
+        """
         context_id = task.get("context_id", "")
         if not context_id:
             return
@@ -803,6 +805,20 @@ async def _broadcast_task_notify(
                         await conn.send(payload)
                 except Exception:
                     pass
+
+        # Push to web viewer WS clients
+        try:
+            from .web_viewer import _ws_clients as _web_clients
+            dead = set()
+            for ws in _web_clients:
+                try:
+                    ws.send_str(payload)
+                except Exception:
+                    dead.add(ws)
+            _web_clients -= dead
+        except ImportError:
+            pass
+
         logger.info("task_notify '%s' → %s (%s)", task["name"], context_id, transition)
 
 
