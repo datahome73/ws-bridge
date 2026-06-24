@@ -613,7 +613,8 @@ async def _cmd_task_create(sender_id: str, params: dict) -> str:
 async def _cmd_task_update(sender_id: str, params: dict) -> str:
     """Update a task's state.
     Usage: !task_update <task_id> --state <new_state> [--output <path>]"""
-    task_id = params.get("_task_id", "")
+    positional = params.get("_positional", [])
+    task_id = params.get("_task_id", positional[0] if positional else "")
     new_state = params.get("state", "")
     if not task_id or not new_state:
         return "❌ 用法：!task_update <task_id> --state <new_state> [--output <path>]"
@@ -658,7 +659,8 @@ async def _cmd_task_update(sender_id: str, params: dict) -> str:
 async def _cmd_task_query(sender_id: str, params: dict) -> str:
     """Query tasks by context or single task.
     Usage: !task_query --context <R{N}> | !task_query <task_id>"""
-    task_id = params.get("_task_id", "")
+    positional = params.get("_positional", [])
+    task_id = params.get("_task_id", positional[0] if positional else "")
     context_id = params.get("context", "")
     if task_id:
         task = ts.get_task(task_id, config.DATA_DIR)
