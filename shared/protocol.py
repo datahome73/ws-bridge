@@ -214,6 +214,9 @@ FIELD_ASSIGNED_ROLE = "assigned_role" # Executor role ID
 FIELD_OUTPUT_REFS = "output_refs"     # Output references (JSON array)
 FIELD_REJECT_COUNT = "reject_count"   # Rejection counter (max 2)
 
+# Max reject count before auto-FAILED (§2.1 requirements)
+TASK_REJECT_CEILING = 2
+
 
 def normalize_ws_url(raw: str) -> str:
     """Normalize a URL to WebSocket scheme."""

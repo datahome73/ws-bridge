@@ -678,8 +678,7 @@ async def _cmd_task_query(sender_id: str, params: dict) -> str:
             return f"📋 Context {context_id} 暂无 Task"
         lines = [f"📋 {context_id} 任务列表 ({len(tasks)}):"]
         for t in tasks:
-            icon = {"pending": "⏸️", "in_progress": "🔄", "completed": "✅",
-                    "failed": "❌", "canceled": "⛔", "blocked": "🟡"}.get(t["state"], "❓")
+            icon = p.TASK_STATE_ICONS.get(t["state"], "❓")
             lines.append(f"  {icon} {t['name']:20s} [{t['state']}]  {t['id'][:8]}")
         return "\n".join(lines)
     else:
@@ -695,8 +694,7 @@ async def _cmd_task_list(sender_id: str, params: dict) -> str:
         return "📋 暂无 Task"
     lines = [f"📋 最近 {len(tasks)} 个 Task:"]
     for t in tasks:
-        icon = {"pending": "⏸️", "in_progress": "🔄", "completed": "✅",
-                "failed": "❌", "canceled": "⛔", "blocked": "🟡"}.get(t["state"], "❓")
+        icon = p.TASK_STATE_ICONS.get(t["state"], "❓")
         lines.append(f"  {icon} [{t['context_id']}] {t['name']:20s} [{t['state']}]  {t['id'][:8]}")
     return "\n".join(lines)
 
