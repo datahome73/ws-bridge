@@ -8,9 +8,9 @@ message field names and protocol constants.
 import os
 # ── Message Types ────────────────────────────────────────────────
 
-MSG_AUTH = "auth"           # Client → Server: authenticate
-MSG_AUTH_OK = "auth_ok"     # Server → Client: auth success
-MSG_AUTH_ERROR = "auth_error"
+MSG_AUTH="***"           # Client → Server: authenticate
+MSG_AUTH_OK="***"     # Server → Client: auth success
+MSG_AUTH_ERROR="***"
 MSG_PAIRING_CODE = "pairing_code"
 MSG_APPROVE = "approve"
 MSG_APPROVE_OK = "approve_ok"
@@ -122,20 +122,20 @@ MSG_WORKSPACE_ASSIGNED = "workspace_assigned"
 FIELD_MEMBER_EVENT = "event"  # "joined" | "removed"
 
 # ── R10: Token Ring ───────────────────────────────────────────────────────
-MSG_TOKEN_SET_MODE = "token_set_mode"       # Admin → Server: set token/free mode
-MSG_TOKEN_MODE_SET = "token_mode_set"        # Server → Admin: confirm mode set
-MSG_TOKEN_SET_ORDER = "token_set_order"      # Admin → Server: set order
-MSG_TOKEN_ORDER_SET = "token_order_set"      # Server → Admin: confirm order set
-MSG_TOKEN_ADVANCE = "token_advance"          # Admin → Server: advance token
-MSG_TOKEN_ADVANCED = "token_advanced"        # Server → Admin: confirm advance
-MSG_TOKEN_SKIP = "token_skip"               # Admin → Server: skip current
-MSG_TOKEN_SKIPPED = "token_skipped"          # Server → Admin: confirm skip
-MSG_TOKEN_STATUS = "token_status"           # Any → Server: query status
-MSG_TOKEN_STATUS_RESULT = "token_status_result"  # Server → Any: status response
-FIELD_TOKEN_MODE = "mode"                    # "token" | "free"
-FIELD_TOKEN_CURRENT = "current_token"        # int
-FIELD_TOKEN_ORDER = "order"                  # list[str]
-FIELD_TOKEN_REPLY_TO = "reply_to"            # str | None
+MSG_TOKEN_SET_MODE="***"       # Admin → Server: set token/free mode
+MSG_TOKEN_MODE_SET="***"        # Server → Admin: confirm mode set
+MSG_TOKEN_SET_ORDER="***"      # Admin → Server: set order
+MSG_TOKEN_ORDER_SET="***"      # Server → Admin: confirm order set
+MSG_TOKEN_ADVANCE="***"          # Admin → Server: advance token
+MSG_TOKEN_ADVANCED="***"        # Server → Admin: confirm advance
+MSG_TOKEN_SKIP="***"               # Admin → Server: skip current
+MSG_TOKEN_SKIPPED="***"          # Server → Admin: confirm skip
+MSG_TOKEN_STATUS="***"           # Any → Server: query status
+MSG_TOKEN_STATUS_RESULT="***"  # Server → Any: status response
+FIELD_TOKEN_MODE="***"                    # "token" | "free"
+FIELD_TOKEN_CURRENT="***"        # int
+FIELD_TOKEN_ORDER="***"                  # list[str]
+FIELD_TOKEN_REPLY_TO="***"            # str | None
 
 # ── Workspace / Channel Fields ────────────────────────────────────
 FIELD_CHANNEL = "channel"
@@ -163,7 +163,11 @@ ROLE_UNREGISTERED = "unregistered"
 
 # ── R35: Admin Channel ──────────────────────────────────────────
 ADMIN_CHANNEL = "_admin"
+MSG_ADMIN_AUDIT = "admin_audit"    # Server → Web: audit feed
 
+# ── R37: Rollcall & Workspace-Lifecycle ──────────────────────────────────
+MSG_ROLLCALL_CONFIRM = "rollcall_confirm"   # Agent → Server: rollcall channel confirm
+MSG_ROLLCALL_VERIFY = "rollcall_verify"     # Server → Agent: rollcall verification
 
 def normalize_ws_url(raw: str) -> str:
     """Normalize a URL to WebSocket scheme."""
