@@ -103,16 +103,19 @@
 #### 🔴 Step 5 — 代码审查 🔍 review-bot ❌ 不通过
 
 **审查报告：** [R40-code-review.md](R40-code-review.md)
-**审查结果：** 🔴 不通过（2 个致命问题）
 
-| # | 问题 | 文件 | 严重度 |
-|:-:|:-----|:-----|:------:|
-| F-1 | BIND_TEMPLATE JS 被 `</script>` 截断，`init()` 移到 `<script>` 外无法执行 | `server/templates.py:46-49` | 🔴 致命 |
-| F-2 | `/api/agents/status` 路由重复注册（L534-L535），aiohttp 启动异常 | `server/web_viewer.py:534-535` | 🔴 致命 |
-| W-1 | OAuth state 单值存储，多用户并发覆盖 | `server/web_viewer.py:406` | ⚠️ 建议 |
-| W-2 | redirect_uri 未 URL 编码 | `server/web_viewer.py:409-411` | ⚠️ 建议 |
-| W-3 | Cookie 缺少 secure=True | `server/web_viewer.py:490-497` | ⚠️ 建议 |
-| W-4 | 默认 redirect_uri 使用 0.0.0.0 | `server/config.py:25` | ⚠️ 建议 |
+**复审 commit `8a61395` 结果：** 🔴 仍未通过
+
+| # | 问题 | 修复状态 | 说明 |
+|:-:|:-----|:--------:|:------|
+| F-1 | JS 截断 (`templates.py`) | 🔴 **仍不通过** | 修复误删了原始 `<script>` 标签，`async function init()` 仍在 `<script>` 外 |
+| F-2 | 重复路由 (`web_viewer.py:534-535`) | 🟢 **通过** | 已删除 duplicate |
+| W-1 | OAuth state 并发 | 🟢 **通过** | 改 dict + pop 消费 |
+| W-2 | redirect_uri 未编码 | 🟢 **通过** | 加 `urlparse.quote()` |
+| W-3 | Cookie secure | 🟢 **通过** | 动态判断 HTTPS |
+| W-4 | 默认 0.0.0.0 | ⚪ 未修（不阻塞） | 已有环境变量覆盖 |
+
+**待修复：** F-1 需在 `<!-- R40: ... -->` 后补充缺失的 `<script>` 开标签，使 `async function init()` 回到 `<script>` 块内。
 
 #### ⬜ Step 6 — 测试验证 🦐 qa-bot
 

@@ -156,4 +156,38 @@ os.environ.get("WS_PUBLIC_URL", "http://0.0.0.0:8765") + "/auth/github/callback"
 | **建议修复** | W-1 ~ W-4（并发、编码、安全、默认值） |
 | **通过项** | 1, 2, 3, 5（CSRF/日志/解析/错误信息） |
 
-**修复要求：** 必须先修正 F-1（BIND_TEMPLATE JS 截断）和 F-2（重复路由注册），建议同时处理 W-1~W-4，然后重新提交审查。
+---
+
+## 复审记录（commit `8a61395` — 2026-06-25）
+
+| # | 修复项 | 状态 | 说明 |
+|:-:|:-------|:----:|:------|
+| F-1 | JS 截断 — 修复 `templates.py` | 🔴 **未通过** | 详见下文 |
+| F-2 | 重复路由 — 修复 `web_viewer.py` | 🟢 **通过** |
+| W-1 | OAuth state 并发 — dict + pop | 🟢 **通过** |
+| W-2 | redirect_uri URL 编码 | 🟢 **通过** |
+| W-3 | Cookie secure 动态判断 | 🟢 **通过** |
+
+### 🔴 F-1 修复仍有问题：`<script>` 标签也被删除了
+
+**当前文件状态（`server/templates.py` 第 45-64 行）：**
+```html
+</div>                         ← line 45
+<!-- R40: ... -->             ← line 46 (HTML comment)
+async function init() {       ← line 47 — 不在 <script> 内！
+...
+init();                       ← line 63
+</script>                     ← line 64 — 孤儿 </script>，无匹配 <open>
+```
+
+**根因分析：** R40（cc7cb3e）在原始 `<script>` 标签和 `async function init()` **之间** 插入了 3 行（注释+`</script>`）。修复时误将原始 `<script>` 标签（第 46 行，原第 35 行）一同删除。
+
+**正确修复方案：** 删除的 3 行应为 R40 新增的 2 行注释 + 1 行 `</script>`，保留原始 `<script>` 开标签。正确结果：
+```html
+</div>
+<!-- R40: GitHub login button; server returns 501 if unconfigured -->
+<script>
+async function init() {
+```
+
+**当前结论：** F-1 仍未修复，`<script>` 标签缺失，BIND_TEMPLATE 的 JS 初始化代码 `init()` 无法执行。需 dev-bot 补充 `<script>` 开标签后重新提交。
