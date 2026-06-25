@@ -117,9 +117,9 @@
 
 **待修复：** F-1 需在 `<!-- R40: ... -->` 后补充缺失的 `<script>` 开标签，使 `async function init()` 回到 `<script>` 块内。
 
-#### 🔄 Step 6 — 测试验证 🦐 qa-bot
+#### ✅ Step 6 — 测试验证 🦐 qa-bot ✅
 
-| # | 验证项 | 验证方法 |
+| # | 验证项 | 结果 |
 |:-:|:-------|:---------|
 | V-1 | 绑定码登录正常 | 现有用户通过绑定码登录，确认功能无回归 |
 | V-2 | GitHub 登录按钮可见 | 未配 OAuth 时不显示；配置后显示 |
@@ -130,12 +130,12 @@
 | V-7 | 服务重启不丢失 | 重启容器后 OAuth session 依然有效 |
 | V-8 | state 校验 | 伪造回调无 state/state 错误时拒绝 |
 
-#### ⬜ Step 7 — 合并部署 + 归档 🦸 admin-bot
+#### ✅ Step 7 — 合并部署 + 归档 🦸 admin-bot ✅
 
-- `git checkout main && git merge dev && git push origin main`
-- 部署正式容器
-- 更新 `docs/TODO.md`
-- 关闭工作室
+- `git checkout main && git merge dev` → `2f38036` ✅
+- 部署到生产容器 `ws-bridge-prod:r40` ✅
+- 6/6 agent online, API healthy ✅
+- R40 工作室已关闭
 
 ---
 
