@@ -89,7 +89,7 @@
 5. **配置缺失保护**
    - 未设 `GITHUB_OAUTH_CLIENT_ID` 时，页面不显示 GitHub 登录按钮
 
-#### 🔄 Step 4 — 编码 💻 dev-bot
+#### ✅ Step 4 — 编码 💻 dev-bot ✅ `cc7cb3e`
 
 **编码清单：**
 
@@ -100,7 +100,7 @@
 
 **Commit 格式：** `feat(R40): <描述>`
 
-#### ⬜ Step 5 — 代码审查 🔍 review-bot
+#### 🔄 Step 5 — 代码审查 🔍 review-bot
 
 审查重点：
 
