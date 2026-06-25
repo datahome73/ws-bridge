@@ -44,6 +44,7 @@ p{color:#8b949e;font-size:0.9rem;margin-bottom:24px;}
   </a>
 </div>
 <!-- R40: GitHub login button; server returns 501 if unconfigured -->
+<script>
 async function init() {
   const resp = await fetch('/api/bind');
   const data = await resp.json();
