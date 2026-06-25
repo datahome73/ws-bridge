@@ -71,7 +71,7 @@ CHAT_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🌉 WS Bridge</title>
+<title>WSIM</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;}
@@ -135,7 +135,10 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 </head>
 <body>
 <div class="header">
-  <h1>🌉 WS Bridge <span class="live-badge"><span class="live-dot"></span>实时</span></h1>
+  <div style="display:flex;flex-direction:column;gap:2px;">
+    <h1 style="margin:0;font-size:1.1rem;">WSIM</h1>
+    <div><span class="live-badge"><span class="live-dot"></span>实时</span></div>
+  </div>
   <div class="right-group" style="display:flex;align-items:center;gap:8px;">
     <button id="wsListBtn" class="ws-list-btn" title="工作室列表">📋 <span class="ws-btn-label">历史工作室</span></button>
     <button id="toggleSearchBtn" class="ws-list-btn" title="搜索" style="margin-right:0;">🔍</button>
@@ -144,6 +147,7 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
     <button id="logoutBtn" style="font-size:0.7rem;cursor:pointer;background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:2px 6px;margin-left:4px;">登出</button>
   </div>
 </div>
+
 
 <div class="search-bar" id="searchBar" style="display:none;">
   <input type="text" id="searchInput" placeholder="搜索当前频道消息…" style="flex:1;max-width:400px;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#c9d1d9;font-size:0.85rem;outline:none;">
