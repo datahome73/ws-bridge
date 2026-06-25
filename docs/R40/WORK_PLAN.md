@@ -100,15 +100,19 @@
 
 **Commit 格式：** `feat(R40): <描述>`
 
-#### 🔄 Step 5 — 代码审查 🔍 review-bot
+#### 🔴 Step 5 — 代码审查 🔍 review-bot ❌ 不通过
 
-审查重点：
+**审查报告：** [R40-code-review.md](R40-code-review.md)
+**审查结果：** 🔴 不通过（2 个致命问题）
 
-- OAuth 回调中的 CSRF state 校验
-- token 和 secret 不在日志中泄露
-- `OAUTH_NAME_MAP` 解析健壮性（空值、格式错误）
-- 配置缺失时 GitHub 登录按钮不显示
-- 错误路径不暴露敏感信息
+| # | 问题 | 文件 | 严重度 |
+|:-:|:-----|:-----|:------:|
+| F-1 | BIND_TEMPLATE JS 被 `</script>` 截断，`init()` 移到 `<script>` 外无法执行 | `server/templates.py:46-49` | 🔴 致命 |
+| F-2 | `/api/agents/status` 路由重复注册（L534-L535），aiohttp 启动异常 | `server/web_viewer.py:534-535` | 🔴 致命 |
+| W-1 | OAuth state 单值存储，多用户并发覆盖 | `server/web_viewer.py:406` | ⚠️ 建议 |
+| W-2 | redirect_uri 未 URL 编码 | `server/web_viewer.py:409-411` | ⚠️ 建议 |
+| W-3 | Cookie 缺少 secure=True | `server/web_viewer.py:490-497` | ⚠️ 建议 |
+| W-4 | 默认 redirect_uri 使用 0.0.0.0 | `server/config.py:25` | ⚠️ 建议 |
 
 #### ⬜ Step 6 — 测试验证 🦐 qa-bot
 
