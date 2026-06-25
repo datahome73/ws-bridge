@@ -16,3 +16,20 @@ BROADCAST_ADMINS: set[str] = set(
 ADMIN_AGENTS: set[str] = set(
     filter(None, os.environ.get("WS_ADMIN_AGENTS", "").split(","))
 )
+
+
+# ── R40: GitHub OAuth ─────────────────────────────────────────
+GITHUB_OAUTH_CLIENT_ID=os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
+GITHUB_OAUTH_CLIENT_SECRET=os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
+GITHUB_OAUTH_REDIRECT_URI=os.environ.get("GITHUB_OAUTH_REDIRECT_URI",
+    os.environ.get("WS_PUBLIC_URL", "http://0.0.0.0:8765") + "/auth/github/callback",
+)
+# Map from GitHub username → bridge display name, JSON dict format
+OAUTH_NAME_MAP: dict[str, str] = {}
+_raw = os.environ.get("OAUTH_NAME_MAP", "")
+if _raw.strip():
+    import json as _json
+    try:
+        OAUTH_NAME_MAP.update(_json.loads(_raw))
+    except _json.JSONDecodeError:
+        pass
