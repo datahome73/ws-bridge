@@ -53,9 +53,10 @@
 | 关键操作 | MSG_SET_ACTIVE_CHANNEL → ws:R40开发工作室 |
 | 全员回复 | 「已切」确认后点名完成 |
 
-#### 🔄 Step 3 — 技术方案 🏗️ arch-bot
+#### ✅ Step 3 — 技术方案 🏗️ arch-bot ✅ `c4ee497`
 
 > 产出：`docs/R40/R40-tech-plan.md`
+> 方向审查：🟢 通过 `5b4c084`
 
 **改动范围确认：** 仅第④类（Web 端），涉及文件：
 
