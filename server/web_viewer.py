@@ -403,12 +403,15 @@ async def handle_github_login(request: web.Request) -> web.Response:
         return web.Response(text="GitHub OAuth not configured", status=501)
     redirect_uri = config.GITHUB_OAUTH_REDIRECT_URI
     state = secrets.token_hex(16)
-    request.app["oauth_state"] = state
+    if "oauth_states" not in request.app:
+        request.app["oauth_states"] = {}
+    request.app["oauth_states"][state] = True
+    import urllib.parse as _urlparse
     github_url = (
         "https://github.com/login/oauth/authorize?"
-        "client_id=" + client_id + "&"
-        "redirect_uri=" + redirect_uri + "&"
-        "state=" + state + "&"
+        "client_id=" + _urlparse.quote(client_id, safe="") + "&"
+        "redirect_uri=" + _urlparse.quote(redirect_uri, safe="") + "&"
+        "state=" + _urlparse.quote(state, safe="") + "&"
         "scope=read:user"
     )
     raise web.HTTPFound(location=github_url)
@@ -418,12 +421,14 @@ async def handle_github_callback(request: web.Request) -> web.Response:
     """Handle GitHub OAuth callback -- exchange code for token, then session."""
     code = request.query.get("code", "")
     state = request.query.get("state", "")
-    stored_state = request.app.get("oauth_state", "")
-
     if not code or not state:
         return web.Response(text="Missing code or state parameter", status=400)
-    if state != stored_state:
+
+    stored_states = request.app.get("oauth_states", {})
+    if state not in stored_states:
         return web.Response(text="Invalid state (CSRF)", status=403)
+    # Consume state to prevent replay
+    del stored_states[state]
 
     # Exchange code for access token
     token_url = "https://github.com/login/oauth/access_token"
@@ -487,11 +492,13 @@ async def handle_github_callback(request: web.Request) -> web.Response:
 
     # Set cookie and redirect to /chat
     resp = web.HTTPFound(location="/chat")
+    _scheme = request.url.scheme if hasattr(request, "url") else "http"
     resp.set_cookie(
         "ws_im_session",
         token,
         max_age=604800,     # 7 days
         httponly=True,
+        secure=True if _scheme == "https" else False,
         samesite="Lax",
         path="/",
     )
@@ -531,7 +538,6 @@ def setup_routes(app: web.Application) -> None:
     # R8: search
     app.router.add_get("/api/chat/search", handle_api_chat_search)
     # R11 P1.3: agent status
-    app.router.add_get("/api/agents/status", handle_api_agents_status)
     app.router.add_get("/api/agents/status", handle_api_agents_status)
     # R40: GitHub OAuth
     app.router.add_get("/auth/github/login", handle_github_login)

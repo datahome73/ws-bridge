@@ -43,10 +43,7 @@ p{color:#8b949e;font-size:0.9rem;margin-bottom:24px;}
     <span>使用 GitHub 登录</span>
   </a>
 </div>
-<script>
-// R40: Hide GitHub login button if OAUTH_CLIENT_ID is not configured
-// (server returns 501 when unconfigured, so the link simply errors out)
-</script>
+<!-- R40: GitHub login button; server returns 501 if unconfigured -->
 async function init() {
   const resp = await fetch('/api/bind');
   const data = await resp.json();
