@@ -2,7 +2,7 @@
 
 > **版本：** v1.0
 > **状态：** 📝 初稿
-> **架构师：** 🏗️ 小开
+> **架构师：** 🏗️ 架构师
 > **日期：** 2026-06-25
 > **依据：** R39 验证结论（F-9/F-10/F-11 处理 + Web 端体验增强）
 
@@ -12,14 +12,14 @@
 
 ### 1.1 需求背景
 
-当前 Web 端登录流程：`/api/bind` 生成 WEB 绑定码 → 管理员（小爱）在 TG 审批 → 轮询 `/api/check` 拿到 token → 进入聊天室。
+当前 Web 端登录流程：`/api/bind` 生成 WEB 绑定码 → 管理员在 TG 审批 → 轮询 `/api/check` 拿到 token → 进入聊天室。
 
 **痛点：**
-- 大宏（项目负责人）每次需发码 → 等审批 → 手动操作
+- 项目负责人每次需发码 → 等审批 → 手动操作
 - 绑定码 5 分钟 TTL，过期需重新生成
 - 审批需管理员在线，非自助
 
-**R40 方案：** 增加 **GitHub OAuth 登录** 作为第二登录方式，允许大宏通过 GitHub 账号一级授权直接进入，绑定码流程保留作为备选。
+**R40 方案：** 增加 **GitHub OAuth 登录** 作为第二登录方式，允许项目负责人通过 GitHub 账号一级授权直接进入，绑定码流程保留作为备选。
 
 ### 1.2 架构变更
 
@@ -197,7 +197,7 @@ async def handle_auth_callback(request: web.Request) -> web.Response:
 # Code-level hardcoded mapping, no external config file needed.
 # When GitHub login is NOT in this map, falls back to github's `name` (then `login`).
 OAUTH_NAME_MAP: dict[str, str] = {
-    "datahome": "大宏",
+    "datahome": "项目负责人",
     # Add more mappings as needed:
     # "some-github-id": "显示名",
 }
@@ -291,7 +291,7 @@ CSS 新增（在 BIND_TEMPLATE 的 `<style>` 块中）：
 | A-1 | `/auth/login` 跳转到 GitHub 授权页 | 浏览器访问 | 302 到 `github.com/login/oauth/authorize` |
 | A-2 | 授权后自动跳回 `/auth/callback?code=...&state=...` | 完整流程 | 200，cookie 设置成功，重定向到 `/chat` |
 | A-3 | callback 中 state 校验 | 篡改 state 参数 | 400 "State 不匹配" |
-| A-4 | 登录后在 `/chat` 看到正确的中文显示名 | 打开 Web 端 | 右上角显示"大宏" |
+|| A-4 | 登录后在 `/chat` 看到正确的中文显示名 | 打开 Web 端 | 右上角显示"项目负责人" |
 | A-5 | session 持久化（重启后仍可登录） | 重启容器 + 刷新页面 | 仍保持登录状态（7天内） |
 | A-6 | GitHub 按钮在 `OAUTH_ENABLED=False` 时不显示 | 删除环境变量重启 | BIND_TEMPLATE 无 GitHub 按钮 |
 | A-7 | OAUTH_NAME_MAP 不匹配时 fallback | 用未映射的 GitHub 账号登录 | 显示 GitHub 的 name 而非中文名 |
