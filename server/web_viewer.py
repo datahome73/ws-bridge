@@ -14,6 +14,7 @@ from aiohttp import web
 
 from . import auth, config, persistence, workspace as ws_mod
 from . import message_store as ms
+import secrets
 from .templates import BIND_TEMPLATE, CHAT_TEMPLATE
 
 logger = logging.getLogger("ws-bridge.web")
@@ -391,6 +392,127 @@ async def handle_api_agents_status(request: web.Request) -> web.Response:
     })
 
 
+
+# ── R40: GitHub OAuth ────────────────────────────────────────────────
+
+
+async def handle_github_login(request: web.Request) -> web.Response:
+    """Redirect to GitHub OAuth authorization page."""
+    client_id = config.GITHUB_OAUTH_CLIENT_ID
+    if not client_id:
+        return web.Response(text="GitHub OAuth not configured", status=501)
+    redirect_uri = config.GITHUB_OAUTH_REDIRECT_URI
+    state = secrets.token_hex(16)
+    request.app["oauth_state"] = state
+    github_url = (
+        "https://github.com/login/oauth/authorize?"
+        "client_id=" + client_id + "&"
+        "redirect_uri=" + redirect_uri + "&"
+        "state=" + state + "&"
+        "scope=read:user"
+    )
+    raise web.HTTPFound(location=github_url)
+
+
+async def handle_github_callback(request: web.Request) -> web.Response:
+    """Handle GitHub OAuth callback -- exchange code for token, then session."""
+    code = request.query.get("code", "")
+    state = request.query.get("state", "")
+    stored_state = request.app.get("oauth_state", "")
+
+    if not code or not state:
+        return web.Response(text="Missing code or state parameter", status=400)
+    if state != stored_state:
+        return web.Response(text="Invalid state (CSRF)", status=403)
+
+    # Exchange code for access token
+    token_url = "https://github.com/login/oauth/access_token"
+    payload = {
+        "client_id": config.GITHUB_OAUTH_CLIENT_ID,
+        "client_secret": config.GITHUB_OAUTH_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": config.GITHUB_OAUTH_REDIRECT_URI,
+    }
+    headers = {"Accept": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(token_url, json=payload, headers=headers) as resp:
+                token_data = await resp.json()
+    except Exception as e:
+        logger.error("GitHub OAuth token exchange failed: %s", e)
+        return web.Response(text="OAuth token exchange failed", status=502)
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return web.Response(text="OAuth failed: " + token_data.get("error_description", "unknown"), status=400)
+
+    # Fetch GitHub user info
+    user_url = "https://api.github.com/user"
+    user_headers = {
+        "Authorization": "Bearer " + access_token,
+        "Accept": "application/json",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(user_url, headers=user_headers) as resp:
+                user_data = await resp.json()
+    except Exception as e:
+        logger.error("GitHub user fetch failed: %s", e)
+        return web.Response(text="Failed to fetch GitHub user", status=502)
+
+    github_login = user_data.get("login", "")
+    github_name = user_data.get("name", "") or github_login
+
+    if not github_login:
+        return web.Response(text="Could not determine GitHub username", status=400)
+
+    # Resolve display name via map, fallback to GitHub login
+    display_name = config.OAUTH_NAME_MAP.get(github_login, github_name)
+
+    # Generate session token
+    import hashlib
+    import time as _time
+    raw = "github:" + github_login + ":" + str(_time.time()) + ":" + secrets.token_hex(8)
+    token = hashlib.sha256(raw.encode()).hexdigest()
+
+    sessions = persistence.get_web_sessions()
+    sessions[token] = {
+        "name": display_name,
+        "created_at": _time.time(),
+        "oauth_provider": "github",
+        "oauth_login": github_login,
+    }
+    persistence.set_web_sessions(sessions)
+    persistence.save_web_sessions(config.DATA_DIR)
+
+    # Set cookie and redirect to /chat
+    resp = web.HTTPFound(location="/chat")
+    resp.set_cookie(
+        "ws_im_session",
+        token,
+        max_age=604800,     # 7 days
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
+    raise resp
+
+
+async def handle_api_auth_me(request: web.Request) -> web.Response:
+    """Return current user identity (from token or cookie)."""
+    token = request.query.get("token", "")
+    if not token:
+        token = request.cookies.get("ws_im_session", "")
+    viewer = validate_token(token) if token else None
+    if not viewer:
+        return web.json_response({"authenticated": False})
+    return web.json_response({
+        "authenticated": True,
+        "name": viewer,
+    })
+
+
+
 # ── Routes registration ──────────────────────────────────────────
 
 
@@ -410,3 +532,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/chat/search", handle_api_chat_search)
     # R11 P1.3: agent status
     app.router.add_get("/api/agents/status", handle_api_agents_status)
+    app.router.add_get("/api/agents/status", handle_api_agents_status)
+    # R40: GitHub OAuth
+    app.router.add_get("/auth/github/login", handle_github_login)
+    app.router.add_get("/auth/github/callback", handle_github_callback)
+    app.router.add_get("/api/auth/me", handle_api_auth_me)
