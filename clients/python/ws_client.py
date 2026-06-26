@@ -222,8 +222,13 @@ class WsBridgeClient:
         self,
         content: str,
         to: str = "*",
+        channel: str | None = None,
     ) -> str:
         """Send a message to the WS Bridge.
+
+        Use ``channel`` to send to a workspace (e.g. ``ws:01KT...``).
+        Use ``to`` (default ``"*"``) for lobby broadcast or ``@user`` for DM.
+        When ``channel`` is set, ``to`` is ignored (workspace routing).
 
         Returns a unique message ID on success, or ``""`` on failure.
         Waits for server ACK up to ``ACK_TIMEOUT`` seconds, retries on timeout.
@@ -232,12 +237,15 @@ class WsBridgeClient:
         payload = {
             "type": "message",
             "content": content,
-            "to": to,
             "from_name": self.name,
             "agent_id": self.agent_id,
             "id": msg_id,
             "ts": time.time(),
         }
+        if channel:
+            payload["channel"] = channel
+        else:
+            payload["to"] = to
 
         # Register pending ACK
         event = asyncio.Event()
