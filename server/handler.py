@@ -38,6 +38,12 @@ _SILENT_PREFIXES = (
 _delivery_status: dict[str, dict[str, str]] = {}
 # R11 P1.2: Offline push queue
 _offline_push_queue: dict[str, list[dict]] = {}
+
+# ── R42: Pipeline state ──────────────────────────────────────────
+_PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
+_LOBBY_PAUSED: bool = False
+_LOBBY_PAUSED_ROUND: str = ""
+
 _offline_timers: dict[str, asyncio.Task] = {}
 
 # R11 P1.3: Expose connections for web status API
@@ -840,6 +846,277 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
         write_chat_log(from_name, content_text, channel=channel)
     except Exception:
         pass
+
+
+# ── R42: Pipeline helpers ──────────────────────────────────────────
+
+
+def _step_sort_key(step_name: str) -> tuple:
+    """Sort step1, step2, ..., step10 naturally."""
+    import re
+    m = re.match(r'step(\d+)', step_name.lower())
+    return (int(m.group(1)),) if m else (0, step_name)
+
+
+from . import config as _r42cfg
+
+
+def _load_step_config() -> dict[str, dict]:
+    """Load step map from config."""
+    return _r42cfg.PIPELINE_STEP_MAP
+
+
+def _set_pipeline_state(round_name: str, state: dict) -> None:
+    _PIPELINE_STATE[round_name] = state
+
+
+def _update_pipeline_step(round_name: str, step: str) -> None:
+    if round_name in _PIPELINE_STATE:
+        _PIPELINE_STATE[round_name]["current_step"] = step
+
+
+def _clear_pipeline_state(round_name: str) -> None:
+    _PIPELINE_STATE.pop(round_name, None)
+
+
+def pipeline_is_active(round_name: str) -> bool:
+    state = _PIPELINE_STATE.get(round_name)
+    return bool(state and state.get("active"))
+
+
+def set_lobby_paused(paused: bool, round_name: str = "") -> None:
+    global _LOBBY_PAUSED, _LOBBY_PAUSED_ROUND
+    _LOBBY_PAUSED = paused
+    _LOBBY_PAUSED_ROUND = round_name if paused else ""
+    logger.info("R42 lobby-pause: %s (round=%s)", paused, _LOBBY_PAUSED_ROUND)
+
+
+
+
+# ── R42: Pipeline commands ─────────────────────────────────────────
+
+
+async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
+    """启动管线。
+    用法：!pipeline_start <R{N}> [--from <step>]
+    仅在 _admin 频道可用。
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!pipeline_start <R{N}> [--from <step>]"
+    round_name = positional[0].upper()
+    from_step = params.get("from", "")
+
+    # 验证前置决策状态
+    import os as _r42os
+    work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
+    if not _r42os.path.exists(work_plan_path):
+        return f"❌ {round_name} 未找到 WORK_PLAN.md，请先完成 Step A/B"
+
+    # 锁定管线（防重复）
+    if pipeline_is_active(round_name):
+        return f"❌ {round_name} 管线已活跃，不可重复启动"
+
+    # 暂停大厅接收（方向 D）
+    set_lobby_paused(True, round_name)
+
+    # 创建工作室
+    create_params = {
+        "_positional": [f"{round_name}-dev"],
+    }
+    create_result = await _cmd_create_workspace(sender_id, create_params)
+
+    # 从结果提取 ws_id（调用 persistence 获取最新频道）
+    ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
+
+    # 查 Step 映射表，找起始角色
+    step_config = _load_step_config()
+    start_step = from_step if from_step else "step3"
+    target_role = step_config[start_step]["role"]
+
+    # 点名架构师，附带文档 URL
+    context_urls = (
+        f"需求: docs/{round_name}/{round_name}-product-requirements.md | "
+        f"WORK_PLAN: docs/{round_name}/WORK_PLAN.md"
+    )
+    rollcall_result = await _cmd_rollcall_next(sender_id, {
+        "_positional": [target_role],
+        "context": f"{round_name} {start_step}: {context_urls}",
+    })
+
+    # 创建 Step Task
+    task_result = await _cmd_task_create(sender_id, {
+        "context": round_name,
+        "name": start_step,
+        "role": target_role,
+    })
+
+    # 设置管线状态
+    _set_pipeline_state(round_name, {
+        "active": True,
+        "current_step": start_step,
+        "ws_id": ws_id,
+        "started_at": __import__("time").time(),
+    })
+
+    return (
+        f"🚀 **{round_name} 管线已启动**\n"
+        f"  Step: {start_step} → {target_role}\n"
+        f"  工作室: {ws_id}\n"
+        f"  {create_result}\n"
+        f"  {rollcall_result}\n"
+        f"  {task_result}"
+    )
+
+
+async def _cmd_step_complete(sender_id: str, params: dict) -> str:
+    """标记 Step 完成，自动点名下一人。
+    用法：!step_complete <step_name> --output <commit/file>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!step_complete <step_name> --output <commit/file>"
+    step_name = positional[0]
+    output_ref = params.get("output", "")
+    if not output_ref:
+        return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
+
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return "❌ 请在工作区中使用此命令"
+
+    # 从 ws name 提取 round_name
+    round_name = None
+    for rname, pstate in _PIPELINE_STATE.items():
+        if pstate.get("ws_id") == sender_ch:
+            round_name = rname
+            break
+    if not round_name:
+        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
+
+    # 提取 ws_id
+    ws_id = sender_ch
+
+    # 标记当前 Task completed
+    tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+    current_task = None
+    for t in tasks:
+        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
+            current_task = t
+            break
+    if not current_task:
+        return f"❌ 未找到 Step「{step_name}」的活跃 Task（可能已完成）"
+
+    task_update_params = {
+        "_positional": [current_task["id"]],
+        "state": p.TaskState.COMPLETED.value,
+        "output": output_ref,
+    }
+    task_result = await _cmd_task_update(sender_id, task_update_params)
+
+    # 查 Step 映射表 → 找下一角色
+    step_config = _load_step_config()
+    step_keys = sorted(step_config.keys(), key=_step_sort_key)
+    current_idx = None
+    for i, k in enumerate(step_keys):
+        if k == step_name:
+            current_idx = i
+            break
+    if current_idx is None or current_idx + 1 >= len(step_keys):
+        # 最后一步 → 管线结束
+        await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
+        set_lobby_paused(False)
+        _clear_pipeline_state(round_name)
+        return (
+            f"🏁 **{round_name} 管线已完成！**\n"
+            f"  {task_result}\n"
+            f"  工作室已关闭，大厅已恢复接收"
+        )
+
+    next_step = step_keys[current_idx + 1]
+    next_role = step_config[next_step]["role"]
+
+    # 调用 !rollcall_next 点名下一角色
+    context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
+    rollcall_result = await _cmd_rollcall_next(sender_id, {
+        "_positional": [next_role],
+        "context": f"{round_name} {next_step}: {context_summary}",
+    })
+
+    # 创建下一步的 Task
+    next_task_result = await _cmd_task_create(sender_id, {
+        "context": round_name,
+        "name": next_step,
+        "role": next_role,
+    })
+
+    # 更新管线状态
+    _update_pipeline_step(round_name, next_step)
+
+    # 通知 PM（在 _admin 频道发进度）
+    try:
+        admin_channel = p.ADMIN_CHANNEL
+        notify_msg = (
+            f"📋 {round_name} 进度：{step_name} ✅ → "
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+        )
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent="系统", from_name="系统",
+            content=notify_msg, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=admin_channel,
+        )
+    except Exception:
+        pass
+
+    return (
+        f"✅ **{step_name} 完成** → 交接给 {next_role} {next_step}\n"
+        f"  {task_result}\n"
+        f"  {rollcall_result}\n"
+        f"  {next_task_result}"
+    )
+
+
+async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
+    """查询当前所有活跃管线的 Step 进度表。"""
+    if not _PIPELINE_STATE:
+        return "📊 当前无活跃管线"
+
+    lines = []
+    for round_name, pstate in sorted(_PIPELINE_STATE.items()):
+        if not pstate.get("active"):
+            continue
+        lines.append(f"📊 **{round_name} 管线状态**")
+        step_config = _load_step_config()
+        tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+
+        for step_key, step_info in sorted(
+            step_config.items(),
+            key=lambda x: _step_sort_key(x[0]),
+        ):
+            role = step_info["role"]
+
+            matched = [t for t in tasks if t.get("name") == step_key]
+            task_state = "⏳"
+            if matched:
+                t = matched[0]
+                ts_state = t.get("state", "")
+                if ts_state == p.TaskState.COMPLETED.value:
+                    task_state = "✅"
+                elif ts_state == p.TaskState.WORKING.value:
+                    task_state = "🟢"
+                elif ts_state == p.TaskState.FAILED.value:
+                    task_state = "❌"
+
+            current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
+            lines.append(f"  {task_state} {step_key} — {role}{current}")
+
+    if not lines:
+        return "📊 当前无活跃管线"
+    return "\n".join(lines)
+
+
 # ── R35: Admin command registry ──────────────────────────────────
 
 _ADMIN_COMMANDS: dict[str, dict] = {
@@ -912,6 +1189,19 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "rollcall_next": {
         "handler": _cmd_rollcall_next, "min_role": 3, "workspace_scope": True,
         "usage": "!rollcall_next <role> --context <摘要>",
+    },
+    # ── R42: Pipeline commands ──
+    "pipeline_start": {
+        "handler": _cmd_pipeline_start, "min_role": 3, "workspace_scope": False,
+        "usage": "!pipeline_start <R{N}> [--from <step>]",
+    },
+    "step_complete": {
+        "handler": _cmd_step_complete, "min_role": 3, "workspace_scope": True,
+        "usage": "!step_complete <step_name> --output <commit/file>",
+    },
+    "pipeline_status": {
+        "handler": _cmd_pipeline_status, "min_role": 3, "workspace_scope": False,
+        "usage": "!pipeline_status",
     },
 }
 
@@ -1111,6 +1401,22 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     if not allowed:
         await _send(ws, {"type": "error", "error": f"权限不足：{reason}"})
         return
+
+        # ── R42 D: Lobby pause intercept ──
+    if _LOBBY_PAUSED and channel == p.LOBBY:
+        # If sender has an active workspace, auto-route there
+        agent_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
+        active = [w for w in agent_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
+        if active:
+            channel = active[0].id
+            resolved_workspace = active[0]
+            logger.info("R42 lobby-pause: routed %s to workspace '%s'", sender_id[:12], channel)
+        else:
+            await _send(ws, {
+                "type": "error",
+                "error": f"🔒 管线 {_LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息。请在工作区中发言。",
+            })
+            return
 
     # ── Channel-scoped routing ──────────────────────────────────────
     if channel != p.LOBBY and resolved_workspace:

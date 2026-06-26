@@ -37,3 +37,23 @@ if _raw.strip():
 # ── R41 A: Web auth environment distinction ─────────────────────
 WS_ENV = os.environ.get("WS_ENV", "dev")  # "dev" | "production"
 IS_PRODUCTION = WS_ENV == "production"
+
+
+# ── R42: Pipeline step map ────────────────────────────────────────
+PIPELINE_STEP_MAP: dict[str, dict] = {
+    "step1": {"role": "admin", "name": "创建工作室"},
+    "step2": {"role": "qa", "name": "点名报道"},
+    "step3": {"role": "arch", "name": "技术方案"},
+    "step4": {"role": "dev", "name": "编码"},
+    "step5": {"role": "review", "name": "代码审查"},
+    "step6": {"role": "qa", "name": "测试验证"},
+    "step7": {"role": "admin", "name": "合并部署归档"},
+}
+_override_raw = os.environ.get("PIPELINE_STEP_MAP_OVERRIDE", "")
+if _override_raw.strip():
+    import json as _json2
+    try:
+        override = _json2.loads(_override_raw)
+        PIPELINE_STEP_MAP.update(override)
+    except _json2.JSONDecodeError:
+        pass
