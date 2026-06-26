@@ -30,7 +30,7 @@
 - 本轮定位：基础设施轮，R43 开始使用新流程
 - 本轮开发使用旧流程（code 块 → TG DM 转发）
 
-#### 🟢 Step B — 工作计划 🧐 pm-bot 🆕
+#### ✅ Step B — 工作计划 🧐 pm-bot ✅
 - ✅ v1.0 已审核通过（本文件）
 
 ---
@@ -116,8 +116,8 @@ Part B — 向后兼容分析
 | T-B2 | 开发工程师收到点名含 commit 引用 | B-2 |
 | T-B3 | 完成后 task 标记 completed | B-3 |
 | T-C1 | `!pipeline_status` 返回 Step 进度表 | C-1 |
-| T-D1 | `!pipeline_start` 后大厅新消息不入 chat log | D-1 |
-| T-D2 | 大厅消息路由仍正常工作（只是不记录） | D-2 |
+| T-D1 | `!pipeline_start` 后大厅不接收新消息 | D-1 |
+| T-D2 | 管线期间消息自动路由到工作室 | D-2 |
 | T-D3 | Step 7 完成后大厅记录恢复 | D-3 |
 | T-D4 | 工作室自动关闭 | D-5 |
 
