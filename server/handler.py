@@ -771,7 +771,8 @@ async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
                 sent_count += 1
             except Exception:
                 pass
-    return f"✅ 已向 {len(matched)} 名 {target_role} 成员发送点名：{", ".join(names)}（{sent_count} 人在线）"
+    names_str = ", ".join(names)
+    return f"✅ 已向 {len(matched)} 名 {target_role} 成员发送点名：{names_str}（{sent_count} 人在线）"
 
 
 async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
@@ -797,7 +798,8 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
     if not matched:
         return f"❌ 工作区中未找到角色为「{target_role}」的成员"
     names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
-    msg_content = f"🏗️ 下一环节：{context_summary}\n📋 负责人：{\", ".join(names)}\n请确认就位，回复「到」开始。"
+    names_str = ", ".join(names)
+    msg_content = f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}\n请确认就位，回复「到」开始。"
     payload = json.dumps({
         "type": "broadcast", "channel": sender_ch,
         "from_name": "系统", "from": "系统",
