@@ -750,13 +750,16 @@ async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
         return f"❌ 工作区中未找到角色为「{target_role}」的成员"
     sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
     suffix = f"（背景：{context_msg}）" if context_msg else ""
+    msg_content = f"📋 {sender_name} 点名 {target_role} 成员{suffix}\n请回复「到」确认在线。"
     payload = json.dumps({
         "type": "broadcast", "channel": sender_ch,
         "from_name": "系统", "from": "系统",
         "agent_id": "", "from_agent": "",
-        "content": f"📋 {sender_name} 点名 {target_role} 成员{suffix}\n请回复「到」确认在线。",
+        "content": msg_content,
         "ts": time.time(),
     })
+    # R41 D: Persist rollcall message
+    _persist_broadcast(sender_ch, "系统", msg_content)
     sent_count = 0
     names = []
     for aid in matched:
@@ -794,13 +797,16 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
     if not matched:
         return f"❌ 工作区中未找到角色为「{target_role}」的成员"
     names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
+    msg_content = f"🏗️ 下一环节：{context_summary}\n📋 负责人：{\", ".join(names)}\n请确认就位，回复「到」开始。"
     payload = json.dumps({
         "type": "broadcast", "channel": sender_ch,
         "from_name": "系统", "from": "系统",
         "agent_id": "", "from_agent": "",
-        "content": f"🏗️ 下一环节：{context_summary}\n📋 负责人：{", ".join(names)}\n请确认就位，回复「到」开始。",
+        "content": msg_content,
         "ts": time.time(),
     })
+    # R41 D: Persist rollcall message
+    _persist_broadcast(sender_ch, "系统", msg_content)
     sent_count = 0
     for aid in matched:
         for conn in list(_connections.get(aid, set())):
@@ -812,6 +818,26 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
                 pass
     return f"✅ 已通知 {len(matched)} 名 {target_role} 成员接管「{context_summary}」（{sent_count} 人在线）"
 
+
+
+def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
+    """Persist a broadcast message to message store and chat log.
+
+    R41 D: Ensures rollcall and other WS-send-only paths have proper
+    persistence (message_store + chat_log) for offline members and web UI.
+    """
+    try:
+        import uuid as _uuid
+        msg_id = str(_uuid.uuid4())
+        ms.save_message(
+            msg_id=msg_id, msg_type="broadcast",
+            from_agent="系统", from_name=from_name,
+            content=content_text, ts=__import__("time").time(),
+            data_dir=config.DATA_DIR, channel=channel,
+        )
+        write_chat_log(from_name, content_text, channel=channel)
+    except Exception:
+        pass
 # ── R35: Admin command registry ──────────────────────────────────
 
 _ADMIN_COMMANDS: dict[str, dict] = {
