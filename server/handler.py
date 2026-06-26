@@ -391,8 +391,10 @@ def _check_command_permission(
             return True, ""
         return False, "权限不足：仅工作区管理员或超级管理员可执行"
 
-    if min_role <= 3 and not ws_scope and min_role >= 4:
-        return False, "权限不足：该操作仅超级管理员可执行"
+    if min_role <= 3 and not ws_scope:
+        if _is_any_workspace_admin(agent_id):
+            return True, ""
+        return False, "权限不足：仅工作区管理员或超级管理员可执行"
 
     return False, "权限不足：管理操作仅限管理员"
 
