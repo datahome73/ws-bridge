@@ -391,7 +391,7 @@ def _check_command_permission(
             return True, ""
         return False, "权限不足：仅工作区管理员或超级管理员可执行"
 
-    if min_role <= 3 and not ws_scope:
+    if min_role <= 3 and not ws_scope and min_role >= 4:
         return False, "权限不足：该操作仅超级管理员可执行"
 
     return False, "权限不足：管理操作仅限管理员"
@@ -1025,7 +1025,9 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             break
     if current_idx is None or current_idx + 1 >= len(step_keys):
         # 最后一步 → 管线结束
-        await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
+        close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
+        if "❌" in str(close_result):
+            return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
         set_lobby_paused(False)
         _clear_pipeline_state(round_name)
         return (
