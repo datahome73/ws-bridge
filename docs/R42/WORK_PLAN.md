@@ -53,7 +53,7 @@
 | 关键操作 | 点名 arch-bot 出技术方案 |
 | R41 多点点名 | 可用 `!rollcall_role` 点名指定角色 |
 
-#### ⏳ Step 3 — 技术方案 🏗️ arch-bot
+#### ✅ Step 3 — 技术方案 🏗️ arch-bot ✅ `d1a053b`
 
 > **产出要求：** `docs/R42/R42-tech-plan.md`
 
