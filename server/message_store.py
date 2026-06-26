@@ -71,7 +71,10 @@ def save_message(
     data_dir: Path,
     channel: str = "lobby",
 ) -> None:
-    """Insert a single message into the store."""
+    """Insert a single message into the store.
+
+    R41 B: Uses INSERT OR IGNORE on msg_id for dedup.
+    """
     db_path = str(data_dir / DEFAULT_DB_NAME)
     conn = _get_conn(db_path)
     try:

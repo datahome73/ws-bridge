@@ -33,3 +33,7 @@ if _raw.strip():
         OAUTH_NAME_MAP.update(_json.loads(_raw))
     except _json.JSONDecodeError:
         pass
+
+# ── R41 A: Web auth environment distinction ─────────────────────
+WS_ENV = os.environ.get("WS_ENV", "dev")  # "dev" | "production"
+IS_PRODUCTION = WS_ENV == "production"

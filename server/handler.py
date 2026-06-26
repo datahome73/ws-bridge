@@ -626,6 +626,8 @@ async def _cmd_task_create(sender_id: str, params: dict) -> str:
         created_by=sender_id,
         data_dir=config.DATA_DIR,
     )
+    # R41 C: Broadcast task_notify on creation
+    asyncio.create_task(_broadcast_task_notify(task, f"{task['state']} → {task['state']}"))
     return (f"✅ Task 已创建：{task['name']} ({task['state']})\n"
             f"  ID: {task['id']}\n"
             f"  Context: {task['context_id']}\n"
@@ -673,6 +675,9 @@ async def _cmd_task_update(sender_id: str, params: dict) -> str:
     if output_ref:
         ts.add_output_ref(task_id, output_ref, config.DATA_DIR)
     task = ts.get_task(task_id, config.DATA_DIR)
+    # R41 C: Broadcast task_notify on update
+    asyncio.create_task(_broadcast_task_notify(task,
+        f"{task['state']} → {new_state}"))
     refs = task.get("output_refs", [])
     refs_str = f", 产出: {', '.join(refs)}" if refs else ""
     return f"✅ Task 已更新：{task['name']} → {task['state']}{refs_str}"
@@ -722,6 +727,90 @@ async def _cmd_task_list(sender_id: str, params: dict) -> str:
         lines.append(f"  {icon} [{t['context_id']}] {t['name']:20s} [{t['state']}]  {t['id'][:8]}")
     return "\n".join(lines)
 
+
+async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
+    """点名指定角色成员。P3+
+    Usage: !rollcall_role <role> [--context <msg>]
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法: !rollcall_role <role> [--context <msg>]"
+    target_role = positional[0].lower()
+    context_msg = params.get("context", "")
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    if not sender_ch or sender_ch == p.LOBBY:
+        return "❌ 请先进入工作区频道"
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return f"❌ 工作区 {sender_ch} 不存在或已归档"
+    users = auth.get_users()
+    matched = [aid for aid in ws_obj.members
+               if users.get(aid, {}).get("role", "member") == target_role]
+    if not matched:
+        return f"❌ 工作区中未找到角色为「{target_role}」的成员"
+    sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
+    suffix = f"（背景：{context_msg}）" if context_msg else ""
+    payload = json.dumps({
+        "type": "broadcast", "channel": sender_ch,
+        "from_name": "系统", "from": "系统",
+        "agent_id": "", "from_agent": "",
+        "content": f"📋 {sender_name} 点名 {target_role} 成员{suffix}\n请回复「到」确认在线。",
+        "ts": time.time(),
+    })
+    sent_count = 0
+    names = []
+    for aid in matched:
+        names.append(users.get(aid, {}).get("name", aid[:12]))
+        for conn in list(_connections.get(aid, set())):
+            try:
+                if hasattr(conn, "send_str"): await conn.send_str(payload)
+                elif hasattr(conn, "send"): await conn.send(payload)
+                sent_count += 1
+            except Exception:
+                pass
+    return f"✅ 已向 {len(matched)} 名 {target_role} 成员发送点名：{", ".join(names)}（{sent_count} 人在线）"
+
+
+async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
+    """点名下一环节负责人。P3+
+    Usage: !rollcall_next <role> --context <摘要>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法: !rollcall_next <role> --context <摘要>"
+    target_role = positional[0].lower()
+    context_summary = params.get("context", "")
+    if not context_summary:
+        return "❌ 请提供 --context <摘要>"
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    if not sender_ch or sender_ch == p.LOBBY:
+        return "❌ 请先进入工作区频道"
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return f"❌ 工作区 {sender_ch} 不存在或已归档"
+    users = auth.get_users()
+    matched = [aid for aid in ws_obj.members
+               if users.get(aid, {}).get("role", "member") == target_role]
+    if not matched:
+        return f"❌ 工作区中未找到角色为「{target_role}」的成员"
+    names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
+    payload = json.dumps({
+        "type": "broadcast", "channel": sender_ch,
+        "from_name": "系统", "from": "系统",
+        "agent_id": "", "from_agent": "",
+        "content": f"🏗️ 下一环节：{context_summary}\n📋 负责人：{", ".join(names)}\n请确认就位，回复「到」开始。",
+        "ts": time.time(),
+    })
+    sent_count = 0
+    for aid in matched:
+        for conn in list(_connections.get(aid, set())):
+            try:
+                if hasattr(conn, "send_str"): await conn.send_str(payload)
+                elif hasattr(conn, "send"): await conn.send(payload)
+                sent_count += 1
+            except Exception:
+                pass
+    return f"✅ 已通知 {len(matched)} 名 {target_role} 成员接管「{context_summary}」（{sent_count} 人在线）"
 
 # ── R35: Admin command registry ──────────────────────────────────
 
@@ -787,6 +876,15 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "handler": _cmd_task_list, "min_role": 3, "workspace_scope": True,
         "usage": "!task_list [--limit <n>]",
     },
+    # ── R41 D: Roll-call commands ──
+    "rollcall_role": {
+        "handler": _cmd_rollcall_role, "min_role": 3, "workspace_scope": True,
+        "usage": "!rollcall_role <role> [--context <msg>]",
+    },
+    "rollcall_next": {
+        "handler": _cmd_rollcall_next, "min_role": 3, "workspace_scope": True,
+        "usage": "!rollcall_next <role> --context <摘要>",
+    },
 }
 
 # ── R38: Task notify broadcast ─────────────────────────────────────
@@ -841,6 +939,18 @@ async def _broadcast_task_notify(
         except ImportError:
             pass
 
+        # R41 C: Write task_notify to admin channel
+        try:
+            content_str = f"📊 {context_id} {task['name']}: {transition}"
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=content_str, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
+            )
+            write_chat_log("系统", content_str, channel=p.ADMIN_CHANNEL)
+        except Exception:
+            pass
         logger.info("task_notify '%s' → %s (%s)", task["name"], context_id, transition)
 
 
@@ -1247,6 +1357,17 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         all_agents = {aid for aid in users}
         online_agents = {aid for aid in _connections}
         offline_agents = all_agents - online_agents
+        # R41 B: Persist offline-queued messages to message store
+        if offline_agents:
+            try:
+                ms.save_message(
+                    msg_id=msg_id, msg_type="broadcast",
+                    from_agent=sender_id, from_name=sender_name,
+                    content=content, ts=time.time(),
+                    data_dir=config.DATA_DIR, channel=channel,
+                )
+            except Exception:
+                pass
         for offline_id in offline_agents:
             _offline_push_queue.setdefault(offline_id, []).append({
                 "type": "broadcast",

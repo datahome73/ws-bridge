@@ -58,20 +58,6 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
         _chat_buffers[channel] = []
     entry = {"ts": ts, "sender": sender_name, "content": content}
     _chat_buffers[channel].append(entry)
-    # R36 D-1: Persist to message store for DB-backed retrieval
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="broadcast",
-            from_agent=sender_name,
-            from_name=sender_name,
-            content=content,
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
-            channel=channel,
-        )
-    except Exception:
-        pass
     if len(_chat_buffers[channel]) > _MAX_BUFFER:
         _chat_buffers[channel][:100] = []
 
