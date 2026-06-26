@@ -24,6 +24,13 @@ case "${1:-status}" in
     # 清理旧的管道文件
     [ -f "$PIPE_FILE" ] && rm -f "$PIPE_FILE"
 
+    # 确保多环境 URLS
+    if [ -z "$WS_BRIDGE_URLS" ] && [ -n "$WS_BRIDGE_URL" ]; then
+      :  # 用旧单连接配置
+    elif [ -z "$WS_BRIDGE_URLS" ] && [ -z "$WS_BRIDGE_URL" ]; then
+      export WS_BRIDGE_URLS="production:wss://wsim.datahome73.cloud/ws,dev:wss://ws-im-dev.datahome73.com/ws"
+    fi
+
     # 启动后台进程
     cd "$DIR"
     nohup node "$CLIENT" > "$OUT_LOG" 2> "$ERR_LOG" &
@@ -104,6 +111,44 @@ case "${1:-status}" in
     MSG="$*"
     echo "SEND|$MSG" >> "$PIPE_FILE"
     echo "Sent: ${MSG:0:100}"
+    ;;
+
+  send_to)
+    if [ $# -lt 3 ]; then
+      echo "Usage: $0 send_to <env> <message>"
+      exit 1
+    fi
+    ENV="$2"
+    shift 2
+    MSG="$*"
+    echo "SEND|_target_env=$ENV|$MSG" >> "$PIPE_FILE"
+    echo "Sent to $ENV: ${MSG:0:100}"
+    ;;
+
+  send_ws)
+    if [ $# -lt 3 ]; then
+      echo "Usage: $0 send_ws [env] <workspace_id> <message>"
+      echo "       env 可选: production / dev（默认第一个环境）"
+      exit 1
+    fi
+    # 检查第二个参数是否为 env
+    ENV_FLAG=""
+    if [ "$2" = "production" ] || [ "$2" = "dev" ]; then
+      ENV_FLAG="$2"
+      WS="$3"
+      shift 3
+    else
+      WS="$2"
+      shift 2
+    fi
+    MSG="$*"
+    if [ -n "$ENV_FLAG" ]; then
+      echo "SEND|_target_env=$ENV_FLAG|_channel=$WS|$MSG" >> "$PIPE_FILE"
+      echo "Sent to env=$ENV_FLAG workspace=$WS: ${MSG:0:100}"
+    else
+      echo "SEND|_channel=$WS|$MSG" >> "$PIPE_FILE"
+      echo "Sent to workspace $WS: ${MSG:0:100}"
+    fi
     ;;
 
   read)
