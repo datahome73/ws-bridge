@@ -41,13 +41,12 @@ IS_PRODUCTION = WS_ENV == "production"
 
 # ── R42: Pipeline step map ────────────────────────────────────────
 PIPELINE_STEP_MAP: dict[str, dict] = {
-    "step1": {"role": "admin", "name": "创建工作室"},
-    "step2": {"role": "qa", "name": "点名报道"},
-    "step3": {"role": "arch", "name": "技术方案"},
-    "step4": {"role": "dev", "name": "编码"},
-    "step5": {"role": "review", "name": "代码审查"},
-    "step6": {"role": "qa", "name": "测试验证"},
-    "step7": {"role": "admin", "name": "合并部署归档"},
+    "step1": {"role": "admin", "name": "管线启动"},
+    "step2": {"role": "arch", "name": "技术方案"},
+    "step3": {"role": "dev", "name": "编码"},
+    "step4": {"role": "review", "name": "代码审查"},
+    "step5": {"role": "qa", "name": "测试验证"},
+    "step6": {"role": "admin", "name": "合并部署归档"},
 }
 _override_raw = os.environ.get("PIPELINE_STEP_MAP_OVERRIDE", "")
 if _override_raw.strip():
