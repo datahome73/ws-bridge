@@ -61,9 +61,10 @@
 
 | 方向 | 内容 | 核心关注点 |
 |:----:|:-----|:-----------|
-| **A** | `!pipeline_start R{N}` 命令 | `_admin` 频道入口、验证前置决策、链式调用已有命令、Step 映射表 |
-| **B** | `!step_complete` 命令 | 完成标记、自动点名下一人、上下文传递（commit hash vs 手动输入） |
+| **A** | `!pipeline_start R{N}` 命令 | `_admin` 频道入口、验证前置决策、链式调用已有命令、Step 映射表（配置文件） |
+| **B** | `!step_complete` 命令 | 完成标记、自动点名下一人、上下文传递（`--output` 参数传入 commit SHA） |
 | **C** | `!pipeline_status` 命令 | task 状态聚合、格式输出 |
+| **D** | 大厅隔离 | 管线启动时暂停大厅记录、结束时恢复、工作室自动关闭 |
 
 **技术方案结构（参考 Bug 修复轮验证方案格式）：**
 
@@ -87,6 +88,7 @@ Part B — 向后兼容分析
 | A `!pipeline_start` | ~60-100 行（新命令注册 + 链式调用逻辑） |
 | B `!step_complete` | ~60-80 行（完成标记 + 自动点名 + 上下文传递） |
 | C `!pipeline_status` | ~30-50 行（状态聚合 + 格式化输出） |
+| D 大厅隔离 | ~40-60 行（暂停/恢复大厅记录 + 自动关工作室） |
 
 **Commit 格式：** `feat(R42): <方向字母>-<描述>`
 
@@ -114,6 +116,10 @@ Part B — 向后兼容分析
 | T-B2 | 开发工程师收到点名含 commit 引用 | B-2 |
 | T-B3 | 完成后 task 标记 completed | B-3 |
 | T-C1 | `!pipeline_status` 返回 Step 进度表 | C-1 |
+| T-D1 | `!pipeline_start` 后大厅新消息不入 chat log | D-1 |
+| T-D2 | 大厅消息路由仍正常工作（只是不记录） | D-2 |
+| T-D3 | Step 7 完成后大厅记录恢复 | D-3 |
+| T-D4 | 工作室自动关闭 | D-5 |
 
 #### ⏳ Step 7 — 合并部署 + 归档 🦸 admin-bot
 
