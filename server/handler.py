@@ -44,6 +44,11 @@ _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
 
+# ── R43: Watchdog state ─────────────────────────────────────
+_watchdog_started: bool = False
+_watchdog_task: asyncio.Task | None = None
+_watchdog_alerts: dict[str, float] = {}  # "{round}/{step}" → last_alert_ts
+
 _offline_timers: dict[str, asyncio.Task] = {}
 
 # R11 P1.3: Expose connections for web status API
@@ -893,6 +898,175 @@ def set_lobby_paused(paused: bool, round_name: str = "") -> None:
     logger.info("R42 lobby-pause: %s (round=%s)", paused, _LOBBY_PAUSED_ROUND)
 
 
+# ── R43: Watchdog helpers ──────────────────────────────────────────
+
+
+WATCHDOG_SCAN_INTERVAL: int = 600       # 10 分钟（秒）
+WATCHDOG_REALERT_INTERVAL: int = 1800   # 30 分钟（秒）
+
+# 超时默认值（与 config.py STEP_TIMEOUT_DEFAULTS 保持一致）
+_STEP_TIMEOUT_DEFAULTS: dict[str, float] = {
+    "step1": 2.0,
+    "step2": 6.0,
+    "step3": 12.0,
+    "step4": 4.0,
+    "step5": 6.0,
+    "step6": 2.0,
+}
+
+
+def _ensure_watchdog() -> None:
+    """Lazily start the background watchdog loop on first call."""
+    global _watchdog_started, _watchdog_task
+    if _watchdog_started:
+        return
+    _watchdog_task = asyncio.create_task(_watchdog_loop())
+    _watchdog_started = True
+    logger.info("R43 watchdog started (scan=%ds, realert=%ds)",
+                WATCHDOG_SCAN_INTERVAL, WATCHDOG_REALERT_INTERVAL)
+
+
+async def _watchdog_loop() -> None:
+    """Background watchdog loop — scans all active pipelines every 10 min."""
+    try:
+        while True:
+            await asyncio.sleep(WATCHDOG_SCAN_INTERVAL)
+            await _watchdog_scan()
+    except asyncio.CancelledError:
+        logger.info("R43 watchdog loop cancelled — shutting down")
+
+
+async def _watchdog_scan() -> None:
+    """Scan all active pipelines and trigger alerts for timed-out steps."""
+    if not _PIPELINE_STATE:
+        return  # A-2: no active pipelines → zero output
+
+    now = time.time()
+    step_config = _load_step_config()
+
+    for round_name, pstate in list(_PIPELINE_STATE.items()):
+        if not pstate.get("active"):
+            continue
+
+        step_name = pstate.get("current_step", "")
+        if not step_name:
+            continue
+
+        # Calculate elapsed time
+        started_at = pstate.get("started_at", now)
+        elapsed_hours = (now - started_at) / 3600.0
+
+        # Get timeout threshold
+        timeout_hours = _get_step_timeout(step_name)
+
+        # Skip if not timed out
+        if elapsed_hours <= timeout_hours:
+            continue
+
+        # Check/record alert status
+        alert_type = _check_watchdog_alert(round_name, step_name)
+        if alert_type is None:
+            continue  # Within cooldown period
+        if alert_type == "cooldown":
+            continue
+
+        # Send alert
+        await _send_watchdog_alert(
+            round_name, step_name, elapsed_hours, timeout_hours, alert_type,
+        )
+
+
+def _get_step_timeout(step_name: str) -> float:
+    """Get timeout_hours for a step — config > default > infinity."""
+    step_config = _load_step_config()
+    step_info = step_config.get(step_name, {})
+    if step_info and "timeout_hours" in step_info:
+        return float(step_info["timeout_hours"])
+    return float(_STEP_TIMEOUT_DEFAULTS.get(step_name, float("inf")))
+
+
+def _check_watchdog_alert(round_name: str, step_name: str) -> str | None:
+    """Check dedup state and return 'first', 'repeat', or None (skip)."""
+    key = f"{round_name}/{step_name}"
+    now = time.time()
+    last_alert = _watchdog_alerts.get(key)
+
+    if last_alert is None:
+        # First-time timeout
+        _watchdog_alerts[key] = now
+        return "first"
+
+    # Already alerted — check cooldown
+    elapsed = now - last_alert
+    if elapsed < WATCHDOG_REALERT_INTERVAL:
+        return None  # Skip — within cooldown
+
+    _watchdog_alerts[key] = now
+    return "repeat"
+
+
+def _clear_watchdog_alert(round_name: str, step_name: str) -> bool:
+    """Clear watchdog alert marker. Returns True if an alert was active."""
+    key = f"{round_name}/{step_name}"
+    if key in _watchdog_alerts:
+        del _watchdog_alerts[key]
+        return True
+    return False
+
+
+def _elapsed_hours_display(elapsed_hours: float) -> str:
+    """Format elapsed time for display."""
+    if elapsed_hours < 1:
+        return f"{int(elapsed_hours * 60)} 分钟"
+    return f"{elapsed_hours:.1f} 小时"
+
+
+async def _send_watchdog_alert(
+    round_name: str,
+    step_name: str,
+    elapsed_hours: float,
+    timeout_hours: float,
+    alert_type: str,
+) -> None:
+    """Send timeout alert to _admin channel."""
+    step_config = _load_step_config()
+    step_info = step_config.get(step_name, {})
+    step_display = step_info.get("name", step_name)
+    role = step_info.get("role", "?")
+    repeat_tag = f"（重复通知）" if alert_type == "repeat" else ""
+
+    started_at = _PIPELINE_STATE.get(round_name, {}).get("started_at", 0)
+    import datetime as _dt
+    started_dt = _dt.datetime.fromtimestamp(started_at).strftime("%Y-%m-%d %H:%M")
+
+    msg = (
+        f"⚠️ {round_name} 管线超时告警{repeat_tag}\n"
+        f"  Step: {step_display}（{step_name}）\n"
+        f"  责任人: {role}\n"
+        f"  已挂起: {_elapsed_hours_display(elapsed_hours)}（超时阈值: {timeout_hours}h）\n"
+        f"  启动时间: {started_dt}\n"
+        f"  建议操作: 联系 {role} 或考虑换人"
+    )
+
+    _persist_broadcast(p.ADMIN_CHANNEL, "系统", msg)
+    logger.info("R43 watchdog alert: %s/%s (%s)", round_name, step_name, alert_type)
+
+
+async def _send_clear_alert(round_name: str, step_name: str, output_ref: str) -> None:
+    """Send recovery notification to _admin channel."""
+    step_config = _load_step_config()
+    step_info = step_config.get(step_name, {})
+    step_display = step_info.get("name", step_name)
+
+    msg = (
+        f"✅ {round_name} {step_display}（{step_name}）已恢复 — "
+        f"已完成（{output_ref}）"
+    )
+
+    _persist_broadcast(p.ADMIN_CHANNEL, "系统", msg)
+    logger.info("R43 watchdog clear: %s/%s", round_name, step_name)
+
+
 
 
 # ── R42: Pipeline commands ─────────────────────────────────────────
@@ -1041,6 +1215,15 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     next_step = step_keys[current_idx + 1]
     next_role = step_config[next_step]["role"]
 
+    # ── R43 D: Resolve next role display name ──
+    users = auth.get_users()
+    next_role_names = [
+        users.get(aid, {}).get("name", aid[:12])
+        for aid in ws_obj.members
+        if users.get(aid, {}).get("role", "member") == next_role
+    ]
+    next_role_display = ", ".join(next_role_names) if next_role_names else next_role
+
     # 调用 !rollcall_next 点名下一角色
     context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
     rollcall_result = await _cmd_rollcall_next(sender_id, {
@@ -1074,8 +1257,15 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     except Exception:
         pass
 
+    # ── R43 C: Send clear alert if watchdog was active ──
+    if _clear_watchdog_alert(round_name, step_name):
+        await _send_clear_alert(round_name, step_name, output_ref)
+
+    # ── R43 D: Enhanced return value with rollcall confirm ──
     return (
         f"✅ **{step_name} 完成** → 交接给 {next_role} {next_step}\n"
+        f"  📋 已点名 {next_role_display}，等待确认「到」\n"
+        f"  🎯 负责人请切到工作室频道回复「到」开始\n"
         f"  {task_result}\n"
         f"  {rollcall_result}\n"
         f"  {next_task_result}"
@@ -1283,6 +1473,9 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     - All messages → written to chat log (大宏/网页端可见)
     - Channel messages (non-lobby) → scoped to workspace members + admin
     """
+    # ── R43 A: Lazy-start watchdog on first message ──
+    _ensure_watchdog()
+
     content = msg.get("content", "")
     channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
 
