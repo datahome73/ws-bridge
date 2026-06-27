@@ -52,26 +52,38 @@
 
 ### Step 4：审查
 
+**状态：** ✅ 已完成 — 小周审查 `8a64665` `d68ae01`，6/6 全部通过
+
 确认：
-- [ ] 所有 `get_tasks_by_context` 调用全部修正
-- [ ] `pipeline_start` 中有 `_task_notify_workspace` 调用
-- [ ] `step_complete` 中有 `_task_notify_workspace` 调用
-- [ ] workspace_close 或 final step 有进度清理
-- [ ] 不引入新的未引用导入或死代码
+- [x] 所有 `get_tasks_by_context` 调用全部修正 → 0 残留 ✅
+- [x] `pipeline_start` 中有 `_task_notify_workspace` 调用 ✅
+- [x] `step_complete` 中有 `_task_notify_workspace` 调用 ✅
+- [x] workspace_close 或 final step 有进度清理（A4）✅
+- [x] 不引入新的未引用导入或死代码 ✅
 
 ### Step 5：PR → 合并 main
 
+**状态：** ✅ 已完成 — dev→main 合并于 `c4846fa`
+
 ```bash
-cd /tmp/ws-bridge-r47
-git add -A
-git commit -m "R47 fix: F-14 function name + task notification chain"
+cd /root/rebuild-ws-bridge
 git push origin dev
-# 创建 PR dev → main，合并
+git checkout main
+git merge dev
+git push origin main
 ```
 
 ### Step 6：部署
 
-通知 admin 重新部署生产容器（`docker compose restart ws-bridge` 或 `docker compose up -d --build`）。
+**状态：** ✅ 已完成 — `ws-bridge:r47` 镜像构建部署运行中，4 agents 已连接
+
+```bash
+docker build -t ws-bridge:r47 -f Dockerfile .
+docker rm -f ws-bridge-prod
+docker run -d --name ws-bridge-prod --restart unless-stopped \
+  -p 28787:8765 -v /opt/ws-bridge-prod/data:/app/data \
+  ws-bridge:r47 python3 -u /app/entrypoint.py
+```
 
 ---
 
@@ -79,12 +91,11 @@ git push origin dev
 
 ### Step 7：创建管线
 
-向 `_admin` 频道发送：
-```
-!pipeline_start R47
-```
+**状态：** ✅ 已完成 — R47 管线已通过 `!pipeline_start R47` 创建并完成全流程
 
 ### Step 8：验证
+
+**状态：** ✅ 全部通过 — 泰虾 QA 确认全 🟢
 
 | 验证项 | 预期 | 实际 |
 |:-------|:-----|:-----|
@@ -95,10 +106,12 @@ git push origin dev
 
 ### Step 9：收尾
 
+**状态：** ✅ 已完成 — R47 全流程归档
+
 所有验证通过后：
-- [ ] 更新 `docs/TODO.md` 标记 F-14 为 🟢
-- [ ] 更新 R47 文档状态
-- [ ] 将 R47 文档推送到 dev
+- [x] 更新 `docs/TODO.md` 标记 F-14 为 🟢
+- [x] 更新 R47 文档状态
+- [x] 将 R47 文档推送到 dev
 
 ---
 
