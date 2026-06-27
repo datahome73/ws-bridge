@@ -50,7 +50,7 @@ PM 在 `_admin` 频道执行 `!pipeline_start R45`，验证方向 A 的 GitHub d
 🏗️ arch-bot 出双方向方案：
 
 **方向 A — GitHub dev 分支读取 WORK_PLAN.md**
-将 `_cmd_pipeline_start()` 中的 `os.path.exists` 本地检查改为从 `raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/...` 获取。保留本地文件系统作为 fallback。预估 ~10 行。
+在 `config.py` 新增 `WORK_PLAN_REPO_URL`（默认指向 `datahome73/ws-bridge/dev`，环境变量可覆盖，fork 友好），`_cmd_pipeline_start()` 中拼接 URL 从远程读取。保留本地文件系统作为 fallback。预估 ~12 行（+3 config + ~9 handler）。
 
 **方向 B — F-4 测试标签前缀修复**
 在 `_classify_lobby_message()` 中，strip 测试标签后再检查原始前缀。预估 ~8 行。

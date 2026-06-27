@@ -108,16 +108,33 @@ PM 收到：「🚀 R45 管线已启动 / Step: step2 → arch / ...」
 
 #### 实现说明
 
+在 `server/config.py` 中新增配置项，然后在 `handler.py` 中拼接使用。
+
+**config.py 新增：**
+
 ```python
-# 当前代码（handler.py:1092-1096）：
+# ── R45 A: Pipeline WORK_PLAN remote source ──
+# Base URL for fetching R{N} planning documents from GitHub.
+# Points to the dev branch of the canonical repo.
+# Fork maintainers should change this to their own repo URL.
+WORK_PLAN_REPO_URL: str = os.environ.get(
+    "WORK_PLAN_REPO_URL",
+    "https://raw.githubusercontent.com/datahome73/ws-bridge/dev",
+)
+```
+
+**handler.py 修改（当前代码 line 1092-1096）：**
+
+```python
+# 当前代码（本地文件系统）：
 import os as _r42os
 work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
 if not _r42os.path.exists(work_plan_path):
     return f"❌ {round_name} 未找到 WORK_PLAN.md，请先完成 Step A/B"
 
-# 修改后：
+# 修改后（远程 + 本地 fallback）：
 import urllib.request
-remote_url = f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"
+remote_url = f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/WORK_PLAN.md"
 try:
     with urllib.request.urlopen(remote_url, timeout=5) as resp:
         if resp.status != 200:
@@ -131,6 +148,12 @@ except Exception:
 ```
 
 > 技术方案（具体实现——urllib / aiohttp / 异步 HTTP 请求）由架构师决定。
+
+#### 环境变量
+
+| 变量名 | 默认值 | 说明 |
+|:-------|:-------|:------|
+| `WORK_PLAN_REPO_URL` | `https://raw.githubusercontent.com/datahome73/ws-bridge/dev` | 文档仓库基址，fork 后只需改此 URL |
 
 ### 方向 B — 测试标签前缀兼容（F-4 修复） 🟢 P3
 
