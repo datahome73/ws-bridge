@@ -110,12 +110,14 @@
 | T-C5 | 通知使用纯文本格式 | C-5 |
 | T-D1 | `!step_complete` 返回值含「已点名 <角色>，等待确认」 | D-1 |
 
-#### ✅ Step 6 — 合并部署 + 归档 🦸 admin-bot ✅
+#### Step 6 — 合并部署 + 归档 🦸 admin-bot ✅
 
-- ✅ `git checkout main && git merge dev` — main 已对齐 dev（`2b4b615`）
-- ✅ 服务验证 — 端口 8765/80/443/28787 全部可达
-- ✅ TODO.md v2.11 — R43 已完成，F-11 🟢
-- ✅ 工作室关闭 — 回归大厅
+| 事项 | 状态 |
+|:-----|:----:|
+| `git merge dev` 到 main | ✅ `2b4b615` 已推送 |
+| 更新 TODO.md（F-11 🟢 已完成） | ✅ docs/TODO.md v2.11 |
+| R43 文档存档 | ✅ tech-plan / code-review / test-report / WORK_PLAN 均到位 |
+| 关闭 R43 开发工作室 | ✅ `!close_workspace R43-dev` |
 
 ---
 
