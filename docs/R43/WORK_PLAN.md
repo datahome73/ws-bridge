@@ -110,7 +110,7 @@
 | T-C5 | 通知使用纯文本格式 | C-5 |
 | T-D1 | `!step_complete` 返回值含「已点名 <角色>，等待确认」 | D-1 |
 
-#### Step 6 — 合并部署 + 归档 🦸 admin-bot
+#### ✅ Step 6 — 合并部署 + 归档 🦸 admin-bot ✅
 
 - `git checkout main && git merge dev`
 - 部署到生产容器
