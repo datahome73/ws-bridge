@@ -38,30 +38,31 @@
 
 ### 🟢 自动化管线（6 步管线 — 首轮试点）
 
-#### Step 1 — `!pipeline_start R43` 🤖 服务器自动
+#### Step 1 — `!pipeline_start R43` 🤖 服务器自动 ✅
 
-| 事项 | 说明 |
-|:-----|:------|
-| 触发方式 | PM 在 `_admin` 频道发 `!pipeline_start R43` |
-| 自动操作 | ① 验证前置决策 ② 创建工作室 R43-dev ③ 点名全员 ④ 点名架构师出技术方案 |
+| 事项 | 状态 |
+|:-----|:----:|
+| 触发方式 | ✅ `_admin` 频道 `!pipeline_start R43` 已执行 |
+| 自动操作 | ✅ 验证前置决策 ✅ 创建工作室 R43-dev ✅ 点名全员 ✅ 点名架构师出技术方案 |
+| 完成时间 | 2026-06-27 |
 
-#### ✅ Step 2 — 技术方案 🏗️ arch-bot ✅ `c5c1df6`
+#### Step 2 — 技术方案 🏗️ arch-bot ✅
 
-| 事项 | 说明 |
-|:-----|:------|
-| 产出文件 | `docs/R43/R43-tech-plan.md` |
-| 核心关注 | A 看门狗定时器（启动/周期/生命周期） + B 超时配置扩展 + C 通知格式 + D 交接确认增强 |
-| 工作流对齐 | `PIPELINE_STEP_MAP` 已更新为 6 步，方案中所有 Step 引用以新编号为准 |
-| 完成标志 | 推 dev + `!step_complete Step2 --output <commit-sha>` →
+| 事项 | 状态 |
+|:-----|:----:|
+| 产出文件 | ✅ `docs/R43/R43-tech-plan.md`（530 行，四方向全覆盖） |
+| 提交 | ✅ `c5c1df6` 推送到 `origin/dev` |
+| 完成标志 | ✅ `!step_complete step2 --output c5c1df6` 已执行 |
+| 移交 | ✅ 点名 dev-bot Step 3，看门狗 12h 超时已就绪 |
 
-**技术方案需覆盖：**
+**已覆盖内容：**
 
 | 方向 | 内容 | 核心关注点 |
 |:----:|:-----|:-----------|
-| **A** | 看门狗定时器 | 10min 周期 asyncio 后台任务、活跃管线扫描、TimeSinceStarted 计算、不重复告警标记 |
-| **B** | Step 超时配置 | `PIPELINE_STEP_MAP` 扩展 `timeout_hours` + `escalation` 字段、环境变量覆盖、未配置时默认值 |
-| **C** | 超时通知 | `_admin` 频道广播、首次+重复(30min)+解除三段通知、告警格式、重复标志管理 |
-| **D** | 交接响应增强 | `!step_complete` 返回值中增加「已点名 <角色>，等待确认」信息 |
+| **A** | 看门狗定时器 | 10min 周期 asyncio 后台任务、惰性启动、CancelledError 优雅退出、_watchdog_alerts 去重字典 |
+| **B** | Step 超时配置 | `PIPELINE_STEP_MAP` 扩展 `timeout_hours`+`escalation`、`STEP_TIMEOUT_DEFAULTS` 兜底、env override 兼容 |
+| **C** | 超时通知 | 三段式：首次告警→30min 重复→解除通知，纯文本 _admin 频道广播 |
+| **D** | 交接响应增强 | `!step_complete` 返回值追加「已点名 <角色>，等待确认」 |
 
 #### Step 3 — 编码实现 💻 dev-bot
 
