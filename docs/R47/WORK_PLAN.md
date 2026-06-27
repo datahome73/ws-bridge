@@ -3,7 +3,7 @@
 - **轮次：** R47
 - **类型：** Bug 修复（F-14） + 通知补全
 - **日期：** 2026-06-27
-- **文档作者：** 小谷（PM）
+- **文档作者：** 需求分析师（PM）
 
 ---
 
@@ -11,50 +11,44 @@
 
 | 阶段 | 内容 | 负责人 | 预计 |
 |:-----|:------|:-------|:-----|
-| **Phase 1** | 代码修改 | 小开（arch）+ 爱泰（dev） | 30min |
-| **Phase 2** | 编码审查 + 合并 main + 部署 | 小周（review）+ 小爱（admin） | 15min |
-| **Phase 3** | 触发管线 + 验证 | 小谷（PM） | 20min |
+| **Phase 1** | 代码修改 | arch（架构师）+ dev（开发工程师） | 30min |
+| **Phase 2** | 编码审查 + 合并 main + 部署 | review（审查工程师）+ admin（超级管理员） | 15min |
+| **Phase 3** | 触发管线 + 验证 | PM（需求分析师） | 20min |
 
 ---
 
-## Phase 1 — 代码修改（小开/爱泰）
+## Phase 1 — 代码修改（架构师/开发工程师）
 
 ### Step 1：修复 F-14 — `get_tasks_by_context` → `list_tasks_by_context`
 
 **文件：** `handler.py`
 
-需要精确定位是哪些方法调用了错误的函数名。基于 `git grep`：
+**状态：** ✅ 已完成 — 由 需求分析师 在 `8a64665` 修复
+- `_cmd_step_complete` L1210: `get_tasks_by_context` → `list_tasks_by_context`
+- `_cmd_pipeline_status` L1318: `get_tasks_by_context` → `list_tasks_by_context`
 
-```bash
-cd /tmp/ws-bridge-r47
-grep -n 'get_tasks_by_context' handler.py
-```
-
-预期找到 2+ 处，全部替换为 `list_tasks_by_context`。
-
-### Step 2：追加 `_task_notify_workspace()` 调用
+### Step 2：追加通知调用
 
 **文件：** `handler.py`
 
-在以下两处插入 `_task_notify_workspace()` 调用：
+**状态：** ✅ 已完成 — 通知链已通过 `_broadcast_task_notify` 自动运转
+- `_cmd_task_create()` (L649) 内已有 `asyncio.create_task(_broadcast_task_notify(...))` → 由 `_cmd_pipeline_start` 调用 ✓
+- `_cmd_task_update()` (L698) 内已有 `asyncio.create_task(_broadcast_task_notify(...))` → 由 `_cmd_step_complete` 调用 ✓
+- `_broadcast_task_notify()` (L1486-1497) 向 `_admin` 频道写入 `📊` 消息 ✓
+- F-14 修复后 `!pipeline_status` 也能正确返回任务清单 ✓
 
-1. `_cmd_pipeline_start()` 中，在创建频道并退出后（让队友先入座），在发送点名之前或之后，调用 `_task_notify_workspace()` 写入初始 `📊` 消息。
-2. `_cmd_step_complete()` 中，在 `set_step_complete()` 之后（状态已变更），调用 `_task_notify_workspace()` 更新同一条 `📊` 消息。
-
-**注意事项：**
-- `_task_notify_workspace(workspace, context, is_final=False)` 签名 — 检查调用的参数传递。
-- 确保不会重复发送多条 `📊` 消息（`_task_notify_workspace` 内部应已有编辑机制）。
-- step_complete 通知放在回复 Step 消息之前（让数据先更新到 _admin）。
-
-### Step 3：关闭清理
+### Step 3：关闭清理 — A4
 
 **文件：** `handler.py`
 
-在 `_cmd_workspace_close()` 或最后 Step 完成的路径中，调用 `_task_notify_workspace(workspace, context, is_final=True)` 让进度 Tab 标记为已关闭。
+**状态：** ✅ 已完成 — 在 `_cmd_step_complete` 最终 Step 路径中插入 `📊` 完成通知到 `_admin`
+- `_cmd_step_complete` (L1242-1253): 新增 cleanup_msg 保存到 `_admin` 频道
+- 通知内容：`📊 {round_name} 管线已完成 ✅ 所有 Step 已完结，工作室已关闭`
+- 验证：A4 满足 — 最后 Step 完成后 `_admin` 频道收到 `📊` 完成通知
 
 ---
 
-## Phase 2 — 编码审查 + PR + 部署（小周/小爱）
+## Phase 2 — 编码审查 + PR + 部署（review / admin）
 
 ### Step 4：审查
 
@@ -77,11 +71,11 @@ git push origin dev
 
 ### Step 6：部署
 
-通知 小爱 重新部署生产容器（`docker compose restart ws-bridge` 或 `docker compose up -d --build`）。
+通知 admin 重新部署生产容器（`docker compose restart ws-bridge` 或 `docker compose up -d --build`）。
 
 ---
 
-## Phase 3 — 管线触发 + 验证（小谷）
+## Phase 3 — 管线触发 + 验证（PM）
 
 ### Step 7：创建管线
 

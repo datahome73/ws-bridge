@@ -1238,6 +1238,20 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
         set_lobby_paused(False)
         _clear_pipeline_state(round_name)
+
+        # ── R47 A4: 清理进度消息 ──
+        try:
+            cleanup_msg = f"📊 {round_name} 管线已完成 ✅ 所有 Step 已完结，工作室已关闭"
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=cleanup_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
+            )
+            write_chat_log("系统", cleanup_msg, channel=p.ADMIN_CHANNEL)
+        except Exception:
+            pass
+
         return (
             f"🏁 **{round_name} 管线已完成！**\n"
             f"  {task_result}\n"
