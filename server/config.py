@@ -39,6 +39,13 @@ WS_ENV = os.environ.get("WS_ENV", "dev")  # "dev" | "production"
 IS_PRODUCTION = WS_ENV == "production"
 
 
+# ── R45 A: Pipeline WORK_PLAN remote source ────────────────────────
+WORK_PLAN_REPO_URL: str = os.environ.get(
+    "WORK_PLAN_REPO_URL",
+    "https://raw.githubusercontent.com/datahome73/ws-bridge/dev",
+)
+
+
 # ── R42: Pipeline step map ────────────────────────────────────────
 PIPELINE_STEP_MAP: dict[str, dict] = {
     "step1": {"role": "admin",   "name": "管线启动",       "timeout_hours": 2.0,  "escalation": "notify_pm"},
