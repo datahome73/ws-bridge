@@ -1,58 +1,113 @@
-# R47 工作计划 — 进度 Tab 数据管线修复
+# R47 工作计划 — 进度 Tab 内容修复
 
-> **版本：** v1.0（初稿，待项目负责人审核）
-> **状态：** 📋 草稿
-> **产品经理：** 🧐 PM
-> **日期：** 2026-06-27
-
----
-
-## 角色分工
-
-| 角色 | 职责 |
-|:-----|:------|
-| 🧐 PM | 需求文档 + 工作计划 + 协调 |
-| 🏗️ arch-bot | 技术方案 |
-| 💻 dev-bot | 编码实现 |
-| 🔍 review-bot | 代码审查 |
-| 🦐 qa-bot | 测试验证 |
+- **轮次：** R47
+- **类型：** Bug 修复（F-14） + 通知补全
+- **日期：** 2026-06-27
+- **文档作者：** 小谷（PM）
 
 ---
 
-## 流水线步骤
+## 阶段总览
 
-| Step | 名称 | 负责人 | 产出 | 状态 |
-|:----:|:-----|:------|:-----|:----:|
-| 🔶 A | **需求文档** | 🧐 PM | `docs/R47/R47-product-requirements.md` v0.1 | 🆕 待审核 |
-| 🔶 B | **工作计划** | 🧐 PM | 本文档 v1.0 | 🆕 待审核 |
-| 🟢 1 | **管线启动** | 🧐 PM | `!pipeline_start R47` | ⏳ |
-| 🟢 2 | **技术方案** | 🏗️ arch-bot | `docs/R47/R47-tech-plan.md` | ⏳ |
-| 🟢 3 | **编码** | 💻 dev-bot | `handler.py` ~20 行改动 | ⏳ |
-| 🟢 4 | **代码审查** | 🔍 review-bot | `docs/R47/R47-code-review.md` | ⏳ |
-| 🟢 5 | **测试** | 🦐 qa-bot | `docs/R47/R47-test-report.md` | ⏳ |
-| 🟢 6 | **合并部署归档** | 🦸 admin-bot | 合并 dev→main，更新 TODO.md F-14 | ⏳ |
+| 阶段 | 内容 | 负责人 | 预计 |
+|:-----|:------|:-------|:-----|
+| **Phase 1** | 代码修改 | 小开（arch）+ 爱泰（dev） | 30min |
+| **Phase 2** | 编码审查 + 合并 main + 部署 | 小周（review）+ 小爱（admin） | 15min |
+| **Phase 3** | 触发管线 + 验证 | 小谷（PM） | 20min |
 
 ---
 
-## 详细说明
+## Phase 1 — 代码修改（小开/爱泰）
 
-### Step 2 — 技术方案
+### Step 1：修复 F-14 — `get_tasks_by_context` → `list_tasks_by_context`
 
-1. `handler.py` 中两处 `ts.get_tasks_by_context` → `ts.list_tasks_by_context`（F-14 修复）
-2. `_cmd_pipeline_start()` 中 task 创建后调用 `_task_notify_workspace()`
-3. `_cmd_step_complete()` 中状态变更时触发通知
-4. `_cmd_close_workspace()` 检查管线状态，写结束消息
+**文件：** `handler.py`
 
-### Step 5 — 测试
+需要精确定位是哪些方法调用了错误的函数名。基于 `git grep`：
 
-- A-1/A-2: `!pipeline_status` + `!step_complete` 不再报错
-- A-3/A-4: `/api/chat?channel=_admin` 出现 📊 消息
-- B-1: 关闭后出现结束消息
+```bash
+cd /tmp/ws-bridge-r47
+grep -n 'get_tasks_by_context' handler.py
+```
+
+预期找到 2+ 处，全部替换为 `list_tasks_by_context`。
+
+### Step 2：追加 `_task_notify_workspace()` 调用
+
+**文件：** `handler.py`
+
+在以下两处插入 `_task_notify_workspace()` 调用：
+
+1. `_cmd_pipeline_start()` 中，在创建频道并退出后（让队友先入座），在发送点名之前或之后，调用 `_task_notify_workspace()` 写入初始 `📊` 消息。
+2. `_cmd_step_complete()` 中，在 `set_step_complete()` 之后（状态已变更），调用 `_task_notify_workspace()` 更新同一条 `📊` 消息。
+
+**注意事项：**
+- `_task_notify_workspace(workspace, context, is_final=False)` 签名 — 检查调用的参数传递。
+- 确保不会重复发送多条 `📊` 消息（`_task_notify_workspace` 内部应已有编辑机制）。
+- step_complete 通知放在回复 Step 消息之前（让数据先更新到 _admin）。
+
+### Step 3：关闭清理
+
+**文件：** `handler.py`
+
+在 `_cmd_workspace_close()` 或最后 Step 完成的路径中，调用 `_task_notify_workspace(workspace, context, is_final=True)` 让进度 Tab 标记为已关闭。
 
 ---
 
-## 变更记录
+## Phase 2 — 编码审查 + PR + 部署（小周/小爱）
 
-| 版本 | 日期 | 变更 |
-|:----:|:----:|:------|
-| v1.0 | 2026-06-27 | 初稿 — 修复进度 Tab 数据链（F-14） |
+### Step 4：审查
+
+确认：
+- [ ] 所有 `get_tasks_by_context` 调用全部修正
+- [ ] `pipeline_start` 中有 `_task_notify_workspace` 调用
+- [ ] `step_complete` 中有 `_task_notify_workspace` 调用
+- [ ] workspace_close 或 final step 有进度清理
+- [ ] 不引入新的未引用导入或死代码
+
+### Step 5：PR → 合并 main
+
+```bash
+cd /tmp/ws-bridge-r47
+git add -A
+git commit -m "R47 fix: F-14 function name + task notification chain"
+git push origin dev
+# 创建 PR dev → main，合并
+```
+
+### Step 6：部署
+
+通知 小爱 重新部署生产容器（`docker compose restart ws-bridge` 或 `docker compose up -d --build`）。
+
+---
+
+## Phase 3 — 管线触发 + 验证（小谷）
+
+### Step 7：创建管线
+
+向 `_admin` 频道发送：
+```
+!pipeline_start R47
+```
+
+### Step 8：验证
+
+| 验证项 | 预期 | 实际 |
+|:-------|:-----|:-----|
+| `📊` 初始消息 | 创建管线后在 `_admin` 可见 | |
+| `!pipeline_status` | 返回当前 Step 的任务清单 | |
+| `!step_complete` 后 | `📊` 消息更新 Step 状态 | |
+| 工作室关闭 | `📊` 标记为已关闭 | |
+
+### Step 9：收尾
+
+所有验证通过后：
+- [ ] 更新 `docs/TODO.md` 标记 F-14 为 🟢
+- [ ] 更新 R47 文档状态
+- [ ] 将 R47 文档推送到 dev
+
+---
+
+## 回退方案
+
+本轮回滚极其简单：仅 `handler.py` 修改，从 git revert 然后重新部署即可。生产环境不受数据完整性问题影响。
