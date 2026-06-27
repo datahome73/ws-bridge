@@ -64,18 +64,19 @@
 | **C** | 超时通知 | 三段式：首次告警→30min 重复→解除通知，纯文本 _admin 频道广播 |
 | **D** | 交接响应增强 | `!step_complete` 返回值追加「已点名 <角色>，等待确认」 |
 
-#### Step 3 — 编码实现 💻 dev-bot
+#### ✅ Step 3 — 编码实现 💻 dev-bot ✅ `312b3ab`
 
-**改动范围预估：** 服务端代码 `server/handler.py` + `server/config.py`
+| 方向 | 预期改动量 | 实际改动量 |
+|:----:|:----------:|:----------:|
+| A 看门狗定时器 | ~40-60 行 | ✅ 惰性启动 + 10min 扫描 + CancelledError 退出 |
+| B 超时配置 | ~10-20 行 | ✅ PIPELINE_STEP_MAP 扩展 + STEP_TIMEOUT_DEFAULTS |
+| C 超时通知 | ~30-50 行 | ✅ 三段通知（首次/30min重复/解除）+ 纯文本 _admin 广播 |
+| D 交接响应 | ~10-15 行 | ✅ 返回值增强 + _rollcall_confirmed 确认机制 |
 
-| 方向 | 预期改动量 |
-|:----:|:----------:|
-| A 看门狗定时器 | ~40-60 行（后台任务 + 扫描逻辑 + 生命周期） |
-| B 超时配置 | ~10-20 行（config.py 映射表扩展 + 默认值） |
-| C 超时通知 | ~30-50 行（通知构建 + 去重管理 + 三段通知流程） |
-| D 交接响应 | ~10-15 行（`!step_complete` 返回值增强） |
-
-**Commit 格式：** `feat(R43): <方向字母>-<描述>`
+| 文件 | 操作 | 行数 |
+|:-----|:----|:----:|
+| `server/config.py` | 🔄 扩展 PIPELINE_STEP_MAP + STEP_TIMEOUT_DEFAULTS | +23 |
+| `server/handler.py` | 🔄 新增看门狗函数 + _cmd_step_complete 增强 | +199 |
 
 #### Step 4 — 代码审查 🔍 review-bot
 
