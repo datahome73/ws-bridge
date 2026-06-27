@@ -1089,11 +1089,23 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     round_name = positional[0].upper()
     from_step = params.get("from", "")
 
-    # 验证前置决策状态
-    import os as _r42os
-    work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
-    if not _r42os.path.exists(work_plan_path):
-        return f"❌ {round_name} 未找到 WORK_PLAN.md，请先完成 Step A/B"
+    # 验证前置决策状态 — R45 A: Remote + local fallback
+    work_plan_ok = False
+    import urllib.request as _r45url
+    _remote_url = f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/WORK_PLAN.md"
+    try:
+        _r45req = _r45url.Request(_remote_url, method='HEAD')
+        with _r45url.urlopen(_r45req, timeout=5) as _r45resp:
+            if _r45resp.status == 200:
+                work_plan_ok = True
+    except Exception:
+        pass
+    if not work_plan_ok:
+        import os as _r42os
+        work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
+        work_plan_ok = _r42os.path.exists(work_plan_path)
+    if not work_plan_ok:
+        return f"❌ {round_name} 未找到 WORK_PLAN.md（远程+本地均失败），请先完成 Step A/B"
 
     # 锁定管线（防重复）
     if pipeline_is_active(round_name):
@@ -2103,6 +2115,8 @@ def _classify_lobby_message(content: str) -> tuple[str, list[str]]:
     Types: 'announce', 'checkin', 'help', 'mention', 'plain'
     """
     content = content.strip()
+    # R45 B (F-4): Strip [R{N}测试] test tags before prefix check
+    content = re.sub(r'^\[R\d+测试\]\s*', '', content).strip()
     if content.startswith(PREFIX_ANNOUNCE):
         return 'announce', []
     if content.startswith(PREFIX_CHECKIN):
