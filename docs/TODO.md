@@ -20,6 +20,7 @@
 | F-12 | **PM 无法直接触发管线入口** — `!pipeline_start` 需 P3+ 权限，PM(member) 无法在 TG DM 直接触发，需经 code 块中转给管理员执行 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-13 | **`!pipeline_start` 创建的工作室没有开发成员** — 未传 `--members` 参数，工作室内只有执行者一人。导致 `_cmd_rollcall_next` 找 arch 角色时工作区无人匹配 → 点名+派活静默失败 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-14 | **`task_store` 缺少 `get_tasks_by_context` 方法** — `!pipeline_status` 和 `!step_complete` 调用此方法报错 `module 'server.task_store' has no attribute 'get_tasks_by_context'`，阻断管线状态查询和 Step 完成流程 | 🟡 P2 | — | ⬜ 待定位 |
+| F-16 | **管线自动收集成员时 dev/review/qa 角色 agent 缺失** — `auth.get_users()` 中只注册了 admin 和 arch 角色，dev/review/qa 角色无对应已注册 agent（或注册时角色为默认 `member`）。管线启动后工作区只有 admin+arch，后续 Step 流转到 dev/review/qa 时点名找不到人。解决方案：① 将各 bot 注册/修正 role 为 `dev`/`review`/`qa` ② 代码层容错：无对应 agent 时跳过该 Step | 🟡 P2 | — | ⬜ 待启动 |
 | F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
 
 ### L. 代码层清理
@@ -123,12 +124,8 @@
 
 | 版本 | 日期 | 变更 |
 |:----:|:----:|:-----|
-<<<<<<< HEAD
-| | v2.13 | 2026-06-27 | 🐛 新增 F-14 — `task_store` 缺失 `get_tasks_by_context`，阻断 `!pipeline_status` 和 `!step_complete`。F-4/F-13 标记 🟢 已完成 |
-| | v2.12 | 2026-06-27 | 🎯 **R44 完成 ✅** — F-12 管线入口直达已修复（_can_broadcast _admin 放开 + permission 白名单 + 自动收集 role members + 默认 step2），编码+审查+测试 16/16 通过已合并 main |\n| | v2.11 | 2026-06-27 | 🎯 **R43 完成 ✅** — F-11 Hot Standby 信号死锁已修复（watchdog 超时自动踢人 + 三段通知 + 管道交接增强） |
-=======
-| | v2.13 | 2026-06-27 | 🐛 新增 F-14 (pipeline_status 缺 task_store.get_tasks_by_context) + F-15 (workspace_reset 命令不存在) — R45 实战发现 |\n| | v2.12 | 2026-06-27 | 🎯 **R44 完成 ✅** — F-12 管线入口直达已修复（_can_broadcast _admin 放开 + permission 白名单 + 自动收集 role members + 默认 step2），编码+审查+测试 16/16 通过已合并 main |\n| | v2.11 | 2026-06-27 | 🎯 **R43 完成 ✅** — F-11 Hot Standby 信号死锁已修复（watchdog 超时自动踢人 + 三段通知 + 管道交接增强） |
->>>>>>> c29f18b (docs(TODO): v2.13 — 新增 F-14 (pipeline_status) + F-15 (workspace_reset 不存在)，F-4 标记已完成)
+| | v2.13 | 2026-06-27 | 🐛 新增 F-14 (pipeline_status 缺 task_store.get_tasks_by_context) + F-15 (workspace_reset 命令不存在) + F-16 (dev/review/qa 角色 agent 未注册)。F-4/F-13 标记 🟢 已完成 |
+| | v2.12 | 2026-06-27 | 🎯 **R44 完成 ✅** — F-12 管线入口直达已修复
 | | v2.10 | 2026-06-26 | 🐛 新增 F-12 (PM无法直接触发管线入口) + F-13 (管线创建工作区无成员，点名派活失败) |
 | | v2.9 | 2026-06-26 | 🎯 TODO 盘点 — 归档已完成项（M-1/3/4/5、R28-1/2、R33-2、R36-D、R36-1），取消 F-7，移除空 M 段 |
 | | v2.8 | 2026-06-27 | 🎯 R41 完成 ✅ — F-10 已修复（进度 Tab notify 写入 admin channel），变更记录新增 R42 |
