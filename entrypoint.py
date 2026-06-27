@@ -11,13 +11,14 @@ DATA_DIR = os.environ.get("WS_DATA_DIR", "./data")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-from server.persistence import load_pairing_codes, load_approved_users, load_web_bind_codes, load_web_sessions
+from server.persistence import load_pairing_codes, load_approved_users, load_web_bind_codes, load_web_sessions, load_agent_channels
 import server.config as cfg
 
 load_pairing_codes(cfg.DATA_DIR)
 load_approved_users(cfg.DATA_DIR)
 load_web_bind_codes(cfg.DATA_DIR)
 load_web_sessions(cfg.DATA_DIR)
+load_agent_channels(cfg.DATA_DIR)
 
 from server.web_viewer import setup_routes
 from server.__main__ import ws_handler, _api_status, _api_search, _api_health, _auth_callback, init_db
