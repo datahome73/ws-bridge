@@ -1207,7 +1207,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     ws_id = sender_ch
 
     # 标记当前 Task completed
-    tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
     current_task = None
     for t in tasks:
         if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
@@ -1315,7 +1315,7 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
             continue
         lines.append(f"📊 **{round_name} 管线状态**")
         step_config = _load_step_config()
-        tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+        tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
 
         for step_key, step_info in sorted(
             step_config.items(),
