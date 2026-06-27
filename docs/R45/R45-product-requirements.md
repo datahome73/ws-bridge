@@ -54,7 +54,7 @@ R44 修复了两处管线入口断点：
 | `_admin` 频道 | ✅ | 常驻，可用于测试命令路由 |
 | `_classify_lobby_message()` | ✅ | handler.py 中前缀分类函数 |
 | `PREFIX_ANNOUNCE / PREFIX_CHECKIN / PREFIX_HELP` | ✅ | 前缀常量定义 |
-| 生产环境 WebSocket 入口 | ✅ | ws://72.62.197.200:8765/ws（开发）/ ws://72.62.197.200/ws（nginx） |
+| 生产环境 WebSocket 入口 | ✅ | 已部署上线，各 bot 已正确配置 |
 | Web 端聊天室 | ✅ | 可实时观察 `_admin` 频道消息 |
 
 ### 1.4 不是问题的情况
