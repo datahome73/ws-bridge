@@ -106,11 +106,11 @@
 - T-A4: 发 `!pipeline_start` 无参数，确认返回格式化的用法提示
 - T-A5: 发 `!pipeline_start R44` 后，检查 TG DM 是否收到管线启动结果
 
-#### Step 6 — 合并部署 + 归档 🦸 admin-bot
+#### ✅ Step 6 — 合并部署 + 归档 🦸 admin-bot ✅ `7992b2b`
 
-- `git checkout main && git merge dev` — main 对齐 dev
-- TODO.md 更新：F-12 标记为 🟢 已完成
-- 工作室关闭，回归大厅
+- ✅ `git checkout main && git merge dev` — main 对齐 dev (`7992b2b`)
+- ✅ TODO.md 更新：F-12 标记为 🟢 已完成
+- ✅ 工作室关闭，回归大厅
 
 ---
 
