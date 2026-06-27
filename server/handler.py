@@ -1251,7 +1251,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             write_chat_log("系统", cleanup_msg, channel=p.ADMIN_CHANNEL)
         except Exception:
             pass
-
         return (
             f"🏁 **{round_name} 管线已完成！**\n"
             f"  {task_result}\n"
