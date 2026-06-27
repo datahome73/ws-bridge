@@ -390,6 +390,12 @@ def _check_command_permission(
     min_role = cmd.get("min_role", 4)
     ws_scope = cmd.get("workspace_scope", False)
 
+    # ── R44 F-12: PM pipeline_start bypass ────────────────
+    # Allow any authenticated member to trigger !pipeline_start
+    # from the _admin channel. Only this one command is exempted.
+    if cmd_name == "pipeline_start" and min_role <= 3:
+        return True, ""
+
     # P3: verify actual workspace admin before allowing ws_scope commands
     if min_role <= 3 and ws_scope:
         if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
@@ -1096,9 +1102,24 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 暂停大厅接收（方向 D）
     set_lobby_paused(True, round_name)
 
-    # 创建工作室
+    # ── R44 F-13: Auto-collect workspace members ──────────
+    step_config = _load_step_config()
+    all_roles = set()
+    for step_key, step_cfg in step_config.items():
+        role = step_cfg.get("role", "")
+        if role and step_key != "step1":
+            all_roles.add(role)
+
+    users = auth.get_users()
+    member_ids = []
+    for aid, u in users.items():
+        if u.get("role", "member") in all_roles:
+            member_ids.append(aid)
+
+    # 创建工作室（带自动组建）
     create_params = {
         "_positional": [f"{round_name}-dev"],
+        "members": ",".join(member_ids),
     }
     create_result = await _cmd_create_workspace(sender_id, create_params)
 
@@ -1106,8 +1127,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
 
     # 查 Step 映射表，找起始角色
-    step_config = _load_step_config()
-    start_step = from_step if from_step else "step3"
+    start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
 
     # 点名架构师，附带文档 URL
@@ -2337,14 +2357,14 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
         return True, ""
 
     # R35: _admin channel — only admins (P3/P4) can send
+    # R44 F-12: PM pipeline_start bypass — allow broadcast, command-level check still applies
     if channel == p.ADMIN_CHANNEL:
         if auth.is_global_admin(agent_id):
             return True, ""
         if _is_any_workspace_admin(agent_id):
             return True, ""
-        users = auth.get_users()
-        name = users.get(agent_id, {}).get("name", agent_id[:12])
-        return False, f"{name} 无权访问管理频道"
+        # R44: member broadcast allowed; _check_command_permission enforces pipeline_start only
+        return True, ""
 
     # R23: registration channel → allow (admin-relay handles routing)
     if channel == p.REGISTRATION_CHANNEL:
