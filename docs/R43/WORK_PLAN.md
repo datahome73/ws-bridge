@@ -117,7 +117,7 @@
 | `git merge dev` 到 main | ✅ `2b4b615` 已推送 |
 | 更新 TODO.md（F-11 🟢 已完成） | ✅ docs/TODO.md v2.11 |
 | R43 文档存档 | ✅ tech-plan / code-review / test-report / WORK_PLAN 均到位 |
-| 关闭 R43 开发工作室 | ⏳ 执行中 |
+| 关闭 R43 开发工作室 | ✅ `!close_workspace R43-dev` |
 
 ---
 
