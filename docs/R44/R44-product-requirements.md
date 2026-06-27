@@ -1,10 +1,10 @@
 # R44 产品需求 — 管线入口修复（Pipeline Entry Fix）
 
-> **版本：** v0.1（草稿，待项目负责人审核）
+> **版本：** v0.2（草稿，待项目负责人审核）
 > **状态：** 📝 草稿（待审核）
 > **产品经理：** 🧐 PM
 > **日期：** 2026-06-27
-> **本轮改动范围：** 仅第①类（服务器代码 `server/handler.py`），修复管线启动入口和工作区成员填充
+> **本轮改动范围：** 仅第①类（服务器代码 `server/handler.py` + Gateway adapter），修复管线启动入口
 
 ---
 
@@ -61,9 +61,7 @@ PM(TG DM) → 发「!pipeline_start R44」
   ↓
 系统自动：Gateway 识别到管线命令 → 路由到 _admin 频道
   → admin-bot (P4) 执行 !pipeline_start R44 --from step2
-  → 自动获取 auth.get_users() 中所有开发角色（arch、dev、review、qa）加入工作区
-  → 点名全员开麦
-  → 点名架构师出技术方案
+  → 管线启动：创建工作室 + 点名 + 派活
 
 PM：一次操作，零中转，管线即时启动 ✅
 ```
@@ -71,9 +69,8 @@ PM：一次操作，零中转，管线即时启动 ✅
 ### 关键改进
 
 1. **PM 一次操作直达管线** — 不再需要 code 块 + 项目负责人转发
-2. **工作区开箱即用** — 创建时自动包含所有开发角色，点名可直接匹配
-3. **向后兼容** — 旧入口（`_admin` 频道直接发命令）继续可用
-4. **权限透明** — PM 触发的命令仍然由 admin-bot（P4）权限执行，不改变认证体系
+2. **向后兼容** — 旧入口（`_admin` 频道直接发命令）继续可用
+3. **权限透明** — PM 触发的命令仍然由 admin-bot（P4）权限执行，不改变认证体系
 
 > 技术方案（Gateway 侧路由方式、服务端如何识别 PM 身份）由架构师决定。
 
@@ -119,67 +116,6 @@ PM 在 TG DM 对 ws-bridge 发：!pipeline_start R44
 
 ---
 
-### 方向 B — 工作区自动填充成员 🟡 P2
-
-`!pipeline_start` 创建工作室时自动将所有开发角色（arch、dev、review、qa）加入工作区，确保点名可以直接匹配到人。
-
-#### 用户旅程
-
-```
-!pipeline_start R44 ← 当前行为
-  → 工作室 ws:R44-dev 被创建（成员：admin-bot 一人）❌
-  → _auto_rollcall_notify → 只通知 admin-bot
-  → _cmd_rollcall_next(arch) → 工作区无 arch → 返回错误 ❌
-
-!pipeline_start R44 ← 期望行为
-  → 工作室 ws:R44-dev 被创建（成员：arch-bot, dev-bot, review-bot, qa-bot, admin-bot）✅
-  → _auto_rollcall_notify → 全员收到搬家通知
-  → _cmd_rollcall_next(arch) → 找到 arch-bot → 点名成功 ✅
-```
-
-#### 具体需求
-
-| # | 需求 | 优先级 |
-|:-:|:-----|:------:|
-| B-1 | `!pipeline_start` 创建工作室时，自动从 `auth.get_users()` 获取所有开发角色（arch、dev、review、qa）的 agent_id 加入工作区 | 🔴 P1 |
-| B-2 | 获取成员后转为 `authorized_members` 列表，传入 `!create_workspace` 的 `--members` 参数 | 🔴 P1 |
-| B-3 | 如果 `auth.get_users()` 中某个角色有多个 agent（如多个 dev-bot），全部加入工作区 | 🟡 P2 |
-| B-4 | `!pipeline_start` 增加 `--members` 显式参数选项，覆盖自动获取（项目负责人可指定特定成员） | 🟡 P2 |
-| B-5 | 如果 `auth.get_users()` 返回异常（为空或缺少必要角色），返回明确错误提示，不创建空工作区 | 🟡 P2 |
-| B-6 | 不改变 `!create_workspace` 的现有行为，旧 API 保持向后兼容 | 🔴 P1 |
-
-#### 实现说明
-
-**数据来源：** `handler.py` 中已有 `auth.get_users()` 调用，返回 `dict[agent_id, UserInfo]`，其中 `UserInfo` 包含 `role` 字段。
-
-**角色映射逻辑：**
-```
-PIPELINE_STEP_MAP = {
-    "step2": {"name": "技术方案", "role": "arch", ...},
-    "step3": {"name": "编码", "role": "dev", ...},
-    "step4": {"name": "审查", "role": "review", ...},
-    "step5": {"name": "测试", "role": "qa", ...},
-    "step6": {"name": "合并部署", "role": "admin", ...},
-}
-```
-从 `PIPELINE_STEP_MAP` 收集所有 unique 角色名，再从 `auth.get_users()` 中筛选匹配的用户加入工作区。
-
-> 技术方案（具体如何从 PIPELINE_STEP_MAP 提取角色列表、auth.get_users() 的调用时机、--members 参数优先级规则）由架构师决定。
-
----
-
-### 方向 C — 启动上下文增强 🟢 P3
-
-R43 实操中发现 `!pipeline_start` 传递的上下文不完整，架构师收到点名时缺少工作流文档。
-
-| # | 需求 | 优先级 |
-|:-:|:-----|:------:|
-| C-1 | `!pipeline_start` 的 `context_urls` 自动追加 WORKFLOW.md URL 到上下文 | 🟢 P3 |
-| C-2 | 默认 start_step 从旧 7 步残留的 `"step3"` 改为 `"step2"`（从 `PIPELINE_STEP_MAP` 的第一个非 step1 条目动态计算），消除 `--from step2` 的手动参数依赖 | 🟢 P3 |
-| C-3 | `!pipeline_start` 的返回值增强：明确报告已加入工作区的成员列表 | 🟢 P3 |
-
----
-
 ## 4. 架构原则
 
 ### 4.1 管道入口语义不变
@@ -201,13 +137,11 @@ R43 实操中发现 `!pipeline_start` 传递的上下文不完整，架构师收
 
 ### 4.4 纯服务端系统层
 
-方向 B、C 全部在服务端系统层（`handler.py`、`config.py`）完成，零 token 消耗。方向 A 可能需要少量的 Gateway 侧改动（adapter 路由）或 handler 加代理，但判定逻辑仍然是纯规则。
+方向 A 全部在服务端系统层（`handler.py` + Gateway adapter）完成，判定逻辑完全是纯规则。
 
 ---
 
 ## 5. 验收标准
-
-### 方向 A — 管线入口直达
 
 | # | 验收标准 | 优先级 |
 |:-:|:---------|:------:|
@@ -217,31 +151,14 @@ R43 实操中发现 `!pipeline_start` 传递的上下文不完整，架构师收
 | A-4 | 缺少轮次参数的 `!pipeline_start` 返回用法提示，不创建工作室 | 🟢 P3 |
 | A-5 | 执行结果（成功/失败）通过 TG DM 回传给 PM | 🟡 P2 |
 
-### 方向 B — 工作区自动填充成员
-
-| # | 验收标准 | 优先级 |
-|:-:|:---------|:------:|
-| B-1 | `!pipeline_start` 创建的工作室包含所有开发角色（arch、dev、review、qa、admin），成员数 >= 5 | 🔴 P1 |
-| B-2 | 点名阶段 _auto_rollcall_notify 通知到工作区所有成员 | 🔴 P1 |
-| B-3 | `_cmd_rollcall_next(arch)` 在工作区中找到 arch 角色成员 | 🔴 P1 |
-| B-4 | `--members` 显式参数可覆盖自动获取的成员列表 | 🟡 P2 |
-| B-5 | `auth.get_users()` 为空或缺少必要角色时，返回明确错误提示，不创建工作室 | 🟡 P2 |
-| B-6 | `!create_workspace` 单独调用时行为不受影响 | 🔴 P1 |
-
-### 方向 C — 启动上下文增强
-
-| # | 验收标准 | 优先级 |
-|:-:|:---------|:------:|
-| C-1 | 架构师收到的点名消息中包含 WORKFLOW.md URL 引用 | 🟢 P3 |
-| C-2 | 默认 start_step 正确指向 Step 2（技术方案），无需手动 `--from step2` | 🟢 P3 |
-| C-3 | `!pipeline_start` 返回值中包含已加入工作区的成员列表 | 🟢 P3 |
-
 ---
 
 ## 6. 不纳入本轮需求
 
 | 事项 | 原因 |
 |:-----|:------|
+| **工作区自动填充开发成员（F-13）** | 项目负责人指定只做入口直达（方向 A），成员填充待下轮 |
+| **启动上下文增强** | 项目负责人指定只做入口直达（方向 A），上下文增强待下轮 |
 | `!` 命令整体权限体系改革（P3 角色系统） | 独立功能轮（F-3 待分配），本轮只修管线入口 |
 | Gateway 适配器重构 | 变动过大，本轮只加路由规则 |
 | 管线运行中的成员变更（执行中增减人员） | 非入口问题，独立优化项 |
@@ -254,4 +171,4 @@ R43 实操中发现 `!pipeline_start` 传递的上下文不完整，架构师收
 
 | 版本 | 日期 | 变更 |
 |:----:|:----:|:------|
-| v0.1 | 2026-06-27 | 初稿，基于 R43 首轮管线试点的 F-12/F-13 断点分析 |
+| v0.2 | 2026-06-27 | 项目负责人指定只做方向 A（管线入口直达），移除了方向 B（工作区填充）和方向 C（上下文增强）。大幅精简文档范围 |
