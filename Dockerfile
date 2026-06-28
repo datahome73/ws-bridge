@@ -15,6 +15,7 @@ COPY server/ server/
 COPY clients/ clients/
 COPY scripts/ scripts/
 COPY config/ config/
+COPY docs/ docs/
 
 EXPOSE 8765
 

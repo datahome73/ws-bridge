@@ -415,6 +415,12 @@ def _check_command_permission(
     min_role = cmd.get("min_role", 4)
     ws_scope = cmd.get("workspace_scope", False)
 
+    # ── R44 F-12: PM pipeline_start bypass ────────────────
+    # Allow any authenticated member to trigger !pipeline_start
+    # from the _admin channel. Only this one command is exempted.
+    if cmd_name == "pipeline_start" and min_role <= 3:
+        return True, ""
+
     # P3: verify actual workspace admin before allowing ws_scope commands
     if min_role <= 3 and ws_scope:
         if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
@@ -478,7 +484,7 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
         if not (sender_id in ws.admin_ids or sender_id == ws.owner_id):
             return "❌ 权限不足：你不是该工作室的管理员"
     reason = params.get("reason", "管理操作")
-    ws_mod.close_workspace(ws_id)
+    ws_mod.force_close(ws_id)
     return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
 
 
@@ -1108,11 +1114,37 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     round_name = positional[0].upper()
     from_step = params.get("from", "")
 
-    # 验证前置决策状态
-    import os as _r42os
-    work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
-    if not _r42os.path.exists(work_plan_path):
-        return f"❌ {round_name} 未找到 WORK_PLAN.md，请先完成 Step A/B"
+    # 验证前置决策状态 — R48 A: --work-plan-url 参数优先 + R45 fallback
+    work_plan_url = params.get("work_plan_url", "")
+    work_plan_ok = False
+    import urllib.request as _r45url
+    if work_plan_url:
+        # 方向 A: 使用传入的 URL
+        try:
+            _r48req = _r45url.Request(work_plan_url, method='HEAD')
+            with _r45url.urlopen(_r48req, timeout=5) as _r48resp:
+                if _r48resp.status == 200:
+                    work_plan_ok = True
+        except Exception:
+            pass
+        if not work_plan_ok:
+            return f"❌ WORK_PLAN URL 不可达：{work_plan_url}"
+    else:
+        # R45 fallback: 拼接默认 URL
+        _remote_url = f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/WORK_PLAN.md"
+        try:
+            _r45req = _r45url.Request(_remote_url, method='HEAD')
+            with _r45url.urlopen(_r45req, timeout=5) as _r45resp:
+                if _r45resp.status == 200:
+                    work_plan_ok = True
+        except Exception:
+            pass
+        if not work_plan_ok:
+            import os as _r42os
+            work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
+            work_plan_ok = _r42os.path.exists(work_plan_path)
+        if not work_plan_ok:
+            return f"❌ {round_name} 未找到 WORK_PLAN.md（远程+本地均失败），请先完成 Step A/B"
 
     # 锁定管线（防重复）
     if pipeline_is_active(round_name):
@@ -1121,9 +1153,24 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 暂停大厅接收（方向 D）
     set_lobby_paused(True, round_name)
 
-    # 创建工作室
+    # ── R44 F-13: Auto-collect workspace members ──────────
+    step_config = _load_step_config()
+    all_roles = set()
+    for step_key, step_cfg in step_config.items():
+        role = step_cfg.get("role", "")
+        if role and step_key != "step1":
+            all_roles.add(role)
+
+    users = auth.get_users()
+    member_ids = []
+    for aid, u in users.items():
+        if u.get("role", "member") in all_roles:
+            member_ids.append(aid)
+
+    # 创建工作室（带自动组建）
     create_params = {
         "_positional": [f"{round_name}-dev"],
+        "members": ",".join(member_ids),
     }
     create_result = await _cmd_create_workspace(sender_id, create_params)
 
@@ -1131,15 +1178,17 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
 
     # 查 Step 映射表，找起始角色
-    step_config = _load_step_config()
-    start_step = from_step if from_step else "step3"
+    start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
 
-    # 点名架构师，附带文档 URL
-    context_urls = (
-        f"需求: docs/{round_name}/{round_name}-product-requirements.md | "
-        f"WORK_PLAN: docs/{round_name}/WORK_PLAN.md"
-    )
+    # 点名架构师，附带文档 URL（R48: 有自定义 URL 时只传 WORK_PLAN 链接）
+    if work_plan_url:
+        context_urls = f"WORK_PLAN: {work_plan_url}"
+    else:
+        context_urls = (
+            f"需求: docs/{round_name}/{round_name}-product-requirements.md | "
+            f"WORK_PLAN: docs/{round_name}/WORK_PLAN.md"
+        )
     rollcall_result = await _cmd_rollcall_next(sender_id, {
         "_positional": [target_role],
         "context": f"{round_name} {start_step}: {context_urls}",
@@ -1158,6 +1207,8 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         "current_step": start_step,
         "ws_id": ws_id,
         "started_at": __import__("time").time(),
+        "work_plan_url": work_plan_url or None,   # R48 A: 传入的 WORK_PLAN URL
+        "triggerer_id": sender_id,                 # R48 B: 管线触发者
     })
 
     return (
@@ -1200,7 +1251,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     ws_id = sender_ch
 
     # 标记当前 Task completed
-    tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
     current_task = None
     for t in tasks:
         if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
@@ -1226,13 +1277,38 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             break
     if current_idx is None or current_idx + 1 >= len(step_keys):
         # 最后一步 → 管线结束
+        # R48 B: 在清理前提取触发者信息
+        triggerer_id = _PIPELINE_STATE.get(round_name, {}).get("triggerer_id", "")
+
         close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
         if "❌" in str(close_result):
             return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
         set_lobby_paused(False)
+
+        # ── R48 B: 写入 _admin 频道完结通知 ──
+        try:
+            admin_channel = p.ADMIN_CHANNEL
+            cleanup_msg = (
+                f"🔔 [PIPELINE_COMPLETE] {round_name} — 所有 Step 已完结 ✅\n"
+                f"最终产出: {output_ref}\n"
+                f"工作室已关闭，大厅已恢复接收"
+            )
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=cleanup_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=admin_channel,
+            )
+            write_chat_log("系统", cleanup_msg, channel=admin_channel)
+        except Exception:
+            pass
+        # ── R48 B: End ──
+
         _clear_pipeline_state(round_name)
+
         return (
             f"🏁 **{round_name} 管线已完成！**\n"
+            f"  🎯 产出: {output_ref}\n"
             f"  {task_result}\n"
             f"  工作室已关闭，大厅已恢复接收"
         )
@@ -1307,8 +1383,11 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
         if not pstate.get("active"):
             continue
         lines.append(f"📊 **{round_name} 管线状态**")
+        # R48 A: 展示 work_plan_url（如有）
+        if pstate.get("work_plan_url"):
+            lines.append(f"  📎 WORK_PLAN: {pstate['work_plan_url']}")
         step_config = _load_step_config()
-        tasks = ts.get_tasks_by_context(round_name, config.DATA_DIR)
+        tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
 
         for step_key, step_info in sorted(
             step_config.items(),
@@ -1415,7 +1494,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "usage": "!pipeline_start <R{N}> [--from <step>]",
     },
     "step_complete": {
-        "handler": _cmd_step_complete, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_step_complete, "min_role": 1, "workspace_scope": True,
         "usage": "!step_complete <step_name> --output <commit/file>",
     },
     "pipeline_status": {
@@ -2114,6 +2193,8 @@ def _classify_lobby_message(content: str) -> tuple[str, list[str]]:
     Types: 'announce', 'checkin', 'help', 'mention', 'plain'
     """
     content = content.strip()
+    # R45 B (F-4): Strip [R{N}测试] test tags before prefix check
+    content = re.sub(r'^\[R\d+测试\]\s*', '', content).strip()
     if content.startswith(PREFIX_ANNOUNCE):
         return 'announce', []
     if content.startswith(PREFIX_CHECKIN):
@@ -2368,14 +2449,14 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
         return True, ""
 
     # R35: _admin channel — only admins (P3/P4) can send
+    # R44 F-12: PM pipeline_start bypass — allow broadcast, command-level check still applies
     if channel == p.ADMIN_CHANNEL:
         if auth.is_global_admin(agent_id):
             return True, ""
         if _is_any_workspace_admin(agent_id):
             return True, ""
-        users = auth.get_users()
-        name = users.get(agent_id, {}).get("name", agent_id[:12])
-        return False, f"{name} 无权访问管理频道"
+        # R44: member broadcast allowed; _check_command_permission enforces pipeline_start only
+        return True, ""
 
     # R23: registration channel → allow (admin-relay handles routing)
     if channel == p.REGISTRATION_CHANNEL:
