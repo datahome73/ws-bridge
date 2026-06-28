@@ -1,7 +1,7 @@
 # R48 产品需求文档 — 管线通用化 + 完成通知闭环
 
-> **版本：** v0.1（初稿，待项目负责人审核）
-> **状态：** 📋 草稿
+> **版本：** v0.2 ✅（项目负责人 Q&A 收敛）
+> **状态：** ✅ 已审核（项目负责人确认）
 > **产品经理：** 🧐 PM
 > **日期：** 2026-06-28
 > **本轮改动范围：** 仅第①类（服务器代码 —— `server/handler.py` + `server/config.py`）
@@ -175,7 +175,7 @@ PM 在 TG DM 回复项目负责人：「R48 已完成，产出 abc1234」
 ## 5. 不纳入本轮需求
 
 - **❌ 纯自动化 TG 通知**（服务端直连 Telegram API）— 不在本轮范围，PM 看到通知后手动回复项目负责人即可
-- **❌ `--work-plan-url` 的多次传参**（如为不同角色传不同文档 URL）— 当前只需一个主链接
+- **❌ 额外增加 `--req-url` 参数** — WORK_PLAN 是入口文档，内部自然引用需求文档链接（或合二为一），不需要单独传需求文档 URL。需求文档解决「总目标 — 要完成什么任务」，工作计划解决「资源（哪些 bot 参加）+ 流转步骤」。两个文档相辅相成，策划阶段就应准备好。
 - **❌ 用 Hermes send_message 工具自动通知** — 这是 PM 职责层面的闭环，不是技术自动化的范围
 - **❌ round_name 改为项目名后，工作室创建逻辑的验证**（如名称合规、重名检测）— 保持现有 `create_workspace` 行为，只在 name 参数传 round_name
 - **❌ 多个 work-plan 文档传递** — 只传一个主文档 URL
@@ -186,6 +186,8 @@ PM 在 TG DM 回复项目负责人：「R48 已完成，产出 abc1234」
 ## 6. 设计要点
 
 ### 6.1 方向 A 的关键变更
+
+**核心原则：** `--work-plan-url` 在 Step 1（`!pipeline_start` 的初始化阶段）录入，存入管线状态后，后续所有 Step 都能通过 `_PIPELINE_STATE[round_name].get("work_plan_url")` 读取。Step 1 本身是服务端的自动化初始化环节（建工作室、点名、派活），不需要 bot 执行；`--work-plan-url` 在此阶段作为输入参数传入并持久化。
 
 **`server/config.py`** — 保持 `WORK_PLAN_REPO_URL` 不变，作为默认值来源
 
@@ -201,7 +203,9 @@ PM 在 TG DM 回复项目负责人：「R48 已完成，产出 abc1234」
 **`server/handler.py`** — `_cmd_rollcall_next` 上下文需要：
 
 - Step 2 的点名上下文传入 work_plan_url（如有）
-- 格式：`需求: {requirement_url} | WORK_PLAN: {work_plan_url}`
+- 格式：`WORK_PLAN: {work_plan_url}`
+
+> **注意：** 不单独传递需求文档 URL。WORK_PLAN 是入口文档，它对内部的引用关系（如需求文档链接、角色分工、Step 定义）由策划阶段维护。架构师拿到 WORK_PLAN 后自然能读到需求文档；对于外部项目，WORK_PLAN 可能已与需求文档合二为一。
 
 ### 6.2 方向 B 的关键变更
 
@@ -220,7 +224,7 @@ _set_pipeline_state(round_name, {
 
 **`server/handler.py`** — `_cmd_step_complete` 最后一步（管线结束）分支追加：
 
-当前（~行 1264-1269）已有向 `_admin` 频道写入 `📊 {round_name} 管线已完成 ✅` 的逻辑。只需要：
+当前（~行 1264-1269）已有向 `_admin` 频道写入 `📊 {round_name} 管线已完成 ✅` 的逻辑（`ms.save_message()` + `write_chat_log()`）。需要：
 
 1. 扩展消息内容，加入 `🔔 [PIPELINE_COMPLETE]` 前缀
 2. 加入产出引用（`--output` 参数值）
@@ -236,12 +240,14 @@ cleanup_msg = (
 
 ---
 
-## 7. 开放问题
+## 7. 决策记录（Q&A 收敛）
 
-| # | 问题 | 状态 |
-|:-:|:-----|:----:|
-| Q1 | `--work-plan-url` 与 `config.WORK_PLAN_REPO_URL` 的关系：如果同时传了 `--work-plan-url` 和 `--from`，work_plan_url 是否需要在 Step 1（pipeline_start）和 Step 2 之间传递？还是只在 Step 2 点名时使用？ | ⏳ 待决策 |
-| Q2 | 🔔 完结消息是否需要被写入 `write_chat_log()` 追加到 `_admin` 的聊天日志（现已同步），以便历史复盘？ | ⏳ 待决策 |
-| Q3 | 对于外部项目（非 ws-bridge Round），需求文档 URL 如何提供？是否也添加 `--req-url` 参数？还是本轮只解决 WORK_PLAN URL？ | ⏳ 待决策 |
+> 以下 Q&A 由项目负责人在 2026-06-28 TG DM 中逐条确认。
+
+| # | 问题 | 决策 | 体现位置 |
+|:-:|:-----|:----|:---------|
+| Q1 | `--work-plan-url` 在 Step 1 录入后，后续 Step 是否需要？ | ✅ **需要。** Step 1 是服务端自动化初始化（建工作室、点名、派活），`--work-plan-url` 在此阶段传入并持久化到管线状态。后续所有 Step 可通过 `_PIPELINE_STATE` 读取。 | §6.1 核心原则 |
+| Q2 | 🔔 完结消息是否需要写入 `write_chat_log()`？ | ✅ **需要。** 完结消息同步写入 `write_chat_log()` 追加到 `_admin` 频道聊天日志，方便历史复盘。 | §6.2 写入路径说明 |
+| Q3 | 是否额外加 `--req-url` 参数提供需求文档 URL？ | ❌ **不加。** 本轮只解决 `--work-plan-url`。WORK_PLAN 是入口文档，内部自然引用需求文档链接（或合二为一）。需求文档解决「总目标 — 任务」，工作计划解决「资源 + 流转步骤」，两者相辅相成，策划阶段就已准备好。 | §5 不纳入 + 设计原则说明 |
 
 > 技术方案（具体实现方式）由架构师决定。
