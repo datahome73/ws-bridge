@@ -1542,7 +1542,23 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
 
 
 async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
-    """Display all current agent cards."""
+    """Display all current agent cards.
+    Also serves as subcommand dispatcher for !agent_card <sub> ... syntax.
+    """
+    # R49 A: Subcommand dispatch — allow !agent_card get/set/unset/reload
+    positional = params.get("_positional", [])
+    if positional and positional[0] in ("get", "set", "unset", "reload"):
+        sub_cmd = positional[0]
+        sub_params = dict(params)
+        sub_params["_positional"] = positional[1:]
+        handler_map = {
+            "get": _cmd_agent_card_get,
+            "set": _cmd_agent_card_set,
+            "unset": _cmd_agent_card_unset,
+            "reload": _cmd_agent_card_reload,
+        }
+        return await handler_map[sub_cmd](sender_id, sub_params)
+    # Otherwise list all cards
     cards = _load_agent_cards()
     if not cards:
         return "No agent cards found."
