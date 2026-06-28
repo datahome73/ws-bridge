@@ -863,7 +863,13 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
                 sent_count += 1
             except Exception:
                 pass
-    return f"✅ 已通知 {len(matched)} 名 {target_role} 成员接管「{context_summary}」（{sent_count} 人在线）"
+    # R50 A: Auto MSG_SET_ACTIVE_CHANNEL for pipeline rollcalls
+    if context_summary and ("R" in context_summary or "Step" in context_summary) and sender_ch != p.LOBBY:
+        try:
+            await _broadcast_active_channel(sender_ch)
+        except Exception:
+            pass
+    return "✅ 已通知 " + str(len(matched)) + " 名 " + target_role + " 成员接管「" + context_summary + "」（" + str(sent_count) + " 人在线）"
 
 
 
@@ -960,6 +966,46 @@ def _set_pipeline_state(round_name: str, state: dict) -> None:
 def _update_pipeline_step(round_name: str, step: str) -> None:
     if round_name in _PIPELINE_STATE:
         _PIPELINE_STATE[round_name]["current_step"] = step
+
+
+
+async def _broadcast_active_channel(ws_id: str) -> int:
+    """Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members.
+    Returns count of online members who received the switch signal.
+    R50 A: Extracted from R37 B-1 inline rollcall logic.
+    """
+    ws_obj = ws_mod.get_workspace(ws_id)
+    if not ws_obj:
+        return 0
+
+    switch_payload = json.dumps({
+        "type": p.MSG_SET_ACTIVE_CHANNEL,
+        p.FIELD_CHANNEL: ws_id,
+        "from_name": "系统",
+        "from": "系统",
+        "content": "请确认活跃频道已切换至 " + ws_id + "，回复「已切」确认。",
+        "ts": time.time(),
+    })
+
+    online_count = 0
+    for member_id in ws_obj.members:
+        persistence.set_agent_channel(member_id, ws_id)
+        for conn in list(_connections.get(member_id, set())):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(switch_payload)
+                elif hasattr(conn, "send"):
+                    await conn.send(switch_payload)
+                online_count += 1
+            except Exception:
+                pass
+
+    persistence.save_agent_channels(config.DATA_DIR)
+    logger.info(
+        "R50 A: MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
+        ws_id, online_count,
+    )
+    return online_count
 
 
 def _clear_pipeline_state(round_name: str) -> None:
@@ -1460,6 +1506,12 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         "name": next_step,
         "role": next_role,
     })
+
+    # R50 A: Auto MSG_SET_ACTIVE_CHANNEL to workspace
+    try:
+        await _broadcast_active_channel(ws_id)
+    except Exception:
+        pass
 
     # 更新管线状态
     _update_pipeline_step(round_name, next_step)
@@ -2410,27 +2462,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             _rollcall_timers[target_ch] = asyncio.create_task(
                 _rollcall_timeout(target_ch)
             )
-            switch_payload = json.dumps({
-                "type": p.MSG_SET_ACTIVE_CHANNEL,
-                p.FIELD_CHANNEL: target_ch,
-                "from_name": "系统",
-                "from": "系统",
-                "content": f"请确认活跃频道已切换至 {target_ch}，回复「已切」确认。",
-                "ts": time.time(),
-            })
-            online_switch = 0
-            for member_id in resolved_workspace.members:
-                persistence.set_agent_channel(member_id, target_ch)
-                persistence.save_agent_channels(config.DATA_DIR)
-                for conn in list(_connections.get(member_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(switch_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(switch_payload)
-                        online_switch += 1
-                    except Exception:
-                        pass
+            online_switch = await _broadcast_active_channel(target_ch)
             logger.info(
                 "R37: Auto MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
                 target_ch, online_switch,
