@@ -288,6 +288,31 @@ async def _persist_admin_response(ws, sender_id: str, from_name: str, content: s
     write_chat_log(from_name, content, channel=p.ADMIN_CHANNEL)
 
 
+async def _send_cmd_response(ws, sender_id: str, from_name: str, content: str, channel: str) -> None:
+    """Send command response to the source channel (any channel, not just _admin).
+    Used by R49 universal ! command routing."""
+    msg = {
+        "type": "broadcast",
+        "channel": channel,
+        "from_name": from_name,
+        "from": from_name,
+        "agent_id": "",
+        "from_agent": "",
+        "content": content,
+    }
+    await _send(ws, msg)
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent=sender_id, from_name=from_name,
+            content=content, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=channel,
+        )
+    except Exception:
+        pass
+    write_chat_log(from_name, content, channel=channel)
+
+
 # ── R37 A-1: Auto roll-call notification ──────────────────────────────
 
 
@@ -1607,6 +1632,29 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             mention_names.add(name)
     is_task = bool(mention_names) or content.startswith("!")
 
+    # ── R49: Universal ! command routing (works in any channel) ──
+    if content.startswith("!"):
+        cmd_name, params = _parse_command(content)
+        if not cmd_name or cmd_name not in _ADMIN_COMMANDS:
+            available = ", ".join(f"!{k}" for k in sorted(_ADMIN_COMMANDS))
+            await _send_cmd_response(ws, sender_id, "系统", f"❌ 未知命令。可用命令：{available}", channel)
+            return
+        cmd = _ADMIN_COMMANDS[cmd_name]
+        allowed, reason = _check_command_permission(sender_id, cmd_name, cmd, params)
+        if not allowed:
+            await _send_cmd_response(ws, sender_id, "系统", f"❌ {reason}", channel)
+            return
+        try:
+            result = await cmd["handler"](sender_id, params)
+            _log_audit(sender_id, cmd_name, params, "success", result)
+            await _send_cmd_response(ws, sender_id, "系统", result, channel)
+        except Exception as e:
+            err_msg = f"❌ 执行失败: {e}"
+            _log_audit(sender_id, cmd_name, params, "error", err_msg)
+            logger.error("Admin cmd !%s failed: %s", cmd_name, e)
+            await _send_cmd_response(ws, sender_id, "系统", err_msg, channel)
+        return
+
     # ── R35: _admin channel intercept ──
     if channel == p.ADMIN_CHANNEL:
         # Persist the admin's command message for web viewer
@@ -1622,29 +1670,12 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             pass
         write_chat_log(sender_name, content, channel=p.ADMIN_CHANNEL)
 
+        # R49: ! commands now handled by universal routing above.
+        # _admin channel still persists admin messages for logging.
+        # Non-! messages in _admin are silently logged (admin channel only supports ! commands).
         if not content.startswith("!"):
             resp = "ℹ️ 管理频道仅支持 ! 命令"
             await _persist_admin_response(ws, sender_id, "系统", resp)
-            return
-        cmd_name, params = _parse_command(content)
-        if not cmd_name or cmd_name not in _ADMIN_COMMANDS:
-            available = ", ".join(f"!{k}" for k in sorted(_ADMIN_COMMANDS))
-            await _persist_admin_response(ws, sender_id, "系统", f"❌ 未知命令。可用命令：{available}")
-            return
-        cmd = _ADMIN_COMMANDS[cmd_name]
-        allowed, reason = _check_command_permission(sender_id, cmd_name, cmd, params)
-        if not allowed:
-            await _persist_admin_response(ws, sender_id, "系统", f"❌ {reason}")
-            return
-        try:
-            result = await cmd["handler"](sender_id, params)
-            _log_audit(sender_id, cmd_name, params, "success", result)
-            await _persist_admin_response(ws, sender_id, "系统", result)
-        except Exception as e:
-            err_msg = f"❌ 执行失败: {e}"
-            _log_audit(sender_id, cmd_name, params, "error", err_msg)
-            logger.error("Admin cmd !%s failed: %s", cmd_name, e)
-            await _persist_admin_response(ws, sender_id, "系统", err_msg)
         return
 
     # ── Channel resolution (fall back to lobby for unknown channels) ──
