@@ -1469,7 +1469,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "usage": "!pipeline_start <R{N}> [--from <step>]",
     },
     "step_complete": {
-        "handler": _cmd_step_complete, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_step_complete, "min_role": 1, "workspace_scope": True,
         "usage": "!step_complete <step_name> --output <commit/file>",
     },
     "pipeline_status": {
