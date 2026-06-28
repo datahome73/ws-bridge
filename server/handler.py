@@ -886,6 +886,54 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
         pass
 
 
+
+# ── R49 B: Agent Card persistence ──────────────────────────────────────
+
+
+def _load_agent_cards() -> dict:
+    """Load agent card mapping from persistent file.
+    Returns dict: {agent_id -> {name, display_name, pipeline_roles[], skills[], status}}
+    Falls back to empty dict if file missing.
+    """
+    path = os.path.join(str(config.DATA_DIR), "data", "agent_cards.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data.get("cards", {})
+    except Exception:
+        return {}
+
+
+def _save_agent_cards(cards: dict) -> bool:
+    """Save agent card mapping to persistent file."""
+    path = os.path.join(str(config.DATA_DIR), "data", "agent_cards.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, "w") as f:
+            json.dump({"version": 1, "cards": cards}, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _get_agent_card_roles(agent_id: str, cards: dict = None) -> list[str]:
+    """Get pipeline roles for an agent from cards. Returns [] if not found."""
+    if cards is None:
+        cards = _load_agent_cards()
+    card = cards.get(agent_id, {})
+    return card.get("pipeline_roles", [])
+
+
+def _find_agents_by_role(role: str, member_ids: list[str], cards: dict) -> list[str]:
+    """Find workspace members whose agent card has the given pipeline role."""
+    return [
+        aid for aid in member_ids
+        if role in _get_agent_card_roles(aid, cards)
+    ]
+
+
 # ── R42: Pipeline helpers ──────────────────────────────────────────
 
 
@@ -1080,7 +1128,55 @@ async def _send_watchdog_alert(
     )
 
     _persist_broadcast(p.ADMIN_CHANNEL, "系统", msg)
+    # R49 C: Also broadcast to active workspace if available
+    pstate = _PIPELINE_STATE.get(round_name, {})
+    ws_id = pstate.get("ws_id", "")
+    if ws_id:
+        ws_obj = ws_mod.get_workspace(ws_id)
+        if ws_obj:
+            ws_msg_lines = [
+                "Timeout alert: " + round_name + " / " + step_display,
+                "  Owner: " + role,
+                "  Elapsed: " + _elapsed_hours_display(elapsed_hours) + " (limit: " + str(timeout_hours) + "h)",
+                "  Please handle or delegate.",
+            ]
+            ws_msg = "\n".join(ws_msg_lines)
+            ws_payload = json.dumps({
+                "type": "broadcast", "channel": ws_id,
+                "from_name": "\u7cfb\u7edf", "from": "\u7cfb\u7edf",
+                "content": ws_msg, "ts": time.time(),
+            })
+            for agent_id in ws_obj.members:
+                for conn in list(_connections.get(agent_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            conn.send_str(ws_payload)
+                        else:
+                            conn.send(ws_payload)
+                    except Exception:
+                        pass
+            write_chat_log("\u7cfb\u7edf", ws_msg, channel=ws_id)
     logger.info("R43 watchdog alert: %s/%s (%s)", round_name, step_name, alert_type)
+
+
+
+
+async def _watchdog_rerollcall(round_name: str, step_name: str) -> None:
+    """After timeout, try to rerollcall the current step owner in workspace."""
+    pstate = _PIPELINE_STATE.get(round_name, {})
+    ws_id = pstate.get("ws_id", "")
+    if not ws_id:
+        return
+    step_config = _load_step_config()
+    step_info = step_config.get(step_name, {})
+    role = step_info.get("role", "?")
+    try:
+        await _cmd_rollcall_role("\u7cfb\u7edf", {
+            "_positional": [role],
+            "context": round_name + " " + step_name + " timeout rerollcall",
+        })
+    except Exception:
+        pass
 
 
 async def _send_clear_alert(round_name: str, step_name: str, output_ref: str) -> None:
@@ -1154,6 +1250,8 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     set_lobby_paused(True, round_name)
 
     # ── R44 F-13: Auto-collect workspace members ──────────
+    # ── R49 B: Use agent cards if available ──────────
+    cards = _load_agent_cards()
     step_config = _load_step_config()
     all_roles = set()
     for step_key, step_cfg in step_config.items():
@@ -1163,9 +1261,23 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
 
     users = auth.get_users()
     member_ids = []
-    for aid, u in users.items():
-        if u.get("role", "member") in all_roles:
-            member_ids.append(aid)
+    if cards:
+        # Agent cards exist: collect agents whose pipeline_roles intersect all_roles
+        seen = set()
+        for aid, card in cards.items():
+            p_roles = set(card.get("pipeline_roles", []))
+            if p_roles & all_roles:
+                member_ids.append(aid)
+                seen.add(aid)
+        # Also include any auth users who have matching role but no card
+        for aid, u in users.items():
+            if aid not in seen and u.get("role", "member") in all_roles:
+                member_ids.append(aid)
+    else:
+        # No cards: fallback to auth.get_users() role field
+        for aid, u in users.items():
+            if u.get("role", "member") in all_roles:
+                member_ids.append(aid)
 
     # 创建工作室（带自动组建）
     create_params = {
@@ -1317,12 +1429,21 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     next_role = step_config[next_step]["role"]
 
     # ── R43 D: Resolve next role display name ──
+    # ── R49 B: Use agent cards if available ──
     users = auth.get_users()
-    next_role_names = [
-        users.get(aid, {}).get("name", aid[:12])
-        for aid in ws_obj.members
-        if users.get(aid, {}).get("role", "member") == next_role
-    ]
+    cards = _load_agent_cards()
+    if cards:
+        matched = _find_agents_by_role(next_role, ws_obj.members, cards)
+        next_role_names = [
+            users.get(aid, {}).get("name", aid[:12])
+            for aid in matched
+        ]
+    else:
+        next_role_names = [
+            users.get(aid, {}).get("name", aid[:12])
+            for aid in ws_obj.members
+            if users.get(aid, {}).get("role", "member") == next_role
+        ]
     next_role_display = ", ".join(next_role_names) if next_role_names else next_role
 
     # 调用 !rollcall_next 点名下一角色
@@ -1415,6 +1536,111 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
     return "\n".join(lines)
 
 
+
+# ── R49 B: Agent Card commands ──────────────────────────────────────
+
+
+async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
+    """Display all current agent cards."""
+    cards = _load_agent_cards()
+    if not cards:
+        return "No agent cards found."
+    lines = ["Agent Cards ({0}):".format(len(cards))]
+    for aid, card in sorted(cards.items()):
+        name = card.get("display_name", card.get("name", aid[:12]))
+        roles = ", ".join(card.get("pipeline_roles", []))
+        skills = ", ".join(card.get("skills", []))
+        status = card.get("status", "unknown")
+        line = "  {0} [{1}] status={2}".format(name, roles, status)
+        if skills:
+            line += " skills=[{0}]".format(skills)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _cmd_agent_card_get(sender_id: str, params: dict) -> str:
+    """Show a single agent card.
+    Usage: !agent_card get <agent_id>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "Usage: !agent_card get <agent_id>"
+    agent_id = positional[0]
+    cards = _load_agent_cards()
+    card = cards.get(agent_id)
+    if not card:
+        return "No card for agent " + agent_id[:24]
+    name = card.get("display_name", card.get("name", agent_id[:12]))
+    roles = ", ".join(card.get("pipeline_roles", []))
+    skills = ", ".join(card.get("skills", []))
+    status = card.get("status", "unknown")
+    updated = card.get("updated_at", "")
+    return "\n".join([
+        "Card for " + agent_id[:24],
+        "  Name: " + name,
+        "  Roles: [" + roles + "]",
+        "  Skills: [" + skills + "]",
+        "  Status: " + status,
+        "  Updated: " + str(updated),
+    ])
+
+
+async def _cmd_agent_card_set(sender_id: str, params: dict) -> str:
+    """Set or update an agent card.
+    Usage: !agent_card set <agent_id> --role <r1,r2> [--name <display>] [--skills <s1,s2>]
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "Usage: !agent_card set <agent_id> --role <r1,r2> [--name <n>] [--skills <s1,s2>]"
+    agent_id = positional[0]
+    role_str = params.get("role", "")
+    if not role_str:
+        return "--role is required"
+    name = params.get("name", "")
+    skills_str = params.get("skills", "")
+
+    cards = _load_agent_cards()
+    card = cards.get(agent_id, {})
+    card["pipeline_roles"] = [r.strip() for r in role_str.split(",") if r.strip()]
+    if name:
+        card["display_name"] = name
+    if skills_str:
+        card["skills"] = [s.strip() for s in skills_str.split(",") if s.strip()]
+    card["status"] = card.get("status", "online")
+    card["updated_at"] = time.time()
+    cards[agent_id] = card
+
+    if _save_agent_cards(cards):
+        roles_display = ", ".join(card["pipeline_roles"])
+        name_display = card.get("display_name", agent_id[:12])
+        return "Card set: {0} -> {1} roles=[{2}]".format(agent_id[:24], name_display, roles_display)
+    return "Save failed"
+
+
+async def _cmd_agent_card_unset(sender_id: str, params: dict) -> str:
+    """Delete an agent card.
+    Usage: !agent_card unset <agent_id>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "Usage: !agent_card unset <agent_id>"
+    agent_id = positional[0]
+    cards = _load_agent_cards()
+    if agent_id not in cards:
+        return "No card for agent " + agent_id[:24]
+    del cards[agent_id]
+    if _save_agent_cards(cards):
+        return "Deleted card for " + agent_id[:24]
+    return "Save failed"
+
+
+async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
+    """Reload agent cards from disk (no restart needed)."""
+    cards = _load_agent_cards()
+    count = len(cards)
+    return "Reloaded agent cards: {0} records".format(count)
+
+
 # ── R35: Admin command registry ──────────────────────────────────
 
 _ADMIN_COMMANDS: dict[str, dict] = {
@@ -1479,7 +1705,32 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "handler": _cmd_task_list, "min_role": 3, "workspace_scope": True,
         "usage": "!task_list [--limit <n>]",
     },
-    # ── R41 D: Roll-call commands ──
+        # ── R49 B: Agent Card commands ──
+    "agent_card": {
+        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card [list|get|set|unset|reload] ...",
+    },
+    "agent_card_list": {
+        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card list",
+    },
+    "agent_card_get": {
+        "handler": _cmd_agent_card_get, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card get <agent_id>",
+    },
+    "agent_card_set": {
+        "handler": _cmd_agent_card_set, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card set <agent_id> --role <r1,r2> [--name <n>]",
+    },
+    "agent_card_unset": {
+        "handler": _cmd_agent_card_unset, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card unset <agent_id>",
+    },
+    "agent_card_reload": {
+        "handler": _cmd_agent_card_reload, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card reload",
+    },
+# ── R41 D: Roll-call commands ──
     "rollcall_role": {
         "handler": _cmd_rollcall_role, "min_role": 3, "workspace_scope": True,
         "usage": "!rollcall_role <role> [--context <msg>]",
@@ -1502,6 +1753,38 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "usage": "!pipeline_status",
     },
 }
+
+
+
+async def _restore_pipeline_timers() -> None:
+    """On server start, recover pipeline timeout timers from task store."""
+    try:
+        all_tasks = ts.list_tasks_by_context("", config.DATA_DIR)
+        round_groups = {}
+        for t in all_tasks:
+            ctx = t.get("context", "")
+            state = t.get("state", "")
+            if ctx.startswith("R") and state not in ("completed", "cancelled"):
+                if ctx not in round_groups:
+                    round_groups[ctx] = []
+                round_groups[ctx].append(t)
+        for round_name, tasks in round_groups.items():
+            if round_name in _PIPELINE_STATE:
+                continue
+            tasks_sorted = sorted(tasks, key=lambda x: x.get("created_at", 0))
+            current_step = tasks_sorted[0].get("name", "") if tasks_sorted else ""
+            started_at = tasks_sorted[0].get("created_at", time.time())
+            ws_id = "ws:" + round_name + "-dev"
+            _set_pipeline_state(round_name, {
+                "active": True,
+                "current_step": current_step,
+                "ws_id": ws_id,
+                "started_at": started_at,
+            })
+            logger.info("R49 C restored timer: %s step=%s ws=%s", round_name, current_step, ws_id)
+    except Exception:
+        pass
+
 
 # ── R38: Task notify broadcast ─────────────────────────────────────
 
@@ -1579,6 +1862,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     """
     # ── R43 A: Lazy-start watchdog on first message ──
     _ensure_watchdog()
+    # R49 C: Restore pipeline timers on start
+    _restore_pipeline_timers()
 
     content = msg.get("content", "")
     channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
