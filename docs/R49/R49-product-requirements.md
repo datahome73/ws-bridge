@@ -73,7 +73,7 @@ R48 的 6 步管线中，各角色需要在工作室完成工作后执行 `!step
 各角色在工作室内完成工作后，无法通过 `!step_complete` 推进管线。消息被当作普通广播：
 
 ```
-小开: 技术方案已完成，docs/R48/R48-tech-plan.md 已推 dev
+架构师: 技术方案已完成，docs/R48/R48-tech-plan.md 已推 dev
        !step_complete Step2 --output 5f63177
        ↑ 这条消息在工作室里被广播给全员，服务端不做任何命令解析
 ```
@@ -83,7 +83,7 @@ R48 的 6 步管线中，各角色需要在工作室完成工作后执行 `!step
 工作频道（workspace）中的 `!` 前缀消息被服务端拦截解析：
 
 ```
-小开: 技术方案已完成
+架构师: 技术方案已完成
        !step_complete Step2 --output 5f63177
        ↑ 服务端拦截 → 解析 → 权限校验 → 执行 handler
        ↑ 返回确认消息到工作室 + 更新管线状态 + 点名下一角色
@@ -124,10 +124,10 @@ R48 的 6 步管线中，各角色需要在工作室完成工作后执行 `!step
 ```python
 # 持久化到运维数据层（如 auth.json 或独立 config）
 ROLE_MAPPING = {
-    "01KT6EDS8PMF0FTK1FCJ8V4TPH": "arch",    # 小开
-    "01KVJ87JDSZ6MDSHP8AYWZK694": "dev",     # 爱泰
-    "01KVS0PJDSZ6MDS8PAYWZK695": "review",   # 小周
-    "01KVT1QJDSZ6MDS9PAYWZK696": "qa",       # 泰虾
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx1": "arch",    # 架构师
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx2": "dev",     # 开发者
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx3": "review",  # 审查工程师
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx4": "qa"       # 测试工程师
 }
 ```
 
@@ -187,7 +187,7 @@ ROLE_MAPPING = {
 
 1. 超时检测只能发送通知、不能自动跳过 Step（避免误推进破坏管线数据一致性）
 2. 超时时间可配置（环境变量或 `PIPELINE_TIMEOUT_MINUTES`）
-3. 超时通知只发到工作室频道（不直接 TG 大宏），防止干扰
+3. 超时通知只发到工作室频道（不直接 TG 项目负责人），防止干扰
 4. 升级通知（超时后仍无响应）写入 `_admin` 频道，由 PM 人工协调
 5. 前置决策区（Step A/B）没有超时检测——那是项目负责人参与的环节，不应自动催办
 6. 超时计时器在服务端进程级 tracking 中管理（纯系统代码，零 token），参考 R43 Hot Standby 看门狗模式
@@ -277,7 +277,7 @@ ROLE_MAPPING = {
 
 ## 6. 不纳入本轮需求
 
-- **❌ 纯自动化 TG 通知中间 Step 完成** — 方向 C 的超时通知只发到工作室和 `_admin`，不直接 TG 大宏。中间 Step 的进度汇报由 PM 在工作群看到后主动汇总给项目负责人
+- **❌ 纯自动化 TG 通知中间 Step 完成** — 方向 C 的超时通知只发到工作室和 `_admin`，不直接 TG 项目负责人。中间 Step 的进度汇报由 PM 在工作群看到后主动汇总给项目负责人
 - **❌ Agent Card A2A 完整实现** — F-16 的「正确方向」（A2A 协议模式）范围太大。本轮只解决「角色映射持久化」让管线能匹配到人，Agent Card 完整声明机制留待后续调研
 - **❌ 多 Step 并行执行** — 保持管线串行 6 步模式不变
 - **❌ 管线自动跳过空闲 Step** — 所有 Step 按顺序执行，即使某角色不在线，超时后也只是通知，不跳过
@@ -317,10 +317,10 @@ if content.startswith('!'):
 ```json
 {
   "mappings": {
-    "01KT6EDS8PMF0FTK1FCJ8V4TPH": "arch",
-    "01KVJ87JDSZ6MDSHP8AYWZK694": "dev",
-    "01KVS0PJDSZ6MDS8PAYWZK695": "review",
-    "01KVT1QJDSZ6MDS9PAYWZK696": "qa"
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx1": "arch",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx2": "dev",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx3": "review",
+    "xxxxxxxxxxxxxxxxxxxxxxxxxx4": "qa"
   },
   "version": 1
 }
