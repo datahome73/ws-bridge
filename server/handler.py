@@ -863,13 +863,7 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
                 sent_count += 1
             except Exception:
                 pass
-    # R50 A: Auto MSG_SET_ACTIVE_CHANNEL for pipeline rollcalls
-    if context_summary and ("R" in context_summary or "Step" in context_summary) and sender_ch != p.LOBBY:
-        try:
-            await _broadcast_active_channel(sender_ch)
-        except Exception:
-            pass
-    return "✅ 已通知 " + str(len(matched)) + " 名 " + target_role + " 成员接管「" + context_summary + "」（" + str(sent_count) + " 人在线）"
+    return f"✅ 已通知 {len(matched)} 名 {target_role} 成员接管「{context_summary}」（{sent_count} 人在线）"
 
 
 
@@ -968,46 +962,6 @@ def _update_pipeline_step(round_name: str, step: str) -> None:
         _PIPELINE_STATE[round_name]["current_step"] = step
 
 
-
-async def _broadcast_active_channel(ws_id: str) -> int:
-    """Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members.
-    Returns count of online members who received the switch signal.
-    R50 A: Extracted from R37 B-1 inline rollcall logic.
-    """
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return 0
-
-    switch_payload = json.dumps({
-        "type": p.MSG_SET_ACTIVE_CHANNEL,
-        p.FIELD_CHANNEL: ws_id,
-        "from_name": "系统",
-        "from": "系统",
-        "content": "请确认活跃频道已切换至 " + ws_id + "，回复「已切」确认。",
-        "ts": time.time(),
-    })
-
-    online_count = 0
-    for member_id in ws_obj.members:
-        persistence.set_agent_channel(member_id, ws_id)
-        for conn in list(_connections.get(member_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(switch_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(switch_payload)
-                online_count += 1
-            except Exception:
-                pass
-
-    persistence.save_agent_channels(config.DATA_DIR)
-    logger.info(
-        "R50 A: MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
-        ws_id, online_count,
-    )
-    return online_count
-
-
 def _clear_pipeline_state(round_name: str) -> None:
     _PIPELINE_STATE.pop(round_name, None)
 
@@ -1015,6 +969,11 @@ def _clear_pipeline_state(round_name: str) -> None:
 def pipeline_is_active(round_name: str) -> bool:
     state = _PIPELINE_STATE.get(round_name)
     return bool(state and state.get("active"))
+
+
+def pipeline_exists(round_name: str) -> bool:
+    """Check if pipeline exists (created but may or may not be active)."""
+    return round_name in _PIPELINE_STATE
 
 
 def set_lobby_paused(paused: bool, round_name: str = "") -> None:
@@ -1380,6 +1339,53 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     )
 
 
+# ── R50: Pipeline activate command ────────────────────────────────
+
+
+async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
+    """激活已启动但未活跃的管线。
+    用法：!pipeline_activate <R{N}> [--ws <workspace_id>]
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!pipeline_activate <R{N}> [--ws <workspace_id>]"
+    round_name = positional[0].upper()
+    ws_id = params.get("ws", "")
+
+    if not pipeline_exists(round_name):
+        return f"❌ {round_name} 管线不存在，请先执行 !pipeline_start {round_name}"
+    if pipeline_is_active(round_name):
+        return f"❌ {round_name} 管线已激活，无需重复激活"
+
+    # Use provided --ws or fallback to pipeline state
+    if not ws_id:
+        ws_id = _PIPELINE_STATE.get(round_name, {}).get("ws_id", "")
+    if not ws_id:
+        return f"❌ {round_name} 未找到工作室 ID，请用 --ws <workspace_id> 指定"
+
+    ws_obj = ws_mod.get_workspace(ws_id)
+    if not ws_obj:
+        return f"❌ 工作室 {ws_id} 不存在"
+
+    # Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
+    switch_count = await _broadcast_active_channel(ws_id)
+
+    # Activate pipeline
+    _set_pipeline_state(round_name, {
+        "active": True,
+        "current_step": _PIPELINE_STATE.get(round_name, {}).get("current_step", "step1"),
+        "ws_id": ws_id,
+        "activated_at": __import__("time").time(),
+    })
+
+    return (
+        f"🚀 **{round_name} 管线已激活**\n"
+        f"  工作室: {ws_id}\n"
+        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count} 个在线成员\n"
+        f"  请各成员确认频道已切换到工作室"
+    )
+
+
 async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     """标记 Step 完成，自动点名下一人。
     用法：!step_complete <step_name> --output <commit/file>
@@ -1507,12 +1513,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         "role": next_role,
     })
 
-    # R50 A: Auto MSG_SET_ACTIVE_CHANNEL to workspace
-    try:
-        await _broadcast_active_channel(ws_id)
-    except Exception:
-        pass
-
     # 更新管线状态
     _update_pipeline_step(round_name, next_step)
 
@@ -1542,6 +1542,152 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         f"  📋 已点名 {next_role_display}，等待确认「到」\n"
         f"  🎯 负责人请切到工作室频道回复「到」开始\n"
         f"  {task_result}\n"
+        f"  {rollcall_result}\n"
+        f"  {next_task_result}"
+    )
+
+
+# ── R50: Step handoff command ──────────────────────────────────────
+
+
+async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
+    """标记 Step 完成并交接给下一角色，同时广播 MSG_SET_ACTIVE_CHANNEL。
+    用法：!step_handoff <step_name> --output <commit/file>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!step_handoff <step_name> --output <commit/file>"
+    step_name = positional[0]
+    output_ref = params.get("output", "")
+    if not output_ref:
+        return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
+
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return "❌ 请在工作区中使用此命令"
+
+    # Extract round_name from pipeline state
+    round_name = None
+    for rname, pstate in _PIPELINE_STATE.items():
+        if pstate.get("ws_id") == sender_ch:
+            round_name = rname
+            break
+    if not round_name:
+        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
+
+    ws_id = sender_ch
+
+    # Mark current Task completed
+    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+    current_task = None
+    for t in tasks:
+        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
+            current_task = t
+            break
+    if not current_task:
+        return f"❌ 未找到 Step「{step_name}」的活跃 Task（可能已完成）"
+
+    task_update_params = {
+        "_positional": [current_task["id"]],
+        "state": p.TaskState.COMPLETED.value,
+        "output": output_ref,
+    }
+    task_result = await _cmd_task_update(sender_id, task_update_params)
+
+    # Look up next step
+    step_config = _load_step_config()
+    step_keys = sorted(step_config.keys(), key=_step_sort_key)
+    current_idx = None
+    for i, k in enumerate(step_keys):
+        if k == step_name:
+            current_idx = i
+            break
+    if current_idx is None or current_idx + 1 >= len(step_keys):
+        # Final step → pipeline complete
+        close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
+        if "❌" in str(close_result):
+            return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
+        set_lobby_paused(False)
+        _clear_pipeline_state(round_name)
+
+        # Cleanup progress notification (R47 A4)
+        try:
+            cleanup_msg = f"📊 {round_name} 管线已完成 ✅ 所有 Step 已完结，工作室已关闭"
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=cleanup_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
+            )
+            write_chat_log("系统", cleanup_msg, channel=p.ADMIN_CHANNEL)
+        except Exception:
+            pass
+
+        return (
+            f"🏁 **{round_name} 管线已完成！**\n"
+            f"  {task_result}\n"
+            f"  工作室已关闭，大厅已恢复接收"
+        )
+
+    next_step = step_keys[current_idx + 1]
+    next_role = step_config[next_step]["role"]
+
+    # Resolve next role display names
+    users = auth.get_users()
+    next_role_names = [
+        users.get(aid, {}).get("name", aid[:12])
+        for aid in ws_obj.members
+        if users.get(aid, {}).get("role", "member") == next_role
+    ]
+    next_role_display = ", ".join(next_role_names) if next_role_names else next_role
+
+    # Rollcall next role
+    context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
+    rollcall_result = await _cmd_rollcall_next(sender_id, {
+        "_positional": [next_role],
+        "context": f"{round_name} {next_step}: {context_summary}",
+    })
+
+    # Create next step Task
+    next_task_result = await _cmd_task_create(sender_id, {
+        "context": round_name,
+        "name": next_step,
+        "role": next_role,
+    })
+
+    # Update pipeline state
+    _update_pipeline_step(round_name, next_step)
+
+    # ★ R50: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
+    switch_count = await _broadcast_active_channel(ws_id)
+
+    # Notify PM in _admin channel
+    try:
+        admin_channel = p.ADMIN_CHANNEL
+        notify_msg = (
+            f"📋 {round_name} 进度：{step_name} ✅ → "
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+        )
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent="系统", from_name="系统",
+            content=notify_msg, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=admin_channel,
+        )
+    except Exception:
+        pass
+
+    # Clear watchdog alert if active
+    if _clear_watchdog_alert(round_name, step_name):
+        await _send_clear_alert(round_name, step_name, output_ref)
+
+    return (
+        f"✅ **{step_name} 完成 → 交接给 {next_role} {next_step}**\n"
+        f"  产出: {output_ref}\n"
+        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count} 个在线成员\n"
+        f"  📋 已点名 {next_role_display}，等待确认「到」\n"
+        f"  🎯 负责人请切到工作室频道回复「到」开始\n"
         f"  {rollcall_result}\n"
         f"  {next_task_result}"
     )
@@ -1820,6 +1966,15 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "pipeline_status": {
         "handler": _cmd_pipeline_status, "min_role": 3, "workspace_scope": False,
         "usage": "!pipeline_status",
+    },
+    # ── R50: Pipeline activation & step handoff ──
+    "pipeline_activate": {
+        "handler": _cmd_pipeline_activate, "min_role": 3, "workspace_scope": False,
+        "usage": "!pipeline_activate <R{N}> [--ws <workspace_id>]",
+    },
+    "step_handoff": {
+        "handler": _cmd_step_handoff, "min_role": 3, "workspace_scope": True,
+        "usage": "!step_handoff <step_name> --output <commit/file>",
     },
 }
 
@@ -2462,11 +2617,50 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             _rollcall_timers[target_ch] = asyncio.create_task(
                 _rollcall_timeout(target_ch)
             )
+            # Use shared broadcast function (R50)
             online_switch = await _broadcast_active_channel(target_ch)
-            logger.info(
-                "R37: Auto MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
-                target_ch, online_switch,
-            )
+
+
+# ── R50: Shared MSG_SET_ACTIVE_CHANNEL broadcast ─────────────────
+
+
+async def _broadcast_active_channel(ws_id: str) -> int:
+    """Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members.
+    Returns the number of online members that received the message.
+    Also persists the channel for offline members so they pick it up on reconnection.
+    """
+    ws_obj = ws_mod.get_workspace(ws_id)
+    if not ws_obj:
+        return 0
+
+    switch_payload = json.dumps({
+        "type": p.MSG_SET_ACTIVE_CHANNEL,
+        p.FIELD_CHANNEL: ws_id,
+        "from_name": "系统",
+        "from": "系统",
+        "content": f"请确认活跃频道已切换至 {ws_id}，回复「已切」确认。",
+        "ts": time.time(),
+    })
+
+    online_count = 0
+    for member_id in ws_obj.members:
+        persistence.set_agent_channel(member_id, ws_id)
+        for conn in list(_connections.get(member_id, set())):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(switch_payload)
+                elif hasattr(conn, "send"):
+                    await conn.send(switch_payload)
+                online_count += 1
+            except Exception:
+                pass
+
+    persistence.save_agent_channels(config.DATA_DIR)
+    logger.info(
+        "MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
+        ws_id, online_count,
+    )
+    return online_count
 
 
 # ── R11 P2.2: Membership change notification ────────────────────
