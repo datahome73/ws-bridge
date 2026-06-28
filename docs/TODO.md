@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.13
+> **版本：** v2.14
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -21,7 +21,8 @@
 | F-13 | **`!pipeline_start` 创建的工作室没有开发成员** — 未传 `--members` 参数，工作室内只有执行者一人。导致 `_cmd_rollcall_next` 找 arch 角色时工作区无人匹配 → 点名+派活静默失败 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-14 | **`task_store` 缺少 `get_tasks_by_context` 方法** — `!pipeline_status` 和 `!step_complete` 调用此方法报错 `module 'server.task_store' has no attribute 'get_tasks_by_context'`，阻断管线状态查询和 Step 完成流程 | 🟡 P2 | R47 | 🟢 已完成 ✅ |
 | F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | — | ⬜ 待规划 |
-| F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
+|| F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
+|| F-17 | **管线状态不同步** — `!step_complete` 未执行时管线 state 停留在原地，即使 Step 工作已实质完成。需要执行者自驱调用 `!step_complete` 推进状态，否则后续 Step 无法自动点名、管线永久阻塞。R48 已将 `step_complete` 的 `min_role` 从 3 降为 1 使成员可自驱交接，但根本问题是缺乏「不调则阻塞」的闭环保证。需后续轮次建立超时检测或状态一致性核查机制 | 🟡 P2 | R48 | ▶ 本轮暴露，待规划 |
 
 ### L. 代码层清理
 
