@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.18
+> **版本：** v2.20
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -23,7 +23,7 @@
 | F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | — | ⬜ 待规划 |
 || F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
 ||| F-17 | **管线状态不同步** — `!step_complete` 未执行时管线 state 停留在原地，即使 Step 工作已实质完成。需要执行者自驱调用 `!step_complete` 推进状态，否则后续 Step 无法自动点名、管线永久阻塞。R48 已将 `step_complete` 的 `min_role` 从 3 降为 1 使成员可自驱交接，但根本问题是缺乏「不调则阻塞」的闭环保证。需后续轮次建立超时检测或状态一致性核查机制 | 🟡 P2 | R48 | ▶ 本轮暴露，待规划 |
-|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |\n|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | 待分配 | ⬜ 待启动 |\n|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | 待分配 | ⬜ 待启动 |
+|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |\n|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | 待分配 | ⬜ 待启动 |\n|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | R53 | 🟢 已完成 ✅ |
 
 ### L. 代码层清理
 
@@ -126,7 +126,7 @@
 
 | 版本 | 日期 | 变更 |
 |:----:|:----:|:-----|
-|| | v2.19 | 2026-06-29 | 🎯 **R52 完成 ✅** — F-18 移除 📊 进度 Tab（纯前端 -99/+1，6 定点删除 + 零残留引用） |\n|| | v2.18 | 2026-06-29 | 🐛 新增 F-20（P0）— `!pipeline_start` 缺 `_broadcast_active_channel()` 调用，成员活跃频道未切换导致管线静默停摆 |\n|| | v2.17 | 2026-06-29 | 📌 新增 F-19 — `!pipeline_start` 系统消息展示角色名替代 agent ID。F-18 轮次更新为 R52 ▶ 本轮执行 |\n|| | v2.16 | 2026-06-28 | 📌 新增 F-18 — 去掉 Web 端 📊 进度 Tab（管线进度已在工作室中正常输出） |
+|| | v2.20 | 2026-06-29 | 🎯 **R53 完成 ✅** — F-20（P0）`!pipeline_start` 缺 `_broadcast_active_channel()` 修复（ACK 确认制点名与派活，+142/-170行，净-28行） |\\n|| | v2.19 | 2026-06-29 | 🎯 **R52 完成 ✅** — F-18 移除 📊 进度 Tab（纯前端 -99/+1，6 定点删除 + 零残留引用） |\n|| | v2.18 | 2026-06-29 | 🐛 新增 F-20（P0）— `!pipeline_start` 缺 `_broadcast_active_channel()` 调用，成员活跃频道未切换导致管线静默停摆 |\n|| | v2.17 | 2026-06-29 | 📌 新增 F-19 — `!pipeline_start` 系统消息展示角色名替代 agent ID。F-18 轮次更新为 R52 ▶ 本轮执行 |\n|| | v2.16 | 2026-06-28 | 📌 新增 F-18 — 去掉 Web 端 📊 进度 Tab（管线进度已在工作室中正常输出） |
 | | v2.13 | 2026-06-27 | 🐛 新增 F-14 (pipeline_status 缺 task_store.get_tasks_by_context) + F-15 (workspace_reset 命令不存在) + F-16 (Agent Card 角色声明分离代码与数据)。F-4/F-13 标记 🟢 已完成 |
 | | v2.14 | 2026-06-27 | 🎯 **R47 完成 ✅** — F-14 进度 Tab 数据管线修复已部署验证通过 |
 | | v2.12 | 2026-06-27 | 🎯 **R44 完成 ✅** — F-12 管线入口直达已修复
