@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.21
+> **版本：** v2.22
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -98,9 +98,10 @@
 | M-2 | 新建公开仓库 datahome73/ws-bridge | R33 | 🟢 已完成 |
 | M-3 | **拷贝关键代码** — 只搬 server/ + shared/ + clients/ + docs/（清理后） | R42 | 🟢 已完成 |
 | M-4 | **写开源版 README.md** — 通用接入指南 | R42 | 🟢 已完成 |
-| M-5 | **添加开源标配文档** — LICENSE、CONTRIBUTING.md、CODE_OF_CONDUCT.md | R42 | 🟢 已完成 |
-| R40-A | **Web 端 GitHub OAuth 认证** — 引入 GitHub OAuth 2.0 Authorization Code 流程，与现有绑定码并行运行。支持身份映射表、session 持久化、7 天 cookie 无感登录 | R40 | 🟢 已完成 |
-| F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | — | ❌ 已取消 |
+|| M-5 | **添加开源标配文档** — LICENSE、CONTRIBUTING.md、CODE_OF_CONDUCT.md | R42 | 🟢 已完成 |
+|| R40-A | **Web 端 GitHub OAuth 认证** — 引入 GitHub OAuth 2.0 Authorization Code 流程，与现有绑定码并行运行。支持身份映射表、session 持久化、7 天 cookie 无感登录 | R40 | 🟢 已完成 |
+|| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
+|| F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | — | ❌ 已取消 |
 
 ### 已验证功能（无需改动）
 
@@ -127,7 +128,8 @@
 
 | 版本 | 日期 | 变更 |
 |:----:|:----:|:-----|
-|| v2.21 | 2026-06-29 | 🐛 新增 R36-3 — wsim bot 列表 "Hermes" 名字确认（Gateway 默认 bot_name 为 "Hermes"，待排查清理） |
+|| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线技术实现（方向 A~F 全覆盖），30 项验收全绿，合并部署 ws-bridge:r55 |
+||| v2.21 | 2026-06-29 | 🐛 新增 R36-3 — wsim bot 列表 "Hermes" 名字确认（Gateway 默认 bot_name 为 "Hermes"，待排查清理） |
 ||| | v2.20 | 2026-06-29 | 🎯 **R53 完成 ✅** — F-20（P0）`!pipeline_start` 缺 `_broadcast_active_channel()` 修复（ACK 确认制点名与派活方向 A/B/C 中止，仅 F-20 编码完成，+142/-170，净-28行） |
 ||| | v2.19 | 2026-06-29 | 🎯 **R52 完成 ✅** — F-18 移除 📊 进度 Tab（纯前端 -99/+1，6 定点删除 + 零残留引用） |
 | | v2.13 | 2026-06-27 | 🐛 新增 F-14 (pipeline_status 缺 task_store.get_tasks_by_context) + F-15 (workspace_reset 命令不存在) + F-16 (Agent Card 角色声明分离代码与数据)。F-4/F-13 标记 🟢 已完成 |
