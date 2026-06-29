@@ -170,8 +170,6 @@ const TAB_STATE = {
   tab2: { id: 'tab2', channel: null,           label: '📋 活跃',     permanent: false, visible: false },
   // R35: admin tab (read-only, no input box)
   tab4: { id: 'tab4', channel: '_admin',       label: '🔧 管理员',   permanent: true,  visible: true },
-  // R38: task progress tab
-  tab5: { id: 'tab5', channel: '_progress',    label: '📊 进度',     permanent: true,  visible: true },
   tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史查看器', permanent: true,  visible: true },
 };
 let activeTabId = 'tab1';
@@ -236,7 +234,7 @@ function createMessageEl(m) {
   return div;
 }
 
-// ── R20/R35/R38: Fixed 5-tab rendering (active | lobby | admin | progress | history) ──
+// ── R20/R35/R38: Fixed 4-tab rendering (active | lobby | admin | history) ──
 
 function renderTabBar() {
   const bar = document.getElementById('tabBar');
@@ -256,9 +254,6 @@ function renderTabBar() {
   html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\'tab4\')">' +
     '🔧 管理员</div>';
 
-  // R38: Tab 5 — 📊 进度 (always) — W-6: fourth
-  html += '<div class="tab' + (activeTabId === 'tab5' ? ' active' : '') + '" data-tab="tab5" onclick="selectTab(\'tab5\')">' +
-    '📊 进度</div>';
 
   // Tab 3: 历史查看器 (always, pending style when no content loaded) — W-6: last
   const tab3Class = 'tab' + (activeTabId === 'tab3' ? ' active' : '') + (!TAB_STATE.tab3.channel ? ' pending' : '');
@@ -284,9 +279,6 @@ function selectTab(tabId) {
     loadMessages(tab.channel);
   } else if (tabId === 'tab3') {
     document.getElementById('msgList').innerHTML = '<div class="empty">👈 点击右侧「历史工作室」选择一个查看</div>';
-  } else if (tabId === 'tab5') {
-    renderProgressTab();
-  }
 }
 
 function switchHistoryTab(wsId, wsName) {
@@ -444,85 +436,7 @@ async function renderWsPanel() {
   }
 }
 
-// ── R38: Progress Tab rendering (W-1~W-5) ─────────────────────
 
-const STATE_ICONS = {
-  'submitted': '⬜', 'working': '▶', 'completed': '✅',
-  'failed': '❌', 'canceled': '⛔', 'input_required': '🟡',
-};
-
-async function renderProgressTab() {
-  const list = document.getElementById('msgList');
-  list.innerHTML = '<div class="empty">加载中...</div>';
-  try {
-    const resp = await fetch('/api/chat?channel=_admin&limit=200&token=' + encodeURIComponent(TOKEN));
-    if (!resp.ok) { list.innerHTML = '<div class="empty">加载失败</div>'; return; }
-    const data = await resp.json();
-    const msgs = data.messages || [];
-
-    // Extract task_notify messages from admin channel
-    const taskMsgs = msgs.filter(function(m) {
-      return m.content && m.content.indexOf('📊') === 0;
-    });
-
-    if (taskMsgs.length === 0) {
-      list.innerHTML = '<div class="empty">暂无任务进度数据<br><small>使用 !task_create 创建任务后在此查看</small></div>';
-      return;
-    }
-
-    // Group by context_id, deduplicate, show latest state per step
-    const latest = {};
-    taskMsgs.forEach(function(m) {
-      // Parse: "📊 R38 编码: SUBMITTED → WORKING"
-      const parts = m.content.split(' ');
-      if (parts.length < 3) return;
-      const ctxId = parts[1];
-      const name = parts[2].replace(':', '');
-      const trans = parts.slice(3).join(' ');
-      const key = ctxId + '|' + name;
-      if (!latest[key] || (m.ts || 0) > (latest[key].ts || 0)) {
-        latest[key] = { ctxId: ctxId, name: name, transition: trans, ts: m.ts };
-      }
-    });
-
-    // Build table
-    var html = '<div style="padding:12px;max-width:800px;margin:0 auto;">';
-    html += '<h3 style="margin-bottom:12px;color:#c9d1d9;">📊 任务进度</h3>';
-
-    // Group by context
-    const ctxGroups = {};
-    Object.values(latest).forEach(function(t) {
-      if (!ctxGroups[t.ctxId]) ctxGroups[t.ctxId] = [];
-      ctxGroups[t.ctxId].push(t);
-    });
-    const sortedCtx = Object.keys(ctxGroups).sort().reverse().slice(0, 3);
-
-    sortedCtx.forEach(function(ctxId) {
-      const items = ctxGroups[ctxId];
-      html += '<div style="margin-bottom:16px;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;">';
-      html += '<div style="padding:8px 12px;background:#21262d;font-weight:600;color:#58a6ff;">' + escapeHtml(ctxId) + '</div>';
-      html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
-      html += '<tr style="color:#8b949e;border-bottom:1px solid #30363d;">' +
-        '<th style="padding:6px 12px;text-align:left;">Step</th>' +
-        '<th style="padding:6px 12px;text-align:left;">环节</th>' +
-        '<th style="padding:6px 12px;text-align:left;">状态</th></tr>';
-      items.forEach(function(t) {
-        const icon = STATE_ICONS[t.transition.split(' → ').pop().toLowerCase()] || '⬜';
-        html += '<tr style="border-bottom:1px solid #21262d;">' +
-          '<td style="padding:4px 12px;color:#8b949e;">' + icon + '</td>' +
-          '<td style="padding:4px 12px;">' + escapeHtml(t.name) + '</td>' +
-          '<td style="padding:4px 12px;color:#8b949e;">' + escapeHtml(t.transition) + '</td></tr>';
-      });
-      html += '</table></div>';
-    });
-
-    html += '<div style="text-align:center;color:#8b949e;font-size:0.75rem;margin-top:8px;">自动刷新 30s | 数据来源: _admin 频道 task_notify</div>';
-    html += '</div>';
-    list.innerHTML = html;
-  } catch(e) {
-    list.innerHTML = '<div class="empty">加载失败（网络异常）</div>';
-  }
-}
 
 // ── Initialization ──
 
@@ -586,12 +500,6 @@ async function init() {
           const ch = data.channel || 'lobby';
           appendMessage(ch, data.message || data);
         }
-        // R38: MSG_TASK_NOTIFY — refresh progress tab if visible
-        if (data.type === 'task_notify') {
-          if (activeTabId === 'tab5') {
-            renderProgressTab();
-          }
-        }
         // R6: workspace archived event → refresh panel cache
         if (data._workspace_event === 'archived') {
           wsPanelCache = null; // invalidate cache
@@ -627,12 +535,6 @@ async function init() {
     } catch(_) {}
   }, 5000);
 
-  // R38: Poll progress tab every 30s (W-4)
-  setInterval(async function() {
-    if (activeTabId === 'tab5') {
-      try { renderProgressTab(); } catch(_) {}
-    }
-  }, 30000);
 
   // 5. R20: Poll workspaces (15s) — detect Tab2 active changes + refresh panel
   setInterval(async function() {
