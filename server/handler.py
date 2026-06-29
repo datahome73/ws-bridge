@@ -1295,6 +1295,10 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 从结果提取 ws_id（调用 persistence 获取最新频道）
     ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
 
+    # R50+: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
+    # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
+    await _broadcast_active_channel(ws_id)
+
     # 查 Step 映射表，找起始角色
     start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
