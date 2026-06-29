@@ -279,6 +279,7 @@ function selectTab(tabId) {
     loadMessages(tab.channel);
   } else if (tabId === 'tab3') {
     document.getElementById('msgList').innerHTML = '<div class="empty">👈 点击右侧「历史工作室」选择一个查看</div>';
+  }
 }
 
 function switchHistoryTab(wsId, wsName) {
