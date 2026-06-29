@@ -1583,10 +1583,13 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
 
 async def _send_to_agent(agent_id: str, text: str) -> bool:
     """Send a text message directly to a specific agent (not broadcast).
+    Falls back to write_chat_log if agent is offline.
     Returns True if at least one connection received it.
     """
     conns = _connections.get(agent_id, set())
     if not conns:
+        # W-4: offline fallback — persist to chat log so agent sees it on reconnect
+        write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
         return False
     payload = {
         "type": p.MSG_BROADCAST,
@@ -1602,6 +1605,9 @@ async def _send_to_agent(agent_id: str, text: str) -> bool:
             sent = True
         except Exception:
             pass
+    if not sent:
+        # W-4: all connections failed — persist fallback
+        write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
     return sent
 
 
@@ -1691,7 +1697,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
     # 更新 step 指针（如果当前已推进到此 step 之后，回退）
     current_pstate = _PIPELINE_STATE.get(round_name, {})
     current_step = current_pstate.get("current_step", "")
-    step_keys = sorted(step_config.keys(), key=lambda x: _step_sort_key(x[0]) if isinstance(x, str) else _step_sort_key(x))
+    step_keys = sorted(step_config.keys(), key=_step_sort_key)
     current_idx = None
     target_idx = None
     for i, k in enumerate(step_keys):
@@ -1920,7 +1926,7 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
 
         for step_key, step_info in sorted(
             step_config.items(),
-            key=lambda x: _step_sort_key(x[0]),
+            key=lambda item: _step_sort_key(item[0]),
         ):
             role = step_info["role"]
 
