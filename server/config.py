@@ -39,6 +39,13 @@ WS_ENV = os.environ.get("WS_ENV", "dev")  # "dev" | "production"
 IS_PRODUCTION = WS_ENV == "production"
 
 
+# ── R55 C: Git commit verification ─────────────────────────────────
+GIT_REMOTE_URL: str = os.environ.get(
+    "WS_BRIDGE_GIT_REMOTE",
+    "https://github.com/datahome73/ws-bridge.git",
+)
+
+
 # ── R45 A: Pipeline WORK_PLAN remote source ────────────────────────
 WORK_PLAN_REPO_URL: str = os.environ.get(
     "WORK_PLAN_REPO_URL",

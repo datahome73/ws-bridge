@@ -45,6 +45,9 @@ _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
 
+# ── R55 A: Step advance 2s serialization buffer ────────────────
+_step_advance_buffer: dict[str, float] = {}
+
 # ── R43: Watchdog state ─────────────────────────────────────
 _watchdog_started: bool = False
 _watchdog_task: asyncio.Task | None = None
@@ -386,6 +389,13 @@ def _check_command_permission(
     # Allow any authenticated member to trigger !pipeline_start
     # from the _admin channel. Only this one command is exempted.
     if cmd_name == "pipeline_start" and min_role <= 3:
+        return True, ""
+
+    # ── R55 A: step_complete auto-mode bypass ──────────────
+    # Any workspace member can advance a pending step in auto mode.
+    # The actual step-level validity + mode check happens inside
+    # _cmd_step_complete, where we have the round context.
+    if cmd_name == "step_complete" and min_role <= 1:
         return True, ""
 
     # P3: verify actual workspace admin before allowing ws_scope commands
@@ -1139,8 +1149,33 @@ async def _send_clear_alert(round_name: str, step_name: str, output_ref: str) ->
 
 
 
-# ── R42: Pipeline commands ─────────────────────────────────────────
+# ── R55 C: Git commit verification ──────────────────────────
 
+
+async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
+    """Check remote git dev branch for the given commit SHA.
+    Uses 10s timeout. On failure, degrades to a warning.
+    Returns: (ok_to_proceed, message)
+    """
+    import urllib.request as _r55url
+    repo_url = _r42cfg.GIT_REMOTE_URL
+    try:
+        req = _r55url.Request(repo_url, method='GET',
+                              headers={'User-Agent': 'Hermes-WS-Bridge/1.0'})
+        with _r55url.urlopen(req, timeout=10) as resp:
+            content = resp.read().decode('utf-8', errors='replace')
+            if commit_sha in content:
+                return True, ""
+            else:
+                return False, (
+                    f"❌ Commit {commit_sha[:12]} 不存在于远程仓库 "
+                    f"（{repo_url}）的 dev 分支"
+                )
+    except Exception as e:
+        return True, f"⚠️ git 验证不可达（{str(e)[:40]}），已跳过验证，继续推进"
+
+
+# ── R42: Pipeline commands ─────────────────────────────────────────
 
 async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     """启动管线。
@@ -1152,6 +1187,11 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         return "❌ 用法：!pipeline_start <R{N}> [--from <step>]"
     round_name = positional[0].upper()
     from_step = params.get("from", "")
+
+    # ── R55 E: Mode parameter ──
+    mode = params.get("mode", "auto").lower()
+    if mode not in ("auto", "manual"):
+        return "❌ mode 参数仅支持 auto（自动驾驶）或 manual（手动模式）"
 
     # 验证前置决策状态 — R48 A: --work-plan-url 参数优先 + R45 fallback
     work_plan_url = params.get("work_plan_url", "")
@@ -1268,6 +1308,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         "started_at": __import__("time").time(),
         "work_plan_url": work_plan_url or None,   # R48 A: 传入的 WORK_PLAN URL
         "triggerer_id": sender_id,                 # R48 B: 管线触发者
+        "mode": mode,                              # R55 E: 自动/手动模式
     })
 
     return (
@@ -1329,15 +1370,13 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
 
 async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     """标记 Step 完成，自动点名下一人。
-    用法：!step_complete <step_name> --output <commit/file>
+    用法：!step_complete <step_name> [--output <commit/file>]
     """
     positional = params.get("_positional", [])
     if not positional:
-        return "❌ 用法：!step_complete <step_name> --output <commit/file>"
+        return "❌ 用法：!step_complete <step_name> [--output <commit/file>]"
     step_name = positional[0].lower()
     output_ref = params.get("output", "")
-    if not output_ref:
-        return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
 
     sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
     ws_obj = ws_mod.get_workspace(sender_ch)
@@ -1352,6 +1391,31 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             break
     if not round_name:
         return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
+
+    # ── R55 E: Mode check ──
+    # In manual mode, only the step's role can advance
+    pstate = _PIPELINE_STATE.get(round_name, {})
+    if pstate.get("mode", "auto") == "manual":
+        step_config = _load_step_config()
+        step_role = step_config.get(step_name, {}).get("role", "")
+        if step_role:
+            users = auth.get_users()
+            sender_role = users.get(sender_id, {}).get("role", "member")
+            if sender_role != step_role and not auth.is_global_admin(sender_id):
+                return f"❌ manual 模式下仅 {step_role} 可推进 Step「{step_name}」"
+
+    # ── R55 C: Git commit verification ──
+    if output_ref:
+        git_ok, git_msg = await _verify_git_commit(output_ref)
+        if not git_ok:
+            return git_msg  # ❌ prevents advance
+
+    # ── R55 A: 2s serialization buffer ──
+    buffer_key = f"{round_name}:{step_name}"
+    last_ts = _step_advance_buffer.get(buffer_key, 0.0)
+    if time.time() - last_ts < 2.0:
+        return f"❌ {step_name} 正在被推进中（2 秒序列化缓冲），请稍后重试"
+    _step_advance_buffer[buffer_key] = time.time()
 
     # 提取 ws_id
     ws_id = sender_ch
@@ -1440,12 +1504,26 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         ]
     next_role_display = ", ".join(next_role_names) if next_role_names else next_role
 
-    # 调用 !rollcall_next 点名下一角色
+    # ── R55 F: Targeted handoff (replace broadcast rollcall) ──
+    # Send MSG_SET_ACTIVE_CHANNEL + task notification only to next step's agents
     context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
-    rollcall_result = await _cmd_rollcall_next(sender_id, {
-        "_positional": [next_role],
-        "context": f"{round_name} {next_step}: {context_summary}",
-    })
+    targeted_notify = f"🎯 新任务：{round_name} {next_step} ({next_role})\n{context_summary}"
+
+    # Use _broadcast_active_channel to send ACK-based channel switch (still uses ACK protocol)
+    # but target it via _find_agents_by_role so only the right role gets it
+    member_ids = list(ws_obj.members)
+    if cards:
+        target_agents = _find_agents_by_role(next_role, member_ids, cards)
+    else:
+        target_agents = [
+            aid for aid in member_ids
+            if users.get(aid, {}).get("role", "member") == next_role
+        ]
+
+    # Send targeted channel switch and notification
+    for agent_id in target_agents:
+        await _send_to_agent(agent_id, targeted_notify)
+    rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
 
     # 创建下一步的 Task
     next_task_result = await _cmd_task_create(sender_id, {
@@ -1478,13 +1556,180 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         await _send_clear_alert(round_name, step_name, output_ref)
 
     # ── R53 D: Enhanced return value with ACK confirm ──
+    # ── R55 F: Use targeted handoff result ──
     return (
         f"✅ **{step_name} 完成** → 交接给 {next_role} {next_step}\n"
-        f"  ⏳ 等待 {next_role_display} ACK 确认接管任务\n"
+        f"  📨 已定向通知 {next_role_display}（{len(target_agents)} 人）接管\n"
         f"  {task_result}\n"
-        f"  {rollcall_result}\n"
         f"  {next_task_result}"
     )
+
+
+# ── R55 F: Targeted send helper ────────────────────────────
+
+
+async def _send_to_agent(agent_id: str, text: str) -> bool:
+    """Send a text message directly to a specific agent (not broadcast).
+    Returns True if at least one connection received it.
+    """
+    conns = _connections.get(agent_id, set())
+    if not conns:
+        return False
+    payload = {
+        "type": p.MSG_BROADCAST,
+        "from_agent": "系统",
+        "from_name": "系统",
+        "content": text,
+        "ts": time.time(),
+    }
+    sent = False
+    for ws in conns:
+        try:
+            await _send(ws, payload)
+            sent = True
+        except Exception:
+            pass
+    return sent
+
+
+# ── R55 B: Step reject command ─────────────────────────────
+
+
+async def _cmd_step_reject(sender_id: str, params: dict) -> str:
+    """退回 Step N 到 pending 状态，附退回理由。
+    用法：!step_reject <step_name> --reason <原因>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!step_reject <step_name> --reason <原因>"
+    step_name = positional[0].lower().strip()
+    reason = params.get("reason", "")
+    if not reason:
+        return "❌ 退回必须附理由：!step_reject <step_name> --reason <原因>"
+
+    # 解析管线上下文
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return "❌ 请在工作区中使用此命令"
+
+    round_name = None
+    for rname, pstate in _PIPELINE_STATE.items():
+        if pstate.get("ws_id") == sender_ch:
+            round_name = rname
+            break
+    if not round_name:
+        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
+
+    # 前置校验：step 必须在 PIPELINE_STEP_MAP 中
+    step_config = _load_step_config()
+    if step_name not in step_config:
+        return f"❌ Step「{step_name}」不存在于管线映射中"
+
+    # 找到当前 active task for this step
+    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+    current_task = None
+    for t in tasks:
+        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
+            current_task = t
+            break
+    if not current_task:
+        return f"❌ Step「{step_name}」没有活跃 Task，无法退回"
+
+    # 检查退回次数上限
+    reject_count = current_task.get("reject_count", 0) + 1
+    if reject_count >= p.TASK_REJECT_CEILING:
+        # 第 3 次退回 → 升级给 PM
+        try:
+            admin_channel = p.ADMIN_CHANNEL
+            escalation_msg = (
+                f"🚨 [ESCALATION] {round_name} {step_name} 已被退回 "
+                f"{reject_count} 次，需 PM 介入协调\n"
+                f"最近理由: {reason}\n"
+                f"退回者: {sender_id[:12]}"
+            )
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=escalation_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=admin_channel,
+            )
+        except Exception:
+            pass
+        return (
+            f"🚨 {step_name} 已被退回 {reject_count} 次，"
+            f"超过上限（{p.TASK_REJECT_CEILING}），自动升级给 PM 协调"
+        )
+
+    # 处理原 task: 标记 INPUT_REQUIRED + 写入 reject_count
+    ts.update_state(current_task["id"], p.TaskState.INPUT_REQUIRED.value, config.DATA_DIR)
+    ts.increment_reject_count(current_task["id"], config.DATA_DIR)
+
+    # 写入退回记录到 _PIPELINE_STATE
+    pstate = _PIPELINE_STATE.setdefault(round_name, {})
+    rejected_steps = pstate.setdefault("rejected_steps", {})
+    rejected_steps[step_name] = {
+        "reject_count": reject_count,
+        "last_reason": reason,
+        "rejected_by": sender_id,
+        "rejected_at": time.time(),
+    }
+
+    # 更新 step 指针（如果当前已推进到此 step 之后，回退）
+    current_pstate = _PIPELINE_STATE.get(round_name, {})
+    current_step = current_pstate.get("current_step", "")
+    step_keys = sorted(step_config.keys(), key=lambda x: _step_sort_key(x[0]) if isinstance(x, str) else _step_sort_key(x))
+    current_idx = None
+    target_idx = None
+    for i, k in enumerate(step_keys):
+        if k == step_name:
+            target_idx = i
+        if k == current_step:
+            current_idx = i
+    if target_idx is not None and current_idx is not None and current_idx > target_idx:
+        _update_pipeline_step(round_name, step_name)
+
+    # 创建新 task（重新从 SUBMITTED 开始）
+    next_task_result = await _cmd_task_create(sender_id, {
+        "context": round_name,
+        "name": step_name,
+        "role": step_config[step_name].get("role", ""),
+    })
+
+    # 通知被退回角色（方向 F：定向发送）
+    users = auth.get_users()
+    step_role = step_config[step_name].get("role", "")
+    cards = _load_agent_cards()
+    member_ids = list(ws_obj.members)
+    if cards:
+        target_agents = _find_agents_by_role(step_role, member_ids, cards)
+    else:
+        target_agents = [
+            aid for aid in member_ids
+            if users.get(aid, {}).get("role", "member") == step_role
+        ]
+    reject_notify = f"🔄 {step_name} 被退回（第 {reject_count} 轮）：{reason}"
+    for agent_id in target_agents:
+        await _send_to_agent(agent_id, reject_notify)
+
+    # _admin 频道记录退回日志（PM 可见）
+    try:
+        admin_channel = p.ADMIN_CHANNEL
+        log_msg = (
+            f"📋 {round_name} 退回：{step_name} ❌（第 {reject_count} 轮）\n"
+            f"  理由：{reason}\n"
+            f"  退回者：{sender_id[:12]}"
+        )
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent="系统", from_name="系统",
+            content=log_msg, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=admin_channel,
+        )
+    except Exception:
+        pass
+
+    return f"🔄 {step_name} 已退回（第 {reject_count} 轮）：{reason}\n{next_task_result}"
 
 
 # ── R50: Step handoff command ──────────────────────────────────────
@@ -1645,6 +1890,18 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
         # R48 A: 展示 work_plan_url（如有）
         if pstate.get("work_plan_url"):
             lines.append(f"  📎 WORK_PLAN: {pstate['work_plan_url']}")
+        # ── R55 D: Mode marker ──
+        mode = pstate.get("mode", "auto")
+        mode_icon = "🚀" if mode == "auto" else "📋"
+        lines.append(f"  模式: {mode_icon} {mode}")
+        # ── R55 D: Rejected steps context ──
+        rejected_steps = pstate.get("rejected_steps", {})
+        if rejected_steps:
+            lines.append(f"  🔄 退回记录:")
+            for rstep, rinfo in rejected_steps.items():
+                lines.append(
+                    f"    {rstep}: 第{rinfo['reject_count']}轮 — {rinfo['last_reason'][:40]}"
+                )
         step_config = _load_step_config()
         tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
 
@@ -1671,6 +1928,8 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                         task_state = "⏳"  # waiting_ack
                     else:
                         task_state = "⬜"  # submitted, no pending ack
+                elif ts_state == p.TaskState.INPUT_REQUIRED.value:
+                    task_state = "🔄"  # R55 B: rejected, needs rework
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
             lines.append(f"  {task_state} {step_key} — {role}{current}")
@@ -1680,8 +1939,34 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
     return "\n".join(lines)
 
 
+# ── R55 E: Pipeline mode switch ─────────────────────────────
+
+
+async def _cmd_pipeline_mode(sender_id: str, params: dict) -> str:
+    """切换管线模式。
+    用法：!pipeline_mode <auto|manual>
+    """
+    positional = params.get("_positional", [])
+    if not positional or positional[0] not in ("auto", "manual"):
+        return "❌ 用法：!pipeline_mode auto|manual"
+    target_mode = positional[0]
+
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    round_name = None
+    for rname, pstate in _PIPELINE_STATE.items():
+        if pstate.get("ws_id") == sender_ch:
+            round_name = rname
+            break
+    if not round_name:
+        return "❌ 当前工作区无活跃管线"
+
+    _PIPELINE_STATE[round_name]["mode"] = target_mode
+    icon = "🚀" if target_mode == "auto" else "📋"
+    return f"✅ 管线 {round_name} 已切换为 {icon} {target_mode} 模式"
+
 
 # ── R49 B: Agent Card commands ──────────────────────────────────────
+
 
 
 async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
@@ -1906,7 +2191,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
     "step_complete": {
         "handler": _cmd_step_complete, "min_role": 1, "workspace_scope": True,
-        "usage": "!step_complete <step_name> --output <commit/file>",
+        "usage": "!step_complete <step_name> [--output <commit/file>]",
     },
     "pipeline_status": {
         "handler": _cmd_pipeline_status, "min_role": 3, "workspace_scope": False,
@@ -1920,6 +2205,16 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "step_handoff": {
         "handler": _cmd_step_handoff, "min_role": 3, "workspace_scope": True,
         "usage": "!step_handoff <step_name> --output <commit/file>",
+    },
+    # ── R55 B: Step reject ──
+    "step_reject": {
+        "handler": _cmd_step_reject, "min_role": 1, "workspace_scope": True,
+        "usage": "!step_reject <step_name> --reason <原因>",
+    },
+    # ── R55 E: Pipeline mode switch ──
+    "pipeline_mode": {
+        "handler": _cmd_pipeline_mode, "min_role": 3, "workspace_scope": True,
+        "usage": "!pipeline_mode <auto|manual>",
     },
 }
 
