@@ -71,6 +71,101 @@ R56 三方向工作流：
            └───────────────────────────────┘
 ```
 
+---
+
+## 🔴 Git 操作规范（全员遵守）
+
+> 以下规范是 R56 实操中确认的必要纪律，避免代码冲突和版本混乱。
+
+### 原则 1：改前先拉取（Pull Before Edit）
+
+每次编辑本地文件前，先拉取远程最新代码：
+
+```bash
+git pull --ff-only origin dev
+```
+
+| 时机 | 操作 |
+|:-----|:------|
+| 开始编辑任何文件前 | `git pull --ff-only origin dev` |
+| 多人并行开发时，每次 commit 前 | `git pull --rebase origin dev` |
+
+> **为什么：** 避免本地 stale 版本覆盖远程最新改动，减少冲突。
+
+### 原则 2：只提交改动文件（Commit Only Changes）
+
+不执行 `git add .` 或 `git add -A` 等批量添加命令。**只手动添加本次实际改动的文件：**
+
+```bash
+# ✅ 正确 — 只 add 改动的具体文件
+git add docs/R56/WORK_PLAN.md
+git add docs/R56/R56-product-requirements.md
+
+# ❌ 错误 — 可能带入无关改动
+git add .
+git add -A
+git add docs/          # 整个目录
+```
+
+| 场景 | 操作 |
+|:-----|:------|
+| 改了一个文档 | `git add docs/R56/WORK_PLAN.md` |
+| 改了代码 + 文档 | 分别 add 两个文件 |
+| 改了 3 个文件 | 逐个 add（可以一次 `git add file1 file2 file3`） |
+
+> **为什么：** 本地工作目录可能包含未完成的实验性改动、临时调试代码、或其他角色的遗留改动。批量 add 会将无关改动带入 commit，导致代码库污染和冲突。
+
+### 原则 3：开发在 dev，合并归管理员（Dev Branch Only）
+
+| 操作 | 责任人 | 说明 |
+|:-----|:-------|:------|
+| 代码开发 | 💻 各角色 | 所有 commit 推 `origin/dev` |
+| 文档编写 | 🧐 PM / 🏗️ 架构师 | 所有文档推 `origin/dev` |
+| 代码审查 | 🔍 审查者 | 审查 dev 分支代码 |
+| 测试验证 | 🦐 测试者 | 在 dev 容器上测试 |
+| 合并 dev → main | 🦸 超级管理员（admin-bot） | **仅超级管理员有 main 权限** |
+| 正式部署 | 🦸 超级管理员（admin-bot） | 合并后部署正式容器 |
+
+**禁止：** 非管理员直接推 main 分支。
+
+> **为什么：** main 是正式发布分支，需要经过完整测试验证和审查后才能合并。各角色在 dev 上完成各自环节后，由超级管理员统一合并部署。
+
+### 原则 4：远程 URL 安全（Token Not Leaked）
+
+每次通过 HTTPS 推送后，**立即恢复远程 URL** 为干净的公开 URL：
+
+```bash
+# 推送前：设置带 token 的 URL
+git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/datahome73/ws-bridge.git"
+
+# 推送
+git push origin dev
+
+# 推送后：立即恢复干净 URL
+git remote set-url origin https://github.com/datahome73/ws-bridge.git
+```
+
+> **为什么：** token 嵌入 URL 后，`git remote -v` 会暴露完整 token。恢复干净 URL 避免 token 泄露到日志或他人查看。
+
+### 原则 5：commit 信息格式统一
+
+```
+<type>(<scope>): <简短描述>
+
+# 类型：
+# docs   — 文档改动（需求/WORK_PLAN/报告）
+# feat   — 新功能
+# fix    — Bug 修复
+# chore  — 杂项（TODO更新/归档）
+
+# 示例：
+# docs(R56): v0.1 产品需求 — 通信层修复 + 过渡期流程
+# fix(R56): _send_to_agent 失败回退到工作室广播
+# docs(R56): Step 5 ✅ 测试报告 — 11/11 验收通过
+```
+
+---
+
 ### 角色对照表
 
 | 角色 | Step 2 | Step 3 | Step 4 | Step 5 |
