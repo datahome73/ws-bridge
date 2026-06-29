@@ -1393,7 +1393,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     positional = params.get("_positional", [])
     if not positional:
         return "❌ 用法：!step_complete <step_name> --output <commit/file>"
-    step_name = positional[0]
+    step_name = positional[0].lower()
     output_ref = params.get("output", "")
     if not output_ref:
         return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
@@ -1557,7 +1557,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     positional = params.get("_positional", [])
     if not positional:
         return "❌ 用法：!step_handoff <step_name> --output <commit/file>"
-    step_name = positional[0]
+    step_name = positional[0].lower()
     output_ref = params.get("output", "")
     if not output_ref:
         return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
