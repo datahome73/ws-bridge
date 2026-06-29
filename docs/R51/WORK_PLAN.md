@@ -44,7 +44,7 @@
 | 3 | 💻 编码实现 | ⏳ | dev-bot | `server/handler.py` 第 1396 行 `step_name = positional[0].lower()` | A-1~A-4 |
 | 4 | 🔍 代码审查 | ⏳ | review-bot | `docs/R51/R51-code-review.md` | A-1~A-5 |
 | 5 | 🦐 测试验证 | ⏳ | qa-bot | dev 部署 + A-1~A-5 逐项验收 | A-1~A-5 |
-| 6 | 🦸 合并部署归档 | ⏳ | admin-bot | 合并 dev→main + 生产部署 | ✅ |
+| 6 | 🦸 合并部署归档 | ✅ | admin-bot | 合并 dev→main + 生产部署 | ✅ d4a9676 |
 
 ### Phase V — 验证（纯执行，零代码改动）
 
