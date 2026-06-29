@@ -168,13 +168,14 @@ git remote set-url origin https://github.com/datahome73/ws-bridge.git
 
 ### 角色对照表
 
-| 角色 | Step 2 | Step 3 | Step 4 | Step 5 |
-|:----|:------:|:------:|:------:|:------:|
-| 🏗️ 架构师 | 🟢 技术方案 | — | — | — |
-| 💻 编码者 | — | 🟢 编码（A） | — | — |
-| 🧐 PM | — | 🟢 诊断（B）+ 流程（C） | — | — |
-| 🔍 审查者 | — | — | 🟢 审查 | — |
-| 🦐 测试者 | — | — | — | 🟢 测试 |
+| 角色 | Step 2 | Step 3 | Step 4 | Step 5 | Step 6 |
+|:----|:------:|:------:|:------:|:------:|:------:|
+| 🏗️ 架构师 | 🟢 技术方案 | — | — | — | — |
+| 💻 编码者 | — | 🟢 编码（A） | — | — | — |
+| 🧐 PM | — | 🟢 诊断（B）+ 流程（C） | — | — | — |
+| 🔍 审查者 | — | — | 🟢 审查 | — | — |
+| 🦐 测试者 | — | — | — | 🟢 测试 | — |
+| 🦸 超级管理员（admin-bot） | — | — | — | — | 🟢 合并部署 + 归档 |
 
 ---
 
@@ -319,15 +320,125 @@ if not conns:
 
 **完成后：** `!step_complete step5 --output <sha>`
 
-### Step 6：合并部署 + 归档 🦸 项目管理
+### Step 6：合并部署 + 归档 🦸 超级管理员（admin-bot）
 
-| 步骤 | 操作 |
-|:-----|:------|
-| ① | 合并 dev → main |
-| ② | 部署正式容器 |
-| ③ | 更新 TODO.md — 将 F-3/F-6/F-15/F-19 中的 R56 相关状态更新 |
-| ④ | 关闭工作室，恢复大厅接收 |
-| ⑤ | `!step_complete step6` 结束管线 |
+> **执行者：** 🦸 超级管理员 — 唯一有 main 分支写入权限和生产容器操作权限的角色。
+> **触发条件：** Step 5 测试验证通过后，PM 调 `!step_complete step5`，管线自动点名 admin-bot。
+
+#### 6-1 合并前验证（Pre-Merge Check）
+
+在合并 dev→main 之前，admin-bot 必须先验证以下条件全部满足：
+
+| # | 检查项 | 通过条件 |
+|:-:|:-------|:---------|
+| V-1 | 测试报告完整 | `docs/R56/R56-test-report.md` 存在，11/11 验收通过 |
+| V-2 | 代码审查通过 | `!step_complete step4` 已完成（`!pipeline_status` 确认） |
+| V-3 | dev 分支最新 | `git fetch origin dev && git log origin/main..origin/dev --oneline` 列出本轮所有改动 commit |
+| V-4 | 无未合并的冲突 | `git merge-tree $(git merge-base origin/main origin/dev) origin/main origin/dev` 无冲突输出 |
+| V-5 | 无敏感信息泄露 | 对新增代码运行脱敏扫描（grep 内部名） |
+
+> 如果 V-1~V-5 任一项不通过 → **暂停合并**，在工作室内通知 PM 跟进修复。不跳过检查强行合并。
+
+#### 6-2 执行合并
+
+```bash
+# 1. 拉取最新的 dev 和 main
+git fetch origin dev main
+
+# 2. 切到本地 main，拉取最新
+git checkout main
+git pull --ff-only origin main
+
+# 3. 合并 dev → main（--no-ff 保留分支历史）
+git merge origin/dev --no-ff --no-edit
+
+# 4. 推 main（仅 admin-bot 可执行）
+git push origin main
+
+# 5. 切回 dev 继续开发
+git checkout dev
+```
+
+**合并后立即验证：**
+
+```bash
+# 确认 main 已有最新 commit
+git log --oneline -3 origin/main
+
+# 确认需要的内容已包含
+git diff --stat origin/main..origin/dev  # 期望输出为空（dev 已合并到 main）
+```
+
+> **注意：** 仅合并本轮改动的 commit，不含未审核的 dev 改动。如果 dev 上有其他轮次的未完成代码，需要 cherry-pick 或协商范围。
+
+#### 6-3 生产容器部署
+
+合并完成后，admin-bot 执行生产容器部署：
+
+| 步骤 | 操作 | 说明 |
+|:-----|:------|:------|
+| ① | 远程登录生产 VPS | SSH 或 docker context 连接 |
+| ② | 拉取 main 最新代码 | `git pull origin main` |
+| ③ | 重建并启动生产容器 | `docker compose build && docker compose up -d` |
+| ④ | 检查容器健康状态 | `docker ps` 确认容器运行中 |
+| ⑤ | 检查服务端启动日志 | `docker logs --tail 20 <container>` 确认无 ERROR |
+| ⑥ | 验证 WebSocket 服务可连接 | `curl -s -o /dev/null -w "%{http_code}" http://localhost:8765/health` 期望 200 |
+| ⑦ | 验证 `!pipeline_status` 可用 | 直连生产 WS 或通过工作群发出，确认返回有效数据 |
+
+**滚动更新策略：** 如果生产容器有多个副本，逐个替换（先停一个→启动新版本→验证→再停下一个）。避免全量重启导致服务中断。
+
+#### 6-4 部署后验证（Post-Deploy Smoke Test）
+
+部署上线后，admin-bot 执行快速冒烟测试：
+
+```bash
+# 检查方向 A 修复是否生效
+!pipeline_status           # 确认返回管线状态表格，非错误
+!step_complete step2       # 确认命令可执行（测试权限放开）
+```
+
+| # | 验证项 | 说明 |
+|:-:|:-------|:-----|
+| D-1 | 新容器 WebSocket 握手正常 | 直连生产 ws://... 收到 auth 响应 |
+| D-2 | `!pipeline_status` 返回有效数据 | 确认新代码已上线 |
+| D-3 | `_send_to_agent` 回退逻辑工作 | 断线目标 bot + 调 `!step_complete` → 工作室可见广播 |
+| D-4 | Web 端可正常加载 | 浏览器打开 Web 聊天室确认 |
+
+#### 6-5 归档
+
+部署验证通过后，执行归档操作：
+
+| 步骤 | 操作 | 责任人 |
+|:-----|:------|:-------|
+| ① | 更新 `docs/TODO.md` — 将 R56 完成项标记为 🟢 已完成 | 🧐 PM |
+| ② | 关闭工作室 `ws:R56-dev` | 🦸 admin-bot |
+| ③ | 恢复大厅接收（如已暂停） | 🦸 admin-bot（自动） |
+| ④ | 通知 PM 管线完成 → PM 回复项目负责人 | 🦸 admin-bot → 🧐 PM |
+| ⑤ | `!step_complete step6` 结束管线 | 🦸 admin-bot |
+
+#### 6-6 回滚预案
+
+如果部署后发现严重问题（P0/P1），admin-bot 执行回滚：
+
+```bash
+# 回滚 main 到上一版本
+git revert HEAD --no-edit
+git push origin main
+
+# 重新部署旧版本容器
+docker compose down
+docker compose up -d
+
+# 验证恢复
+docker ps
+docker logs --tail 10 <container>
+```
+
+**回滚后：** 立即在工作室内通知 PM 和项目负责人，说明回滚原因和计划修复的轮次。
+
+---
+
+**完成后：** `!step_complete step6` 结束管线 🎉
 
 ---
 
