@@ -82,10 +82,15 @@ LOBBY_RATE_WINDOW_P1P2 = 2
 LOBBY_RATE_WINDOW_P3 = 5
 LOBBY_RATE_SECONDS = 60
 
-# ── R37: Roll-call confirmation tracking ─────────────────────────
-_rollcall_active: dict[str, bool] = {}        # ws_id → True if roll-call in progress
-_rollcall_timers: dict[str, asyncio.Task] = {}  # ws_id → timeout task
-_rollcall_confirmed: dict[str, set[str]] = {}   # ws_id → set of confirmed agent_ids
+# ── R53: Channel switch ACK state (replaces R37 rollcall) ────────
+_channel_ack_state: dict[str, dict] = {}
+# ws_id → {
+#   "ack_task_id": str,           # per-broadcast unique ID
+#   "online_members": set[str],   # members that were online at send time
+#   "acked_members": dict[str,float],  # {agent_id: ack_timestamp}
+#   "timer": asyncio.Task | None  # 30s timeout task
+#   "callback": callable | None   # called on completion/partial
+# }
 
 
 async def _send(ws, data: dict) -> None:
@@ -314,45 +319,6 @@ async def _send_cmd_response(ws, sender_id: str, from_name: str, content: str, c
     write_chat_log(from_name, content, channel=channel)
 
 
-# ── R37 A-1: Auto roll-call notification ──────────────────────────────
-
-
-async def _auto_rollcall_notify(ws_id: str, initiator_name: str) -> None:
-    """Send roll-call notification to all workspace members (R37 A-1).
-
-    Called as background task after workspace creation via !create_workspace.
-    """
-    await asyncio.sleep(1)  # brief settle for workspace to be fully created
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return
-    payload = json.dumps({
-        "type": "broadcast",
-        "channel": ws_id,
-        "from_name": "系统",
-        "from": "系统",
-        "agent_id": "",
-        "from_agent": "",
-        "content": (
-            "📋 点名报道\n"
-            "工作室已创建，请回复「到」确认在线。\n"
-            "3分钟超时默认到齐。\n"
-            "到齐后推进 Step 3 技术方案 🏗️"
-        ),
-        "ts": time.time(),
-    })
-    for agent_id in ws_obj.members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-    _rollcall_active[ws_id] = True
-    logger.info("Auto roll-call sent to %d members of '%s'", len(ws_obj.members), ws_id)
-
 
 def _parse_command(content: str) -> tuple[str | None, dict]:
     """Parse '!<command> [args...]' into (command_name, params dict)."""
@@ -461,16 +427,16 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
         if mid in users:
             ws_mod.add_member(ws_id, mid)
 
-    # R37 A-1: Auto-bind creator's active channel to new workspace
+    # Auto-bind creator's active channel to new workspace
     persistence.set_agent_channel(sender_id, ws_id)
     persistence.save_agent_channels(config.DATA_DIR)
 
     member_list = ", ".join(member_ids) if member_ids else "无"
 
-    # R37 A-1: Auto-send roll-call notification as background task
-    asyncio.create_task(_auto_rollcall_notify(ws_id, sender_name))
+    # R53: Broadcast MSG_SET_ACTIVE_CHANNEL with ACK (replaces R37 text rollcall)
+    asyncio.create_task(_broadcast_active_channel(ws_id))
 
-    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}（点名通知已发送）"
+    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}（ACK 点名已发送）"
 
 
 async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
@@ -774,7 +740,7 @@ async def _cmd_task_list(sender_id: str, params: dict) -> str:
 
 
 async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
-    """点名指定角色成员。P3+
+    """点名指定角色成员 — 使用 ACK 确认制代替文本「到」。
     Usage: !rollcall_role <role> [--context <msg>]
     """
     positional = params.get("_positional", [])
@@ -794,35 +760,21 @@ async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
     if not matched:
         return f"❌ 工作区中未找到角色为「{target_role}」的成员"
     sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
-    suffix = f"（背景：{context_msg}）" if context_msg else ""
-    msg_content = f"📋 {sender_name} 点名 {target_role} 成员{suffix}\n请回复「到」确认在线。"
-    payload = json.dumps({
-        "type": "broadcast", "channel": sender_ch,
-        "from_name": "系统", "from": "系统",
-        "agent_id": "", "from_agent": "",
-        "content": msg_content,
-        "ts": time.time(),
-    })
-    # R41 D: Persist rollcall message
-    _persist_broadcast(sender_ch, "系统", msg_content)
-    sent_count = 0
-    names = []
-    for aid in matched:
-        names.append(users.get(aid, {}).get("name", aid[:12]))
-        for conn in list(_connections.get(aid, set())):
-            try:
-                if hasattr(conn, "send_str"): await conn.send_str(payload)
-                elif hasattr(conn, "send"): await conn.send(payload)
-                sent_count += 1
-            except Exception:
-                pass
+    names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
     names_str = ", ".join(names)
-    return f"✅ 已向 {len(matched)} 名 {target_role} 成员发送点名：{names_str}（{sent_count} 人在线）"
+    suffix = f"（背景：{context_msg}）" if context_msg else ""
+    # ★ R53: Use ACK-driven broadcast instead of text "回复到"
+    _persist_broadcast(sender_ch, "系统", f"📋 {sender_name} 点名 {target_role} 成员{suffix}")
+    ack_result = await _broadcast_active_channel(sender_ch)
+    return f"✅ 已点名 {target_role}：{names_str}（{ack_result['online_count']} 人在线，等待 ACK 确认）"
 
 
 async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
-    """点名下一环节负责人。P3+
+    """点名下一环节负责人 — 使用 ACK 确认制代替文本「到」。
     Usage: !rollcall_next <role> --context <摘要>
+    
+    不再发送「请回复到开始」文本消息。
+    改为通过 _broadcast_active_channel(ws_id) 启动 ACK 等待。
     """
     positional = params.get("_positional", [])
     if not positional:
@@ -844,26 +796,11 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
         return f"❌ 工作区中未找到角色为「{target_role}」的成员"
     names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
     names_str = ", ".join(names)
-    msg_content = f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}\n请确认就位，回复「到」开始。"
-    payload = json.dumps({
-        "type": "broadcast", "channel": sender_ch,
-        "from_name": "系统", "from": "系统",
-        "agent_id": "", "from_agent": "",
-        "content": msg_content,
-        "ts": time.time(),
-    })
-    # R41 D: Persist rollcall message
-    _persist_broadcast(sender_ch, "系统", msg_content)
-    sent_count = 0
-    for aid in matched:
-        for conn in list(_connections.get(aid, set())):
-            try:
-                if hasattr(conn, "send_str"): await conn.send_str(payload)
-                elif hasattr(conn, "send"): await conn.send(payload)
-                sent_count += 1
-            except Exception:
-                pass
-    return f"✅ 已通知 {len(matched)} 名 {target_role} 成员接管「{context_summary}」（{sent_count} 人在线）"
+    # Persist the rollcall context for audit
+    _persist_broadcast(sender_ch, "系统", f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}")
+    # ★ R53: Use ACK-driven channel broadcast instead of text "回复到"
+    ack_result = await _broadcast_active_channel(sender_ch)
+    return f"✅ 已点名 {names_str}（{ack_result['online_count']} 人在线），等待 ACK 确认..."
 
 
 
@@ -1385,7 +1322,7 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
     return (
         f"🚀 **{round_name} 管线已激活**\n"
         f"  工作室: {ws_id}\n"
-        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count} 个在线成员\n"
+        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count['online_count']} 个在线成员\n"
         f"  请各成员确认频道已切换到工作室"
     )
 
@@ -1540,11 +1477,10 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if _clear_watchdog_alert(round_name, step_name):
         await _send_clear_alert(round_name, step_name, output_ref)
 
-    # ── R43 D: Enhanced return value with rollcall confirm ──
+    # ── R53 D: Enhanced return value with ACK confirm ──
     return (
         f"✅ **{step_name} 完成** → 交接给 {next_role} {next_step}\n"
-        f"  📋 已点名 {next_role_display}，等待确认「到」\n"
-        f"  🎯 负责人请切到工作室频道回复「到」开始\n"
+        f"  ⏳ 等待 {next_role_display} ACK 确认接管任务\n"
         f"  {task_result}\n"
         f"  {rollcall_result}\n"
         f"  {next_task_result}"
@@ -1689,9 +1625,8 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     return (
         f"✅ **{step_name} 完成 → 交接给 {next_role} {next_step}**\n"
         f"  产出: {output_ref}\n"
-        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count} 个在线成员\n"
-        f"  📋 已点名 {next_role_display}，等待确认「到」\n"
-        f"  🎯 负责人请切到工作室频道回复「到」开始\n"
+        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count['online_count']} 个在线成员\n"
+        f"  ⏳ 等待 {next_role_display} ACK 确认\n"
         f"  {rollcall_result}\n"
         f"  {next_task_result}"
     )
@@ -1730,6 +1665,12 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                     task_state = "🟢"
                 elif ts_state == p.TaskState.FAILED.value:
                     task_state = "❌"
+                elif ts_state == p.TaskState.SUBMITTED.value:
+                    # ★ R53 B-4: Check for active ACK timer
+                    if t["id"] in _task_ack_timers:
+                        task_state = "⏳"  # waiting_ack
+                    else:
+                        task_state = "⬜"  # submitted, no pending ack
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
             lines.append(f"  {task_state} {step_key} — {role}{current}")
@@ -2357,26 +2298,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             logger.info("Channel [%s] %s→%s: %s", channel, sender_name, ",".join(target_names), content[:60])
             write_chat_log(sender_name, content, channel=channel)
 
-            # ── R37 B-2: Parse "已切" confirmation during active roll-call ──
-            if content.strip() == "已切" and resolved_workspace:
-                ws_ch = resolved_workspace.id
-                if _rollcall_active.get(ws_ch, False):
-                    _rollcall_confirmed.setdefault(ws_ch, set()).add(sender_id)
-                    confirmed = len(_rollcall_confirmed[ws_ch])
-                    total = len(resolved_workspace.members)
-                    await _send(ws, {
-                        "type": "broadcast",
-                        "channel": ws_ch,
-                        "from_name": "系统",
-                        "from": "系统",
-                        "content": f"✅ 已确认 {confirmed}/{total} 成员切换。",
-                        "ts": time.time(),
-                    })
-                    # Auto-check: if all confirmed, run verification
-                    if confirmed >= total:
-                        asyncio.create_task(_notify_rollcall_complete(ws_ch))
-                        logger.info("R37: All %d members confirmed channel switch for '%s'", total, ws_ch)
-
             return
     # ── R24: Lobby routing with prefix classification ─────────────────
     if channel == p.LOBBY:
@@ -2610,43 +2531,38 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         })
         logger.info("Admin %s roll-call — online list sent (%s)", sender_id[:12], online_list)
 
-        # R37 B-1: Auto-send MSG_SET_ACTIVE_CHANNEL to all workspace members
+        # R53: Broadcast MSG_SET_ACTIVE_CHANNEL with ACK (replaces R37 text rollcall)
         if resolved_workspace:
             target_ch = resolved_workspace.id
-            _rollcall_active[target_ch] = True
-            _rollcall_confirmed[target_ch] = set()
-            # Cancel existing timer if any
-            if target_ch in _rollcall_timers:
-                _rollcall_timers[target_ch].cancel()
-            _rollcall_timers[target_ch] = asyncio.create_task(
-                _rollcall_timeout(target_ch)
-            )
-            # Use shared broadcast function (R50)
-            online_switch = await _broadcast_active_channel(target_ch)
+            ack_result = await _broadcast_active_channel(target_ch)
 
 
 # ── R50: Shared MSG_SET_ACTIVE_CHANNEL broadcast ─────────────────
 
 
-async def _broadcast_active_channel(ws_id: str) -> int:
-    """Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members.
-    Returns the number of online members that received the message.
+async def _broadcast_active_channel(ws_id: str) -> dict:
+    """Broadcast MSG_SET_ACTIVE_CHANNEL with ACK waiting.
+    Returns: {online_count, acked_members: set[str], timedout_members: set[str]}
     Also persists the channel for offline members so they pick it up on reconnection.
     """
     ws_obj = ws_mod.get_workspace(ws_id)
     if not ws_obj:
-        return 0
+        return {"online_count": 0, "acked_members": set(), "timedout_members": set()}
+
+    # ★ R53: Generate per-broadcast ack_task_id
+    ack_task_id = str(uuid.uuid4())
 
     switch_payload = json.dumps({
         "type": p.MSG_SET_ACTIVE_CHANNEL,
         p.FIELD_CHANNEL: ws_id,
+        p.FIELD_TASK_ID: ack_task_id,
         "from_name": "系统",
         "from": "系统",
-        "content": f"请确认活跃频道已切换至 {ws_id}，回复「已切」确认。",
+        "content": f"请将活跃频道切换至 {ws_id} 后回复 ACK",
         "ts": time.time(),
     })
 
-    online_count = 0
+    online_members = set()
     for member_id in ws_obj.members:
         persistence.set_agent_channel(member_id, ws_id)
         for conn in list(_connections.get(member_id, set())):
@@ -2655,16 +2571,29 @@ async def _broadcast_active_channel(ws_id: str) -> int:
                     await conn.send_str(switch_payload)
                 elif hasattr(conn, "send"):
                     await conn.send(switch_payload)
-                online_count += 1
+                online_members.add(member_id)
             except Exception:
                 pass
 
     persistence.save_agent_channels(config.DATA_DIR)
+
+    # ★ R53: Register ACK state and start 30s timeout
+    _channel_ack_state[ws_id] = {
+        "ack_task_id": ack_task_id,
+        "online_members": online_members,
+        "acked_members": {},
+        "timer": asyncio.create_task(_channel_ack_timeout(ws_id)),
+    }
+
     logger.info(
-        "MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members",
-        ws_id, online_count,
+        "MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members (ack=%s)",
+        ws_id, len(online_members), ack_task_id[:8],
     )
-    return online_count
+    return {
+        "online_count": len(online_members),
+        "acked_members": set(),
+        "timedout_members": set(),
+    }
 
 
 # ── R11 P2.2: Membership change notification ────────────────────
@@ -2823,11 +2752,11 @@ async def _task_ack_timeout(admin_ws, task_id: str, target_name: str) -> None:
     logger.warning("Task %s ack timeout for %s", task_id, target_name)
 
 
-# ── R37 B-3/B-4: Roll-call timeout and verification ─────────────────
+# ── R53: Channel switch verification ────────────────────────────
 
 
 async def _notify_rollcall_complete(ws_id: str) -> None:
-    """Verify all members have switched channels and notify host (R37 B-3)."""
+    """Verify all members have switched channels and notify host (R53)."""
     ws_obj = ws_mod.get_workspace(ws_id)
     if not ws_obj:
         return
@@ -2849,11 +2778,11 @@ async def _notify_rollcall_complete(ws_id: str) -> None:
     })
     if not unconfirmed:
         content = "✅ 点名完成：全员活跃频道已锁定。"
-        logger.info("R37: Roll-call complete for '%s' — all members confirmed", ws_id)
+        logger.info("R53: Roll-call complete for '%s' — all members confirmed", ws_id)
     else:
         names = [users.get(uid, {}).get("name", uid[:12]) for uid in unconfirmed]
         content = f"⚠️ 点名完成（部分）：以下成员未确认频道切换：{', '.join(names)}"
-        logger.info("R37: Roll-call complete for '%s' — %d unconfirmed: %s", ws_id, len(unconfirmed), names)
+        logger.info("R53: Roll-call complete for '%s' — %d unconfirmed: %s", ws_id, len(unconfirmed), names)
 
     payload = json.dumps({**json.loads(payload), "content": content})
     for admin_id in ws_obj.admin_ids:
@@ -2865,44 +2794,58 @@ async def _notify_rollcall_complete(ws_id: str) -> None:
                     await conn.send(payload)
             except Exception:
                 pass
-    _rollcall_active[ws_id] = False
+    # R53: Cleanup ACK state
+    _channel_ack_state.pop(ws_id, None)
 
 
-async def _rollcall_timeout(ws_id: str) -> None:
-    """3-minute timeout for roll-call confirmation (R37 B-4)."""
-    await asyncio.sleep(180)
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj or not _rollcall_active.get(ws_id, False):
+# ── R53: Channel switch ACK timeout (30s, replaces R37 3min) ───
+
+async def _channel_ack_timeout(ws_id: str) -> None:
+    """30s timeout for channel switch ACK.
+    On timeout: marks unresponsive members, calls _notify_rollcall_complete().
+    """
+    await asyncio.sleep(30)
+    state = _channel_ack_state.get(ws_id)
+    if not state:
         return
-    unconfirmed = []
-    for member_id in ws_obj.members:
-        if member_id not in _rollcall_confirmed.get(ws_id, set()):
-            unconfirmed.append(member_id)
-
-    if unconfirmed:
+    timedout = state["online_members"] - set(state["acked_members"].keys())
+    if timedout:
         users = auth.get_users()
-        names = [users.get(uid, {}).get("name", uid[:12]) for uid in unconfirmed]
-        alert = json.dumps({
+        names = [users.get(uid, {}).get("name", uid[:12]) for uid in timedout]
+        alert_payload = json.dumps({
             "type": "broadcast",
             "channel": ws_id,
             "from_name": "系统",
             "from": "系统",
             "agent_id": "",
             "from_agent": "",
-            "content": f"⏰ 点名超时：以下 {len(unconfirmed)} 名成员未回复「已切」：{', '.join(names)}",
+            "content": f"⏰ 点名超时（30s）：以下 {len(timedout)} 名成员未回复 ACK：{', '.join(names)}",
             "ts": time.time(),
         })
-        for admin_id in ws_obj.admin_ids:
-            for conn in list(_connections.get(admin_id, set())):
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(alert)
-                    elif hasattr(conn, "send"):
-                        await conn.send(alert)
-                except Exception:
-                    pass
-        logger.info("R37: Roll-call timeout for '%s': %d unconfirmed", ws_id, len(unconfirmed))
-    _rollcall_active[ws_id] = False
+        ws_obj = ws_mod.get_workspace(ws_id)
+        if ws_obj:
+            for admin_id in ws_obj.admin_ids:
+                for conn in list(_connections.get(admin_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(alert_payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(alert_payload)
+                    except Exception:
+                        pass
+        logger.info("R53: Channel ACK timeout for '%s': %d unconfirmed", ws_id, len(timedout))
+    # Call rollcall complete with partial results
+    asyncio.create_task(_notify_rollcall_complete(ws_id))
+    # Cleanup
+    _channel_ack_state.pop(ws_id, None)
+
+
+def _resolve_ws_by_ack_task_id(ack_task_id: str) -> str | None:
+    """Find workspace ID by its active ack_task_id."""
+    for ws_id, state in _channel_ack_state.items():
+        if state.get("ack_task_id") == ack_task_id:
+            return ws_id
+    return None
 
 
 # ── R12 P0.4: Workspace ready broadcast ────────────────────────────
@@ -3404,6 +3347,29 @@ async def handler(ws):
                 else:
                     await _send(ws, {"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
 
+            # ── R53 A-4: Channel switch ACK ──────────────────────
+            elif msg_type == p.MSG_ACK and agent_id:
+                ack_task_id = msg.get(p.FIELD_TASK_ID, "")
+                status = msg.get(p.FIELD_TASK_STATUS, "switched")  # "switched" | "failed"
+                channel = msg.get(p.FIELD_CHANNEL, "")
+
+                # Find matching channel_ack_state by ack_task_id
+                ws_id = _resolve_ws_by_ack_task_id(ack_task_id)
+                if not ws_id or ws_id not in _channel_ack_state:
+                    continue  # stale ACK or not waiting
+
+                state = _channel_ack_state[ws_id]
+                if status == "switched":
+                    state["acked_members"][agent_id] = time.time()
+                    await _send(ws, {"type": "ack", "status": "ok",
+                                     "message": "✅ 频道切换已确认"})
+
+                    # All online members acknowledged?
+                    if set(state["acked_members"].keys()) >= state["online_members"]:
+                        state["timer"].cancel()
+                        asyncio.create_task(_notify_rollcall_complete(ws_id))
+                # "failed" → record but don't block
+
             # ── R12 P0.3: Task ACK ──────────────────────────────
             elif msg_type == p.MSG_TASK_ACK and agent_id:
                 task_id = msg.get(p.FIELD_TASK_ID, "")
@@ -3419,6 +3385,12 @@ async def handler(ws):
                 sender_name = users.get(agent_id, {}).get("name", agent_id[:12])
 
                 if status == "accepted":
+                    # ★ R53 B-2: Advance task from submitted → working
+                    task = ts.get_task(task_id, config.DATA_DIR)
+                    if task and task.get("state") == p.TaskState.SUBMITTED.value:
+                        ts.update_task(task_id, state=p.TaskState.WORKING.value, data_dir=config.DATA_DIR)
+                        logger.info("R53: Task %s advanced to WORKING (ack by %s)", task_id, agent_id[:12])
+
                     ack_msg = json.dumps({
                         "type": p.MSG_DELIVERY_STATUS,
                         "task_id": task_id,
