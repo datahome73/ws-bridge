@@ -33,7 +33,7 @@ R53 已产出 **自动驾驶管线协作设计原则**（`docs/R53/R53-self-driv
 
 ## 2. 方向说明
 
-R55 将 R54 设计文档中的 5 项技术改动方向全部实现，同时将行为规则正式纳入 WORK_PLAN。
+R55 将 [R54 产品需求](docs/R54/R54-product-requirements.md) 中的 5 项技术改动方向全部实现，同时将行为规则正式纳入 WORK_PLAN。
 
 ### 方向 A：放开 `!step_complete` 角色校验 🔴 P0
 

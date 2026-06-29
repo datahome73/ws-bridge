@@ -1535,7 +1535,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
 
     # Send targeted channel switch and notification
     for agent_id in target_agents:
-        await _send_to_agent(agent_id, targeted_notify)
+        await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
     rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
 
     # 创建下一步的 Task
@@ -1581,15 +1581,37 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
 # ── R55 F: Targeted send helper ────────────────────────────
 
 
-async def _send_to_agent(agent_id: str, text: str) -> bool:
+async def _send_to_agent(agent_id: str, text: str, ws_id: str = "") -> bool:
     """Send a text message directly to a specific agent (not broadcast).
-    Falls back to write_chat_log if agent is offline.
+    If the agent has live connections, send the text. If not, and ws_id
+    is provided, fall back to broadcasting to all workspace members.
     Returns True if at least one connection received it.
     """
     conns = _connections.get(agent_id, set())
     if not conns:
-        # W-4: offline fallback — persist to chat log so agent sees it on reconnect
-        write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
+        # Offline fallback: broadcast to workspace members
+        if ws_id:
+            ws_obj = ws_mod.get_workspace(ws_id)
+            if ws_obj:
+                fallback = json.dumps({
+                    "type": "broadcast",
+                    "channel": ws_id,
+                    "from_name": "系统",
+                    "content": text,
+                    "ts": time.time(),
+                })
+                for member_id in ws_obj.members:
+                    for conn in list(_connections.get(member_id, set())):
+                        try:
+                            if hasattr(conn, "send_str"):
+                                await conn.send_str(fallback)
+                            elif hasattr(conn, "send"):
+                                await conn.send(fallback)
+                        except Exception:
+                            pass
+                write_chat_log("系统", f"[回退广播 @{ws_id}] {text}", channel=ws_id)
+        else:
+            write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
         return False
     payload = {
         "type": p.MSG_BROADCAST,
@@ -1606,7 +1628,6 @@ async def _send_to_agent(agent_id: str, text: str) -> bool:
         except Exception:
             pass
     if not sent:
-        # W-4: all connections failed — persist fallback
         write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
     return sent
 
@@ -1658,6 +1679,8 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
     # 检查退回次数上限
     reject_count = current_task.get("reject_count", 0) + 1
     if reject_count >= p.TASK_REJECT_CEILING:
+        # R55 W-3: 第 TASK_REJECT_CEILING 次退回 → 升级给 PM
+        # TASK_REJECT_CEILING=2 表示第 2 次退回（即 2 次机会后）升级
         # 第 3 次退回 → 升级给 PM
         try:
             admin_channel = p.ADMIN_CHANNEL
@@ -1729,7 +1752,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
         ]
     reject_notify = f"🔄 {step_name} 被退回（第 {reject_count} 轮）：{reason}"
     for agent_id in target_agents:
-        await _send_to_agent(agent_id, reject_notify)
+        await _send_to_agent(agent_id, reject_notify, ws_id=sender_ch)
 
     # _admin 频道记录退回日志（PM 可见）
     try:
