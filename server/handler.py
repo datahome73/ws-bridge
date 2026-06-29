@@ -1658,6 +1658,8 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
     # 检查退回次数上限
     reject_count = current_task.get("reject_count", 0) + 1
     if reject_count >= p.TASK_REJECT_CEILING:
+        # R55 W-3: 第 TASK_REJECT_CEILING 次退回 → 升级给 PM
+        # TASK_REJECT_CEILING=2 表示第 2 次退回（即 2 次机会后）升级
         # 第 3 次退回 → 升级给 PM
         try:
             admin_channel = p.ADMIN_CHANNEL
