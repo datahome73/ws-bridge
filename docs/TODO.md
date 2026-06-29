@@ -100,7 +100,7 @@
 | M-4 | **写开源版 README.md** — 通用接入指南 | R42 | 🟢 已完成 |
 || M-5 | **添加开源标配文档** — LICENSE、CONTRIBUTING.md、CODE_OF_CONDUCT.md | R42 | 🟢 已完成 |
 || R40-A | **Web 端 GitHub OAuth 认证** — 引入 GitHub OAuth 2.0 Authorization Code 流程，与现有绑定码并行运行。支持身份映射表、session 持久化、7 天 cookie 无感登录 | R40 | 🟢 已完成 |
-|| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
+||| **R56** | **通信层修复轮 — 方向 A _send_to_agent 回退广播（39ef407）+ 方向 B 诊断 + 方向 C SOP。审查通过（e505d9d）。合并部署 ws-bridge:r56** | R56 | 🟢 已完成 |\n||| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
 || F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | — | ❌ 已取消 |
 
 ### 已验证功能（无需改动）
@@ -128,7 +128,7 @@
 
 | 版本 | 日期 | 变更 |
 
-|| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线（6 方向 A-F）完结：放开角色校验、!step_reject 退回命令、git ls-remote 验证、!pipeline_status 增强、--mode auto/manual + !pipeline_mode、定向发送减少回声。合并部署 ws-bridge:r55 |
+||| v2.23 | 2026-06-29 | 🎯 **R56 完成 ✅** — 通信层修复轮（3 方向）：A — _send_to_agent 失败回退到工作室广播（39ef407），B — 通信链路诊断方案，C — 过渡期 PM SOP。审查通过（e505d9d），合并部署 ws-bridge:r56 |\n||| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线（6 方向 A-F）完结：放开角色校验、!step_reject 退回命令、git ls-remote 验证、!pipeline_status 增强、--mode auto/manual + !pipeline_mode、定向发送减少回声。合并部署 ws-bridge:r55 |
 ||| v2.21 | 2026-06-29 | 🐛 新增 R36-3 — wsim bot 列表 "Hermes" 名字确认（Gateway 默认 bot_name 为 "Hermes"，待排查清理） |
 ||| | v2.20 | 2026-06-29 | 🎯 **R53 完成 ✅** — F-20（P0）`!pipeline_start` 缺 `_broadcast_active_channel()` 修复（ACK 确认制点名与派活方向 A/B/C 中止，仅 F-20 编码完成，+142/-170，净-28行） |
 ||| | v2.19 | 2026-06-29 | 🎯 **R52 完成 ✅** — F-18 移除 📊 进度 Tab（纯前端 -99/+1，6 定点删除 + 零残留引用） |
