@@ -38,7 +38,7 @@
 | Step | 名称 | 状态 | 责任人 | 产出 | 验收 |
 |:----:|:-----|:----:|:------|:-----|:----:|
 | 1 | 🔶 管线启动 | ⏳ | 服务端自动 | 建工作室 + 点名全员 + 派活 | V-1~V-6 |
-| 2 | 🏗️ 技术方案 | ⏳ | arch-bot | `docs/R52/R52-tech-plan.md`（标注 6 个删除点 + 确认 Tab ID 保留策略） | §4 V-1~V-6 |
+| 2 | 🏗️ 技术方案 | ✅ `aa39ab3` | arch-bot | `docs/R52/R52-tech-plan.md`（6 个删除点 + STATE_ICONS 死代码清理 + 4-tab 注释更新） | §4 V-1~V-6 |
 | 3 | 💻 编码实现 | ⏳ | dev-bot | `server/templates.py` 删除 6 处代码块 + 验证无 JS 错误 | V-1~V-6 |
 | 4 | 🔍 代码审查 | ⏳ | review-bot | `docs/R52/R52-code-review.md` | V-1~V-6 |
 | 5 | 🦐 测试验证 | ⏳ | qa-bot | dev 部署 + V-1~V-6 逐项验收 | V-1~V-6 |
