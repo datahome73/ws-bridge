@@ -18,6 +18,12 @@ ADMIN_AGENTS: set[str] = set(
 )
 
 
+# System agents hidden from API status / web UI
+# Comma-separated list of agent_ids to exclude from agent list endpoints
+HIDDEN_AGENTS: set[str] = set(
+    filter(None, os.environ.get("WS_HIDDEN_AGENTS", "bot-hermes").split(","))
+)
+
 # ── R40: GitHub OAuth ─────────────────────────────────────────
 GITHUB_OAUTH_CLIENT_ID=os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
 GITHUB_OAUTH_CLIENT_SECRET=os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")

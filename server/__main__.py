@@ -701,12 +701,15 @@ async def _get_users():
 
 async def _api_status(request: web.Request) -> web.Response:
     """Return online/offline status for all approved agents."""
+    from .config import HIDDEN_AGENTS as _hidden
     from .persistence import get_web_sessions as _gws  # noqa: F811
     users = _get_approved_users()
     now = time.time()
     agents_list = []
     seen = set()
     for agent_id, conns in list(_connections.items()):
+        if agent_id in _hidden:
+            continue
         info = users.get(agent_id, {})
         connected_at = min(
             (getattr(c, "_connected_at", now) for c in list(conns)),
@@ -721,7 +724,7 @@ async def _api_status(request: web.Request) -> web.Response:
         })
         seen.add(agent_id)
     for agent_id, info in users.items():
-        if agent_id not in seen:
+        if agent_id not in seen and agent_id not in _hidden:
             agents_list.append({
                 "id": agent_id[:16],
                 "name": info.get("name", agent_id[:12]),
