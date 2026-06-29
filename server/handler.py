@@ -1153,24 +1153,37 @@ async def _send_clear_alert(round_name: str, step_name: str, output_ref: str) ->
 
 
 async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
-    """Check remote git dev branch for the given commit SHA.
+    """Check remote git dev branch for the given commit SHA via git ls-remote.
     Uses 10s timeout. On failure, degrades to a warning.
     Returns: (ok_to_proceed, message)
     """
-    import urllib.request as _r55url
+    import subprocess
     repo_url = _r42cfg.GIT_REMOTE_URL
     try:
-        req = _r55url.Request(repo_url, method='GET',
-                              headers={'User-Agent': 'Hermes-WS-Bridge/1.0'})
-        with _r55url.urlopen(req, timeout=10) as resp:
-            content = resp.read().decode('utf-8', errors='replace')
-            if commit_sha in content:
-                return True, ""
-            else:
-                return False, (
-                    f"❌ Commit {commit_sha[:12]} 不存在于远程仓库 "
-                    f"（{repo_url}）的 dev 分支"
-                )
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                "git", "ls-remote", repo_url, "refs/heads/dev",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ),
+            timeout=10,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return True, (
+                f"⚠️ git ls-remote 异常退出（{stderr.decode('utf-8', errors='replace')[:40]}），"
+                f"已跳过验证，继续推进"
+            )
+        refs = stdout.decode("utf-8", errors="replace")
+        if commit_sha in refs:
+            return True, ""
+        else:
+            return False, (
+                f"❌ Commit {commit_sha[:12]} 不存在于远程仓库 "
+                f"（{repo_url}）的 dev 分支"
+            )
+    except asyncio.TimeoutError:
+        return True, "⚠️ git ls-remote 超时（10s），已跳过验证，继续推进"
     except Exception as e:
         return True, f"⚠️ git 验证不可达（{str(e)[:40]}），已跳过验证，继续推进"
 
