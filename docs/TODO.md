@@ -128,7 +128,9 @@
 
 | 版本 | 日期 | 变更 |
 
-||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |\n||||| v2.25 | 2026-06-30 | 🎯 **R58 完成 ✅** — 系统通知→自然 @mention 改造（方向A P0）：from_name从"系统"改为 config.PIPELINE_PM_NAME，工作室广播替代 _send_to_agent 主力路径，@mention+完整上下文模板。方向B P1：ACK超时软检查+日志。方向C P2：pstate 通知状态跟踪 + !pipeline_status 展示 📨/✅ACK/❌静默。双保险保留。审查 2🔴 blocking→修复 a4d961c ✅。合并部署 ws-bridge:r58 |
+|| v2.27 | 2026-06-30 | 🎯 **R61 完成 ✅** — 纯验证轮次：F-19（_get_agent_display 角色名）+ F-20（_broadcast_active_channel 自动切活跃频道）在真实管线中实测验证通过。零代码修改。QA 大宏拍板跳过。工作室已关闭 |
+|||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |
+||||| v2.25 | 2026-06-30 | 🎯 **R58 完成 ✅** — 系统通知→自然 @mention 改造（方向A P0）：from_name从"系统"改为 config.PIPELINE_PM_NAME，工作室广播替代 _send_to_agent 主力路径，@mention+完整上下文模板。方向B P1：ACK超时软检查+日志。方向C P2：pstate 通知状态跟踪 + !pipeline_status 展示 📨/✅ACK/❌静默。双保险保留。审查 2🔴 blocking→修复 a4d961c ✅。合并部署 ws-bridge:r58 |
 ||| v2.24 | 2026-06-30 | 🎯 **R57 完成 ✅** — 在线状态预检+备用自动换人（方向A）+角色名显示（方向C F-19）。方向 B PM 流程规范。审查通过（81db83d），13/13 项 100% 追溯，1 💡 改进建议。16/16 代码级验收通过，合并部署 ws-bridge:r57 |
 ||| v2.23 | 2026-06-29 | 🎯 **R56 完成 ✅** — 通信层修复轮（3 方向）：A — _send_to_agent 失败回退到工作室广播（39ef407），B — 通信链路诊断方案，C — 过渡期 PM SOP。审查通过（e505d9d），合并部署 ws-bridge:r56 |
 ||| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线（6 方向 A-F）完结：放开角色校验、!step_reject 退回命令、git ls-remote 验证、!pipeline_status 增强、--mode auto/manual + !pipeline_mode、定向发送减少回声。合并部署 ws-bridge:r55 |
