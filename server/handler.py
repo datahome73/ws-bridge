@@ -48,6 +48,9 @@ _LOBBY_PAUSED_ROUND: str = ""
 # ── R55 A: Step advance 2s serialization buffer ────────────────
 _step_advance_buffer: dict[str, float] = {}
 
+# ── R57 A: Rollcall ACK events for 30s rollcall timeout ──────
+_r57_rollcall_events: dict[str, asyncio.Event] = {}
+
 # ── R43: Watchdog state ─────────────────────────────────────
 _watchdog_started: bool = False
 _watchdog_task: asyncio.Task | None = None
@@ -441,7 +444,14 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
     persistence.set_agent_channel(sender_id, ws_id)
     persistence.save_agent_channels(config.DATA_DIR)
 
-    member_list = ", ".join(member_ids) if member_ids else "无"
+    member_names = []
+    for mid in member_ids:
+        name = users.get(mid, {}).get("name", "")
+        if not name:
+            role = users.get(mid, {}).get("role", "")
+            name = role if role else mid[:12]
+        member_names.append(name)
+    member_list = ", ".join(member_names) if member_names else "无"
 
     # R53: Broadcast MSG_SET_ACTIVE_CHANNEL with ACK (replaces R37 text rollcall)
     asyncio.create_task(_broadcast_active_channel(ws_id))
@@ -1522,21 +1532,77 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
     targeted_notify = f"🎯 新任务：{round_name} {next_step} ({next_role})\n{context_summary}"
 
-    # Use _broadcast_active_channel to send ACK-based channel switch (still uses ACK protocol)
-    # but target it via _find_agents_by_role so only the right role gets it
+    # ── R57 A: Online pre-check + rollcall with backup fallback ──
     member_ids = list(ws_obj.members)
-    if cards:
-        target_agents = _find_agents_by_role(next_role, member_ids, cards)
-    else:
-        target_agents = [
-            aid for aid in member_ids
-            if users.get(aid, {}).get("role", "member") == next_role
-        ]
 
-    # Send targeted channel switch and notification
-    for agent_id in target_agents:
-        await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
-    rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
+    # Read primary/backup config
+    primary_role = step_config[next_step].get("primary")
+    backup_role = step_config[next_step].get("backup")
+
+    # Resolve primary agent
+    primary_agents: list[str] = []
+    if cards and primary_role:
+        primary_agents = _find_agents_by_role(primary_role, member_ids, cards)
+
+    if not primary_agents:
+        # No primary config → fallback to original full-notify behaviour (A-9 compat)
+        if cards:
+            target_agents = _find_agents_by_role(next_role, member_ids, cards)
+        else:
+            target_agents = [
+                aid for aid in member_ids
+                if users.get(aid, {}).get("role", "member") == next_role
+            ]
+        for agent_id in target_agents:
+            await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
+        rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
+    else:
+        primary_agent = primary_agents[0]
+        primary_name = users.get(primary_agent, {}).get("name", primary_agent[:12])
+        conns = _connections.get(primary_agent, set())
+
+        if not conns:
+            # ── Primary offline → direct backup, 0s wait ──
+            rollcall_result = await _r57_switch_to_backup(
+                round_name, next_step, next_role,
+                backup_role, member_ids, cards, users,
+                ws_obj, sender_ch, targeted_notify, primary_name,
+                reason="primary_offline",
+            )
+        else:
+            # ── Primary online → rollcall, 30s timeout ──
+            rollcall_msg = f"@**{primary_name}** Step「{next_step}」轮到你了，请在 30 秒内回复确认"
+            _persist_broadcast(sender_ch, "系统", rollcall_msg)
+            for conn in conns:
+                try:
+                    await _send(conn, {"type": "broadcast", "channel": sender_ch,
+                                       "from_name": "系统", "content": rollcall_msg, "ts": time.time()})
+                except Exception:
+                    pass
+
+            # Start 30s rollcall timer
+            ack_received = await _r57_wait_for_ack(primary_agent, timeout=30)
+
+            if ack_received:
+                # Primary confirmed ✓ normal handoff
+                if cards:
+                    target_agents = _find_agents_by_role(next_role, member_ids, cards)
+                else:
+                    target_agents = [
+                        aid for aid in member_ids
+                        if users.get(aid, {}).get("role", "member") == next_role
+                    ]
+                for agent_id in target_agents:
+                    await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
+                rollcall_result = f"✅ 主角 {primary_name} 已确认，正常交接 {next_step}"
+            else:
+                # Primary 30s no response → switch to backup
+                rollcall_result = await _r57_switch_to_backup(
+                    round_name, next_step, next_role,
+                    backup_role, member_ids, cards, users,
+                    ws_obj, sender_ch, targeted_notify, primary_name,
+                    reason="primary_timeout",
+                )
 
     # 创建下一步的 Task
     next_task_result = await _cmd_task_create(sender_id, {
@@ -1630,6 +1696,108 @@ async def _send_to_agent(agent_id: str, text: str, ws_id: str = "") -> bool:
     if not sent:
         write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
     return sent
+
+
+# ── R57 A: Backup takeover handler ──────────────────────────
+async def _r57_switch_to_backup(
+    round_name: str, next_step: str, next_role: str,
+    backup_role: str | None, member_ids: list[str],
+    cards: dict, users: dict, ws_obj, sender_ch: str,
+    targeted_notify: str, primary_name: str,
+    reason: str,
+) -> str:
+    """R57: 主角离线或无响应时，切换备用接替。
+
+    reason: "primary_offline" | "primary_timeout"
+    返回 rollcall_result 字符串。
+    """
+    # Broadcast swap announcement to workspace
+    if reason == "primary_offline":
+        swap_msg = f"⚠️ 主角 {primary_name} 离线，{next_step} 由备用接替"
+    else:
+        swap_msg = f"⚠️ 主角 {primary_name} 未响应，{next_step} 由备用接替"
+    _persist_broadcast(sender_ch, "系统", swap_msg)
+
+    backup_assigned = False
+
+    # Find backup agent
+    backup_agents: list[str] = []
+    if cards and backup_role:
+        backup_agents = _find_agents_by_role(backup_role, member_ids, cards)
+    if not backup_agents:
+        # No backup config → notify all matching role (A-9 compatibility)
+        if cards:
+            backup_agents = _find_agents_by_role(next_role, member_ids, cards)
+        else:
+            backup_agents = [
+                aid for aid in member_ids
+                if users.get(aid, {}).get("role", "member") == next_role
+            ]
+
+    for backup_agent in backup_agents:
+        backup_conns = _connections.get(backup_agent, set())
+        backup_name = users.get(backup_agent, {}).get("name", backup_agent[:12])
+        if backup_conns:
+            # Backup online → targeted notification with full context
+            backup_notify = targeted_notify + "\n（🔧 您作为备用接替此 Step）"
+            await _send_to_agent(backup_agent, backup_notify, ws_id=sender_ch)
+            backup_assigned = True
+            # Record backup_active in pipeline state for !pipeline_status marker
+            for rname, pstate in _PIPELINE_STATE.items():
+                if pstate.get("ws_id") == sender_ch:
+                    pstate["backup_active"] = {"step": next_step, "role": backup_role or next_role}
+                    break
+
+    if not backup_assigned:
+        # Backup also offline → system broadcast in workspace
+        critical_msg = f"🔴 {next_step} 主角和备用均不在线，等待协调"
+        _persist_broadcast(sender_ch, "系统", critical_msg)
+        # _admin channel log
+        try:
+            admin_channel = p.ADMIN_CHANNEL
+            admin_msg = f"📋 {round_name} | {next_step} | 主角+备用均离线，需人工介入"
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=admin_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=admin_channel,
+            )
+            write_chat_log("系统", admin_msg, channel=admin_channel)
+        except Exception:
+            pass
+
+    # _admin channel: log the swap
+    try:
+        admin_channel = p.ADMIN_CHANNEL
+        log_msg = f"📋 {round_name} | {next_step} | {reason.replace('_', ' ')} → 备用接替"
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent="系统", from_name="系统",
+            content=log_msg, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=admin_channel,
+        )
+        write_chat_log("系统", log_msg, channel=admin_channel)
+    except Exception:
+        pass
+
+    return f"🔄 {next_step} — 由备用接替（{reason.replace('_', ' ')}）"
+
+
+async def _r57_wait_for_ack(agent_id: str, timeout: int = 30) -> bool:
+    """等待 agent 在 timeout 秒内回复确认消息。返回是否收到确认。
+
+    使用 asyncio.Event 实现点名等待。当 agent 在工作室发送任意消息时，
+    通过 ACK 监听钩入点触发 event set。
+    """
+    event = asyncio.Event()
+    _r57_rollcall_events[agent_id] = event
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        _r57_rollcall_events.pop(agent_id, None)
 
 
 # ── R55 B: Step reject command ─────────────────────────────
@@ -1936,6 +2104,21 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
         mode = pstate.get("mode", "auto")
         mode_icon = "🚀" if mode == "auto" else "📋"
         lines.append(f"  模式: {mode_icon} {mode}")
+        # ── R57 C-2: Display member names with online status ──
+        ws_id = pstate.get("ws_id", "")
+        if ws_id:
+            ws_obj_from_state = ws_mod.get_workspace(ws_id)
+            if ws_obj_from_state:
+                users_for_status = auth.get_users()
+                member_info = []
+                for mid in ws_obj_from_state.members:
+                    name = users_for_status.get(mid, {}).get("name", "")
+                    role_label = users_for_status.get(mid, {}).get("role", "")
+                    label = name if name else (role_label if role_label else mid[:12])
+                    online = "🟢" if mid in _connections and _connections[mid] else "🔴"
+                    member_info.append(f"{online}{label}")
+                if member_info:
+                    lines.append(f"  成员: {' · '.join(member_info)}")
         # ── R55 D: Rejected steps context ──
         rejected_steps = pstate.get("rejected_steps", {})
         if rejected_steps:
@@ -1974,7 +2157,12 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                     task_state = "🔄"  # R55 B: rejected, needs rework
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
-            lines.append(f"  {task_state} {step_key} — {role}{current}")
+            # ── R57 A-6: Backup takeover marker ──
+            backup_suffix = ""
+            pipeline_backup = pstate.get("backup_active", {})
+            if step_key == pipeline_backup.get("step"):
+                backup_suffix = "（备用接替）"
+            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}")
 
     if not lines:
         return "📊 当前无活跃管线"
@@ -2409,6 +2597,13 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     sender_name = users.get(sender_id, {}).get("name", sender_id)
     sender_role = users.get(sender_id, {}).get("role", "member")
     admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
+
+    # ── R57 A: Rollcall ACK hook — any message from a waited-on agent fires event ──
+    if sender_id in _r57_rollcall_events:
+        event = _r57_rollcall_events.get(sender_id)
+        if event and not event.is_set():
+            event.set()
+            logger.info("R57 rollcall ACK from %s (%s)", sender_id[:12], sender_name)
 
     # ── R26 P0: 📢 broadcast admin-only check ──
     if content.startswith("📢") and sender_role != "admin":
