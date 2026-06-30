@@ -1460,6 +1460,9 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     }
     task_result = await _cmd_task_update(sender_id, task_update_params)
 
+    # ── R57: Clear backup_active marker on step completion ──
+    pstate.pop("backup_active", None)
+
     # 查 Step 映射表 → 找下一角色
     step_config = _load_step_config()
     step_keys = sorted(step_config.keys(), key=_step_sort_key)
