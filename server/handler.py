@@ -1696,7 +1696,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         admin_channel = p.ADMIN_CHANNEL
         notify_msg = (
             f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
         )
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
@@ -2139,7 +2139,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
         admin_channel = p.ADMIN_CHANNEL
         notify_msg = (
             f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
         )
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
