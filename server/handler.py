@@ -1598,6 +1598,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
         rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
     else:
+        target_agents = []
         primary_agent = primary_agents[0]
         primary_name = users.get(primary_agent, {}).get("name", primary_agent[:12])
         conns = _connections.get(primary_agent, set())
@@ -2250,7 +2251,7 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
             pipeline_backup = pstate.get("backup_active", {})
             if step_key == pipeline_backup.get("step"):
                 backup_suffix = "（备用接替）"
-            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}")
+            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}{notify_mark}")
 
     if not lines:
         return "📊 当前无活跃管线"
