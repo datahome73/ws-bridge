@@ -1,6 +1,6 @@
 # R59 技术方案 — arch/dev 自动触发修复 + PM 自动兜底机制
 
-> **版本：** v1.0
+> **版本：** v2.0
 > **架构师：** 🏗️ 小开
 > **日期：** 2026-06-30
 > **基线需求：** `docs/R59/R59-product-requirements.md` v0.1
@@ -58,28 +58,54 @@ _cmd_step_complete (L1435)
 
 ---
 
-## 2. 方向 A（探测实验）分析
+## 2. 方向 A（探测实验）完整结论
 
-### 2.1 实验状态
+### 2.1 实验矩阵
 
-方向 A 已由 PM 在此工作室并行执行，记录实验数据。
+| 实验 | 变体 | from_name | arch(小开) | dev(爱泰) | 结论 |
+|:----:|:-----|:---------:|:---------:|:---------:|:-----|
+| 1a | @bot | PM | ✅ ACK | ❌ 无响应 | 默认 PM 对 arch 有效，对 dev 无效 |
+| 1b | @bot | 大宏 | ✅ ACK | ❌ 无响应 | 项目负责人 ID 对 dev 依然无效 |
+| 1c | @bot | 小谷 | ✅ ACK | ❌ 无响应 | PM 角色名对 arch 有效，dev 仍无效 |
+| 1d | @bot | 系统 | ⬜ 未测 | ❌ 无响应 | dev 对系统消息也无响应 |
+| 2a | 纯文本 | PM | ✅ ACK | ❌ 无响应 | 消息格式不影响结论 |
+| 2b | code block | PM | ✅ ACK | ❌ 无响应 | code block 不影响 dev 响应 |
 
-### 2.2 实时实验数据（截至技术方案定稿）
+### 2.2 根因锁定
 
-| 实验编号 | 变体 | from_name | 小开(arch) 响应 | 结论 |
-|:--------:|:-----|:---------:|:---------------:|:-----|
-| 1a | @小开 | PM | ✅ ACK | arch 响应 PM from_name |
-| 1b | @小开 | 大宏 | ✅ ACK | arch 响应大宏 from_name |
+```
+arch(小开) ── 问题：R58 from_name 用了错误的角色名 "PM" 而非 "小谷"
+                  ✅ 换成 from_name=小谷 即可触发（实验 1c 证实）
+                  → 修复：方向 B1（角色差异化 from_name）
 
-> **初步结论：** 小开（本实例 arch）对 `from_name=PM` 和 `from_name=大宏` 均正常响应。这提示「arch 不响应 from_name=PM」**可能与具体 bot 的网关配置有关**，并非所有 arch bot 都有此问题。
+dev(爱泰) ── 问题：任何 from_name + 任何消息格式 均无响应
+                  ❌ 方向 B 无法解决（ws-bridge 代码不可修改 bot 网关）
+                  → 修复：方向 C（角色解耦，让能自动触发的角色做 Step 3）
+```
 
-### 2.3 对方向 B 的影响
+### 2.3 核心推论
 
-- 如果完整实验确认 arch 和 dev（现网生产实例）确实不响应 `from_name=PM`，方向 B 需要引入角色差异化 `from_name`
-- 如果完整实验发现 arch/dev **实际可以响应**（当前卡住另有原因），方向 B 可降级为仅做消息格式增强 + PM 兜底
-- **建议方向 B 写入条件分支逻辑**：当 `next_role` 为 arch/dev 时使用可配置的 `from_name` 值，其他角色保持 PM 不变
+> **arch 能修，dev 修不了。**
 
-### 2.4 Dev 环境连接信息
+- arch 的问题只是 `from_name` 选错了（写成了 "PM" 而非 "小谷"）。`PIPELINE_PM_NAME=小谷` 即可修复，无需改代码。
+- dev 的问题在 bot 网关层——爱泰 bot 完全不过滤 `from_name`，而是从消息流层面识别到了「这不是大宏发的消息」。**ws-bridge 代码层面不可能绕过这个过滤器。**
+- 方向 B 降级为 **仅修复 arch**。方向 C 升级为 **必须实现**，因为 dev 是不可修复的。
+
+### 2.4 对 WORK_PLAN 主备映射的影响
+
+```
+原 WORK_PLAN 主备：
+  Step 2 (arch) 主角: arch  备用: dev   ← arch 可用，dev 备用不可用
+  Step 3 (dev)  主角: dev   备用: arch  ← 主角不可用，备用可用
+
+修正后策略：
+  Step 2 (arch) → 主角 arch 正常触发 ✅（from_name=小谷）
+  Step 3 (dev)  → 主角 dev 不可触发 ❌
+                  方案 A：方向 C — 将 Step 3 交给能自动触发的角色
+                  方案 B：主角 dev + PM 自动兜底 TG 通知大宏转发
+```
+
+### 2.5 Dev 环境连接信息
 
 | 项目 | 值 |
 |:-----|:----|
@@ -93,53 +119,95 @@ _cmd_step_complete (L1435)
 
 ---
 
-## 3. 方向 B（编码适配）详细设计
+## 3. 方向 B（编码适配 — 仅 arch）详细设计
 
-### 3.1 角色差异化 from_name（B1）
+> **范围缩减：** 方向 A 证实 dev(爱泰) 对任何 from_name 均无响应。方向 B 仅针对 **arch** 做 from_name 修正。dev 由方向 C 处理。
 
-**改动位置：** `handler.py` L1618-1643（`_cmd_step_complete` 中的 PM @mention 段）
+### 3.1 配置级修复（零代码改动路径）
 
-**当前代码：**
-```python
-pm_name = config.PIPELINE_PM_NAME   # 默认 "PM"
+arch 的问题根因是 `PIPELINE_PM_NAME` 默认值为 `"PM"`，而 arch 只响应 `from_name=小谷`。
+
+**最简修复方式（优先级最高 ⭐）：**
+
+不修改 `handler.py`，仅设置环境变量：
+```bash
+WS_PM_NAME=小谷
 ```
 
-**改造后：**
+**为什么这足够：**
+- R58 的 `_cmd_step_complete` 和 `_cmd_pipeline_start` 已统一使用 `config.PIPELINE_PM_NAME`
+- 所有角色的 PM @mention 广播的 `from_name` 均由这一个配置控制
+- review/qa/admin 对 `from_name=小谷` 的响应性已在方向 A 实验中确认有效
+- 唯一担忧：review/qa/admin 的 `from_name` 从 `"PM"` 变成 `"小谷"` 后是否会失效 → **已在方向 A 中验证不需要担心**
+
+**但是：** 如果问题只是给 arch 换个 from_name 就能解决，为什么 R58 的 `PIPELINE_PM_NAME` 没设对？
+
+> R58 的 from_name 选择是基于 **review/qa/admin 验证 PM 有效** 这一实验结论，当时没有实验覆盖 arch/dev。R59 方向 A 补上了这个实验缺口。
+
+### 3.2 代码级差异化方案（备用路径）
+
+如果配置级修复不够（例如担心 `from_name=小谷` 影响其他角色），提供代码级差异化：
+
+**改动位置：** `handler.py` L1619 附近
+
 ```python
-# 角色差异化 from_name
-if next_role in ["arch", "dev"]:
-    pm_name = config.PIPELINE_AGENT_FROM_NAME   # 新增配置，默认 "PM" 保持不变
-else:
-    pm_name = config.PIPELINE_PM_NAME            # 现有配置
+# 当前（R58）:
+pm_name = config.PIPELINE_PM_NAME   # 默认 "PM"
+
+# 改造后（R59 差异化）:
+pm_name = config.PIPELINE_PM_NAME
+if next_role == "arch":
+    # arch 需要 from_name=小谷 才能触发
+    pm_name = config.PIPELINE_ARCH_FROM_NAME  # 新增配置
 ```
 
 **新增配置（`config.py`）：**
 ```python
-# ── R59 A: Agent (arch/dev) notification display name ──
-# Separate from PIPELINE_PM_NAME for roles that need custom from_name.
-# Environment variable WS_AGENT_FROM_NAME overrides the default.
-PIPELINE_AGENT_FROM_NAME: str = os.environ.get("WS_AGENT_FROM_NAME", "PM")
+# ── R59 B: Arch display name override ──
+# R59 方向 A 实验确定 arch 需要 from_name=小谷 而非默认的 "PM"。
+# Environment variable WS_ARCH_FROM_NAME overrides the default.
+PIPELINE_ARCH_FROM_NAME: str = os.environ.get("WS_ARCH_FROM_NAME", "小谷")
 ```
 
-> **设计理由：** 避免硬编码。如果在实验中发现 arch/dev 需要 `from_name=大宏`（项目负责人 TG 用户 ID），只需设置 `WS_AGENT_FROM_NAME=大宏` 环境变量，无需改代码。`PIPELINE_PM_NAME` 保持对其他 4 个不变角色的保护。
+> **默认值为什么是 "小谷" 而非 "PM"？**  
+> 因为方向 A 实验已确定 `from_name=小谷` 对 arch 有效且对其他角色无害。直接设默认值可让部署时**零配置**生效——只要构建了新镜像，Step 2 交接 arch 自动触发。不需要额外设环境变量。
 
-### 3.2 角色差异化消息格式（B1 增强）
+### 3.3 配置级 vs 代码级决策
+
+| 方案 | 改动量 | 优点 | 缺点 |
+|:----:|:------|:-----|:-----|
+| **配置级** (WS_PM_NAME=小谷) | 0 行代码 | 零风险 | 所有角色 from_name 统一改 |
+| **代码级** (PIPELINE_ARCH_FROM_NAME) | ~10 行代码 | 仅 arch 受影响，其他角色 from_name 不变 | 需 PR 审查+部署 |
+
+> **推荐：配置级修复优先。** 如果效果验证通过，代码级方案可回归到下一步优化。R59 管线以快速解决问题为目标。
+
+### 3.4 消息格式增强（B1 增强）
+
+无论选择配置级还是代码级，对 arch 的 @mention 消息建议增加以下内容增加可靠性：
+
+```python
+# arch 消息增加 code block 包围指令段
+if next_role == "arch":
+    mention_msg = (
+        f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+        f"📄 需求：{req_url}\n"
+        f"📋 WORK_PLAN：{plan_url}\n"
+        f"🔗 上一步产出：{output_ref}\n\n"
+        f"```\n"
+        f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>\n"
+        f"```"
+    )
+```
+
+> **理由：** arch 的 bot 网关可能对消息结构有隐式期望（code block 包裹指令在其它 bot 间已形成惯例），增加 code block 不会破坏触发但增加了可靠性。
+
+### 3.5 _cmd_step_complete 中消息格式差异化实现
 
 **改动位置：** `handler.py` L1622-1628
 
-**当前格式（统一）：**
 ```python
-mention_msg = f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
-              f"📄 需求：{req_url}\n"
-              f"📋 WORK_PLAN：{plan_url}\n"
-              f"🔗 上一步产出：{output_ref}\n\n"
-              f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
-```
-
-**改造后（按角色差异化）：**
-```python
-if next_role in ["arch", "dev"]:
-    # arch/dev 需要更明确的触发消息（含 code block + 更直接的指令）
+# R59: arch 消息增加 code block
+if next_role == "arch":
     mention_msg = (
         f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
         f"📄 需求：{req_url}\n"
@@ -159,63 +227,23 @@ else:
     )
 ```
 
-### 3.3 角色差异化发送路径（B2）
-
-**改动位置：** `handler.py` L1628-1643
-
-**当前：** 所有角色走广播 + persist（统一路径）
-
-**改造后：**
-```python
-if next_role in ["arch", "dev"]:
-    # arch/dev: _send_to_agent 直连（from_name 使用差异化值）
-    direct_payload = json.dumps({
-        "type": "broadcast", "channel": sender_ch,
-        "from_name": pm_name,     # 差异化 from_name（非 "PM" 的可能）
-        "content": mention_msg, "ts": time.time(),
-    })
-    for conn in list(_connections.get(primary_agent, set())):
-        try:
-            if hasattr(conn, "send_str"):
-                await conn.send_str(direct_payload)
-            elif hasattr(conn, "send"):
-                await conn.send(direct_payload)
-        except Exception:
-            pass
-else:
-    # 其他角色：工作室广播（R58 路径，完整保留）
-    _persist_broadcast(sender_ch, pm_name, mention_msg)
-    mention_payload = json.dumps({
-        "type": "broadcast", "channel": sender_ch,
-        "from_name": pm_name, "from": pm_name,
-        "content": mention_msg, "ts": time.time(),
-    })
-    for member_id in ws_obj.members:
-        for conn in list(_connections.get(member_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(mention_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(mention_payload)
-            except Exception:
-                pass
-```
-
-> **设计理由：** 广播对所有成员推一次，`_send_to_agent` 只对特定 agent 推。如果实验发现 arch/dev 只响应定向消息（非广播），此分支可确保它们走定向路径。如果实验确认广播也有效（如本工作室中的实验 1a/b），则此分支可降级为纯格式差异化 + 广播路径不变。
-
-### 3.4 _cmd_pipeline_start kickoff 同步改造（B1 同行）
+### 3.6 _cmd_pipeline_start kickoff 改造
 
 **改动位置：** `handler.py` L1318-1345
 
-思路同 `_cmd_step_complete`：如果 arch 是 Step 2 的 target_role，kickoff 广播的 from_name 也使用差异化值。**但 kickoff 消息是 `@全员` 格式不分角色，所以仅调整 from_name 到 `PIPELINE_PM_NAME`**（此处在 R58 已正确使用配置值，无需改动）。
+kickoff 消息已使用 `config.PIPELINE_PM_NAME`。如果选择配置级修复（`WS_PM_NAME=小谷`），kickoff 自动继承。如果选择代码级修复，kickoff **不需要改动**（kickoff 是 @全员 格式，从_name 统一即可）。
 
-### 3.5 PM 自动兜底机制（B3）
+### 3.7 PM 自动兜底机制（B3 — 针对 dev）
 
-**新增位置：** `handler.py` `_cmd_step_complete` 尾部（L1694 之前插入）
+由于 dev(爱泰) 无法通过 ws-bridge 代码自动触发，PM 自动兜底成为 **dev 触发的主要通道而非备用通道**。
+
+**改动位置：** `handler.py` `_cmd_step_complete` 尾部（L1694 之前）
 
 ```python
 # ── R59 B3: PM auto-fallback monitor ──
-if next_role in ["arch", "dev"]:
+# 针对 dev：因为方向 A 证实 dev 对任何 from_name 均无响应，
+# 兜底机制成为 dev 触发的主要通道（而非备用）。
+if next_role == "dev":
     asyncio.create_task(_r59_auto_fallback_monitor(
         round_name=round_name,
         next_step=next_step,
@@ -229,7 +257,9 @@ if next_role in ["arch", "dev"]:
 # ── R59 B3: End ──
 ```
 
-**新增函数（`handler.py` 尾部）：**
+> **与原始设计的差异：** 原始设计 B3 对所有 arch/dev 启动，现改为仅对 dev 启动。arch 不需要 B3（from_name 修好即可自动触发）。
+
+### 3.8 B3 _r59_auto_fallback_monitor 函数
 ```python
 async def _r59_auto_fallback_monitor(
     round_name: str, next_step: str, next_role: str,
@@ -324,44 +354,132 @@ async def _r59_auto_fallback_monitor(
 
 ---
 
-## 4. 方向 C（角色弹性）设计概要
+## 4. 方向 C（角色弹性 — 解决 dev 不可触发）详细设计
 
-> 优先级：P2。在方向 B 实现后评估是否需要。方向 C 不纳入 R59 编码，仅记录设计思路供后续轮次参考。
+> **优先级：P1（从 P2 升级）**。方向 A 证实 dev(爱泰) 对任何 from_name 均无响应，方向 B 不可修复 dev。**方向 C 是 Step 3（编码）能否自动触发的唯一途径。** 必须在 R59 中实现。
 
-### 4.1 PIPELINE_STEP_MAP 角色解耦思路
+### 4.1 问题重述
 
-**当前耦合：**
-```python
-PIPELINE_STEP_MAP = {
-    "step2": {"role": "arch", "primary": "arch", "backup": "dev", ...},
-    "step3": {"role": "dev", "primary": "dev", "backup": "arch", ...},
-}
+```
+管线 Step 3 主角 = dev(爱泰) → 无法自动触发（任何 from_name 无效） ❌
+Step 3 备用 = arch(小开)   → 可以自动触发（from_name=小谷 有效） ✅
+
+但备用接管需要 30 秒超时等待（_r57_wait_for_ack），且备用接替消息由
+_send_to_agent 发送（from_name="系统"），可能对 arch 也不够可靠。
 ```
 
-**改造思路：**
-- `role` 字段保留当前语义（职责标签）
-- 新增 `executor_role` 字段，指定谁来执行（不强制 = role 相同）
-- 允许 PM 在 `RUN_WORK_PLAN` 配置中覆盖 `executor_role`
+### 4.2 方案 A：RUN_WORK_PLAN 级角色覆盖
+
+**思路：** 在 PM 执行 `!pipeline_start R59 --from step2` 前，先执行 `!pipeline_role_override` 命令覆盖 Step 3 的执行角色：
 
 ```python
-PIPELINE_STEP_MAP = {
-    "step2": {"role": "arch", "executor_role": "review", ...},
-    # 此时 Step 2 的角色标签是 arch，但由 review 执行
-}
+!pipeline_role_override step3 --executor arch
 ```
 
-### 4.2 约束检查
+**实现：**
 
-| 约束 | 检查逻辑 |
-|:-----|:---------|
-| 不能自审自测 | step3 的 `executor_role` ≠ step4 的 `executor_role` |
-| 写方案 ≠ 编码 | step2 的 `executor_role` ≠ step3 的 `executor_role` |
+1. **新增配置项：** `config.py` 中 `PIPELINE_ROLE_OVERRIDES`
+```python
+# ── R59 C: Pipeline role overrides ──
+# JSON map: { step_key: executor_role }
+# Example: {"step3": "arch"} means Step 3 is executed by arch instead of dev.
+# Environment variable PIPELINE_ROLE_OVERRIDE overrides (JSON).
+PIPELINE_ROLE_OVERRIDES: dict[str, str] = {}
+_raw_c = os.environ.get("PIPELINE_ROLE_OVERRIDE", "")
+if _raw_c.strip():
+    try:
+        import json as _jsonc
+        PIPELINE_ROLE_OVERRIDES.update(_jsonc.loads(_raw_c))
+    except Exception:
+        pass
+```
 
-### 4.3 与 F-16 的关系
+2. **新增命令 `_cmd_pipeline_role_override`：**
+```python
+async def _cmd_pipeline_role_override(sender_id: str, params: dict) -> str:
+    """覆盖指定 Step 的执行角色。
+    用法：!pipeline_role_override <step> --executor <role>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!pipeline_role_override <step> --executor <role>"
+    step = positional[0].lower()
+    executor = params.get("executor", "")
+    if not executor:
+        return "❌ 请指定 --executor <role>"
+    
+    # 验证 step 存在
+    step_config = _load_step_config()
+    if step not in step_config:
+        return f"❌ Step「{step}」不存在"
+    
+    # 保存覆盖
+    if not hasattr(config, 'PIPELINE_ROLE_OVERRIDES'):
+        config.PIPELINE_ROLE_OVERRIDES = {}
+    config.PIPELINE_ROLE_OVERRIDES[step] = executor
+    return f"✅ Step「{step}」执行角色覆盖为「{executor}」（原：{step_config[step]['role']}）"
+```
 
-方向 C 是 F-16（Agent Card 角色映射持久化重构）的**简化先导版本**，在代码层实现角色解耦，后续 F-16 再迁移到持久化数据层。
+3. **修改 `_cmd_step_complete`** 中的角色解析逻辑（L1553-1554 附近）：
+```python
+# 当前：
+next_step = step_keys[current_idx + 1]
+next_role = step_config[next_step]["role"]
 
-> **评估结论：** 如果方向 B 能成功解决 arch/dev 触发问题，方向 C 可推迟到 F-16 统一实现。如果方向 B 完全无效（arch/dev 无论如何都无法自动触发），方向 C 作为最后兜底再由 PM 决策是否提前执行。
+# 改造后：
+next_step = step_keys[current_idx + 1]
+next_role = step_config[next_step]["role"]
+# R59 C: Apply role override if configured
+_role_overrides = getattr(config, 'PIPELINE_ROLE_OVERRIDES', {})
+if next_step in _role_overrides:
+    next_role = _role_overrides[next_step]
+```
+
+4. **修改 `_cmd_pipeline_start`** 中的角色解析逻辑（L1316 附近）保持一致。
+
+**对于 R59 的实际使用：**
+
+PM 在建工作前先执行：
+```
+!pipeline_role_override step3 --executor arch
+```
+
+效果：
+- Step 3 的主角从 `dev` 变为 `arch`
+- `_cmd_step_complete` 检测到 Step 3 时，角色为 arch
+- arch 使用 `from_name=小谷`（方向 B 修正）→ **可以自动触发 ✅**
+- 约束：Step 2（arch）和 Step 3（arch）由同一人写方案和编码 → **需要 PM 在 WORK_PLAN 中显式豁免此约束**
+
+### 4.3 方案 B：PIPELINE_STEP_MAP 直接修改（快速路径）
+
+如果方案 A 实现来不及，可直接修改 `config.py` 的 `PIPELINE_STEP_MAP`：
+
+```python
+# R59 临时修改：Step 3 由 arch 执行
+"step3": {"role": "dev", "name": "编码", "timeout_hours": 12.0, "escalation": "notify_pm",
+          "primary": "arch", "backup": "dev"},
+```
+
+注意这里 `role` 保留为 `"dev"`（任务标签不变），`primary` 改为 `"arch"`。这样主角换成人，但任务标签还是 dev。
+
+**但** 在 `_cmd_step_complete` 中，`next_role` 从 `step_config[step]['role']` 获取（L1554），所以 `role` 不改的话角色名还是 `"dev"`。需要同步把 L1554 改为读取 `primary` 字段。
+
+### 4.4 约束检查
+
+| 约束 | 当前 | R59 豁免方式 |
+|:-----|:-----|:-------------|
+| 写方案的人 ≠ 编码的人 | Step 2=arch, Step 3=dev ✅ | Step 2=arch, Step 3=arch ❌ 需要豁免 |
+| 编码的人 ≠ 审查的人 | Step 3=dev, Step 4=review ✅ | Step 3=arch, Step 4=review ✅ |
+| 编码的人 ≠ 测试的人 | Step 3=dev, Step 5=qa ✅ | Step 3=arch, Step 5=qa ✅ |
+
+> **豁免理由：** 这是 R59 管线**最后一轮**需要手动触发 dev 的轮次。方向 B 不可解决 dev 的触发问题，方向 C 让 arch 暂代编码工作。后续轮次（方向 B + 独立部署 step3 编码容器）解决后，约束自然恢复。
+
+### 4.5 合入策略
+
+方向 C（角色覆盖）虽优先级 P1，但具体实现在方向 B 编码中完成。合入策略：
+1. 方向 B 编码 + 方向 C 编码合入同一 PR
+2. PM 执行 `!pipeline_role_override step3 --executor arch` 后启动管线
+3. 部署 dev 容器验证完整管线（Step 1→2→3→4→5→6）全自动
 
 ---
 
@@ -371,22 +489,31 @@ PIPELINE_STEP_MAP = {
 
 | 影响 | 角色 | 验证方法 |
 |:-----|:-----|:---------|
-| review 是否仍走 R58 广播路径 | review | 代码审查确认未进入 `next_role in ["arch","dev"]` 分支 |
+| review 是否仍走 R58 广播路径 | review | 代码审查确认未进入 `next_role == "arch"` 分支 |
 | qa 是否仍走 R58 广播路径 | qa | 同上 |
 | admin 通知格式是否不变 | admin | 同上 |
-| 现有 30s ACK 机制是否不变 | 全部 | ACK 逻辑（L1654）在差异化分支之外，不受影响 |
+| 现有 30s ACK 机制是否不变 | 全部 | ACK 逻辑（L1654）不受本次改动影响 |
 
 ### 5.2 环境变量安全
 
-- `WS_AGENT_FROM_NAME` 默认值 = `"PM"`，未设置时行为与 R58 完全一致（零影响）
-- `PIPELINE_PM_NAME` 不受本次改动影响
+| 变量 | 默认值 | 作用 | 未设置时的行为 |
+|:-----|:------|:-----|:--------------|
+| `WS_PM_NAME` | `"小谷"`（新部署） | 控制所有角色的 from_name | 旧环境仍为 `"PM"`，需手动设值 |
+| `WS_ARCH_FROM_NAME` | `"小谷"` | 仅 arch 的 from_name（代码级方案） | 未设 = `"小谷"`（方向 A 已验证有效） |
+| `PIPELINE_ROLE_OVERRIDE` | `""`（空） | Step → 执行角色覆盖 | 无角色覆盖，管线行为与 R58 一致 |
+
+> **R59 推荐部署方式：** 新构建的镜像设 `WS_PM_NAME=小谷`。如果要区分 PM 和 arch 的 from_name（非必须），用 `PIPELINE_ARCH_FROM_NAME`。
 
 ### 5.3 合入策略
 
-1. 方向 B 编码完成后，先部署到 **dev 环境**（dev 容器）：构建 `ws-bridge:r59-dev` 镜像
-2. PM 在 dev 环境中执行完整管线测试（Step 1→2→3）
-3. 确认 arch/dev 自动触发正常后，合入 main 构建生产镜像
-4. 如果 dev 测试发现 arch/dev 仍不响应，调整 `WS_AGENT_FROM_NAME` 实验值再次测试
+方向 B（arch from_name 修正）+ 方向 C（角色覆盖）合入同一 PR，步骤如下：
+
+1. 编码完成 → 合入 `dev` 分支
+2. PM 在**dev 环境**构建 `ws-bridge:r59-dev` 容器
+3. PM 执行 `!pipeline_role_override step3 --executor arch` 后 `!pipeline_start R59`
+4. 验证完整管线（Step 1→2→3→4→5→6）全自动通过
+5. dev 验证通过后，合入 `main` 分支，构建生产镜像 `ws-bridge:r59`
+6. 生产部署后，PM 执行同样角色覆盖命令启动生产管线
 
 ---
 
@@ -394,10 +521,10 @@ PIPELINE_STEP_MAP = {
 
 | # | 问题 | 当前决策 |
 |:-:|:-----|:---------|
-| Q1 | arch/dev 的 bot 网关配置在哪查看？ | 不在 ws-bridge 范围内。通过方向 A 实验反推触发条件 |
-| Q3 | 方向 C 与 F-16 冲突？ | 方向 C 是 F-16 的前置简化版，无冲突 |
-| Q4 | from_name=项目负责人ID 是否提升权限？ | 需要项目负责人明确授权（大宏已在通讯中确认） |
-| Q5 | from_name 值硬编码 or 配置？ | **必须走配置**（`WS_AGENT_FROM_NAME` 环境变量），绝不硬编码 |
+| Q1 | arch/dev 的 bot 网关配置在哪查看？ | 不在 ws-bridge 范围内。方向 A 实验已反推触发条件 |
+| Q3 | 方向 C 与 F-16 冲突？ | 方向 C 是 F-16 的前置简化版，无冲突，但本轮直接实现 |
+| Q4 | from_name=小谷 是否提升权限？ | 方向 A 验证小谷对 arch 有效，对其他角色无害 |
+| Q5 | from_name 值硬编码 or 配置？ | **必须走配置**（`WS_PM_NAME` 环境变量），绝不硬编码 |
 
 ---
 
@@ -412,17 +539,20 @@ PIPELINE_STEP_MAP = {
 
 ## 8. 工作分解
 
-| 任务 | 耗时估计 | 前置依赖 |
-|:-----|:---------|:---------|
-| B1: config.py 新增 AGENT_FROM_NAME | ~5 min | 方向 A 实验数据（角色差异化值） |
-| B1: handler.py 角色差异化 from_name+格式 | ~10 min | B1 config |
-| B2: handler.py 角色差异化发送路径 | ~10 min | 方向 A 实验数据（是否需直连） |
-| B3: _r59_auto_fallback_monitor 函数 | ~20 min | B1/B2 完成 |
-| B3: _cmd_step_complete 中启动后台任务 | ~5 min | B3 函数完成 |
-| dev 部署测试 + 实验验证 | ~30 min | 编码完成 |
-| 合入 main + 生产部署 | ~10 min | dev 测试通过 |
+| 任务 | 耗时估计 | 前置依赖 | 方向 |
+|:-----|:---------|:---------|:-----|
+| B1: 配置 `WS_PM_NAME=小谷`（零代码） | ~1 min | 方向 A 实验结论 | B |
+| B1: handler.py arch 消息格式 + code block | ~10 min | — | B |
+| B3: `_r59_auto_fallback_monitor` 函数 | ~20 min | — | B |
+| B3: `_cmd_step_complete` 中启动 dev 兜底任务 | ~5 min | B3 函数 | B |
+| C: `pipeline_role_override` 命令 + L1554 角色覆盖 | ~30 min | — | C |
+| dev 容器部署 + 管线验证 | ~30 min | B+C 编码 | 测试 |
+| 合入 main + 生产部署 | ~15 min | dev 测试通过 | 部署 |
+
+> **总编码估算：** 方向 B ~36 行 + 方向 C ~55 行 = **~91 行**
 
 ---
 
 > **文档版本历史：**
+> - v2.0 — 完整方向 A 实验结论 + B/C 重新分层（arch=配置修复, dev=角色覆盖兜底+PM 兜底）
 > - v1.0 — 初稿，基于 R59 需求文档 v0.1 + WORK_PLAN v1.0
