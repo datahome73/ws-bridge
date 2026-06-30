@@ -12,7 +12,14 @@
 
 R59 解决管线最后两个自动触发断点：**Step 2（arch）** 和 **Step 3（dev）** 在 `from_name=PM` 的工作室广播 @mention 后不响应，需要项目负责人 TG 私聊转发。
 
-采用**方向 A（探测实验）→ 方向 B（编码适配）→ 方向 C（角色弹性兜底）** 三步策略。
+方向 A（探测实验）完整结论：
+- **arch(小开)** → 问题仅为 `from_name` 选错（"PM" 而非 "小谷"）。✅ 可修复
+- **dev(爱泰)** → 任何 `from_name` + 任何消息格式均不响应。**❌ 不可修复（bot 网关层过滤）**
+
+采用策略：
+- **方向 B**（编码 — 仅 arch）：配置级修复 `WS_PM_NAME=小谷`（优先）或代码级 `PIPELINE_ARCH_FROM_NAME`
+- **方向 C**（角色弹性 — 解决 dev）：新增 `pipeline_role_override` 命令，Step 3 由 arch 暂代执行
+- **B3 兜底**：PM 自动监控 dev 超时 → 工作室催促 → TG 通知项目负责人
 
 ---
 
@@ -341,16 +348,18 @@ async def _r59_auto_fallback_monitor(
 > - 超时后先检查 bot 是否已自行响应（通过 task 状态），避免重复催促
 > - TG 通知走 `_admin` 频道日志，由 TG 桥接 bot 转发（当前架构中 TG 已连接 ws-bridge 的 admin 频道）
 
-### 3.6 改动总结
+### 3.6 改动总结（方向 B 范围）
 
-| 文件 | 行号 | 改动 | 估算行数 |
-|:-----|:----:|:-----|:--------:|
-| `server/config.py` | 新增（~L70） | `PIPELINE_AGENT_FROM_NAME` 配置项 | ~6 行 |
-| `server/handler.py` | L1618-1643 | 角色差异化 from_name + 消息格式 | ~20 行 |
-| `server/handler.py` | L1628-1643 | 角色差异化发送路径（可选） | ~15 行 |
-| `server/handler.py` | L1694 前 | 新增 B3 后台任务启动 | ~8 行 |
-| `server/handler.py` | 文件尾部 | 新增 `_r59_auto_fallback_monitor` 函数 | ~55 行 |
-| **合计** | | | **~104 行** |
+> 方向 C（角色覆盖）改动见 §4。总编码量估算见 §8。
+
+| 文件 | 行号 | 改动 | 估行 |
+|:-----|:----:|:-----|:----:|
+| `server/config.py` | 新增（~L70） | `PIPELINE_ARCH_FROM_NAME` 配置项（默认 `"小谷"`） | ~6 |
+| `server/handler.py` | L1619 附近 | arch 分支：`pm_name = PIPELINE_ARCH_FROM_NAME` | ~3 |
+| `server/handler.py` | L1622-1628 | arch 消息格式增强：增加 code block 包裹指令 | ~10 |
+| `server/handler.py` | L1694 前 | B3 后台任务启动（仅 dev） | ~8 |
+| `server/handler.py` | 文件尾部 | 新增 `_r59_auto_fallback_monitor` 函数 | ~40 |
+| **合计（方向 B）** | | | **~67 行** |
 
 ---
 
