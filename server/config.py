@@ -1,4 +1,6 @@
-"""Hermes WS Bridge - WebSocket broadcast server config."""
+"""
+Hermes WS Bridge - WebSocket broadcast server config.
+"""
 import os
 from pathlib import Path
 
@@ -25,9 +27,10 @@ HIDDEN_AGENTS: set[str] = set(
 )
 
 # ── R40: GitHub OAuth ─────────────────────────────────────────
-GITHUB_OAUTH_CLIENT_ID=os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
-GITHUB_OAUTH_CLIENT_SECRET=os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
-GITHUB_OAUTH_REDIRECT_URI=os.environ.get("GITHUB_OAUTH_REDIRECT_URI",
+GITHUB_OAUTH_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
+GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
+GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
+    "GITHUB_OAUTH_REDIRECT_URI",
     os.environ.get("WS_PUBLIC_URL", "http://0.0.0.0:8765") + "/auth/github/callback",
 )
 # Map from GitHub username → bridge display name, JSON dict format
@@ -57,6 +60,13 @@ WORK_PLAN_REPO_URL: str = os.environ.get(
     "WORK_PLAN_REPO_URL",
     "https://raw.githubusercontent.com/datahome73/ws-bridge/dev",
 )
+
+
+# ── R58 A6: Pipeline PM display name ───────────────────────────────
+# The name used as from_name when system sends natural @mention notifications.
+# Mimics human PM messages so bot gateways treat them as human @mention.
+# Environment variable WS_PM_NAME overrides the default "PM".
+PIPELINE_PM_NAME: str = os.environ.get("WS_PM_NAME", "PM")
 
 
 # ── R42: Pipeline step map ────────────────────────────────────────
