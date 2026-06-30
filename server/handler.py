@@ -820,6 +820,18 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
     _persist_broadcast(sender_ch, "系统", f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}")
     # ★ R53: Use ACK-driven channel broadcast instead of text "回复到"
     ack_result = await _broadcast_active_channel(sender_ch)
+    # ── R58 B2: Log rollcall ACK status (soft check, no blocking) ──
+    timedout = ack_result.get("timedout_members", set())
+    if timedout:
+        logger.info(
+            "点名 %s ACK 超时: %s (在线 %d, ACK %d, 超时 %d)",
+            target_role,
+            ",".join(timedout),
+            ack_result.get("online_count", 0),
+            len(ack_result.get("acked_members", set())),
+            len(timedout),
+        )
+    # ── R58 B2: End ACK log ──
     return f"✅ 已点名 {names_str}（{ack_result['online_count']} 人在线），等待 ACK 确认..."
 
 
@@ -1299,6 +1311,32 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
     await _broadcast_active_channel(ws_id)
 
+    # ── R58 A3: Initial kickoff PM @mention notification ──
+    pm_name = config.PIPELINE_PM_NAME
+    kickoff_msg = (
+        f"@全员 🚀 {round_name} 管线已启动！\n"
+        f"下一棒：{target_role} → {start_step}\n\n"
+        f"📄 需求：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md\n"
+        f"📋 WORK_PLAN：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md\n\n"
+        f"各 bot 请切换活跃频道到此工作室，确认就绪。"
+    )
+    _persist_broadcast(ws_id, pm_name, kickoff_msg)
+    kickoff_payload = json.dumps({
+        "type": "broadcast", "channel": ws_id,
+        "from_name": pm_name, "from": pm_name,
+        "content": kickoff_msg, "ts": time.time(),
+    })
+    for member_id in ws_obj.members:
+        for conn in list(_connections.get(member_id, set())):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(kickoff_payload)
+                elif hasattr(conn, "send"):
+                    await conn.send(kickoff_payload)
+            except Exception:
+                pass
+    # ── R58 A3: End kickoff notification ──
+
     # 查 Step 映射表，找起始角色
     start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
@@ -1560,6 +1598,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
         rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
     else:
+        target_agents = []
         primary_agent = primary_agents[0]
         primary_name = users.get(primary_agent, {}).get("name", primary_agent[:12])
         conns = _connections.get(primary_agent, set())
@@ -1573,7 +1612,33 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 reason="primary_offline",
             )
         else:
-            # ── Primary online → rollcall, 30s timeout ──
+            # ── R58 A2: PM @mention broadcast (trigger work mode) ──
+            pm_name = config.PIPELINE_PM_NAME
+            req_url = f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md"
+            plan_url = pstate.get("work_plan_url", f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md")
+            mention_msg = (
+                f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+                f"📄 需求：{req_url}\n"
+                f"📋 WORK_PLAN：{plan_url}\n"
+                f"🔗 上一步产出：{output_ref}\n\n"
+                f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
+            )
+            _persist_broadcast(sender_ch, pm_name, mention_msg)
+            mention_payload = json.dumps({
+                "type": "broadcast", "channel": sender_ch,
+                "from_name": pm_name, "from": pm_name,
+                "content": mention_msg, "ts": time.time(),
+            })
+            for member_id in ws_obj.members:
+                for conn in list(_connections.get(member_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(mention_payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(mention_payload)
+                    except Exception:
+                        pass
+            # ── R58 A2: End PM broadcast ──
             rollcall_msg = f"@**{primary_name}** Step「{next_step}」轮到你了，请在 30 秒内回复确认"
             _persist_broadcast(sender_ch, "系统", rollcall_msg)
             for conn in conns:
@@ -1614,6 +1679,15 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         "role": next_role,
     })
 
+    # ── R58 C2: Record notification status to pstate ──
+    step_notifications = pstate.setdefault("step_notifications", {})
+    step_notifications[next_step] = {
+        "status": "notified",
+        "notified_at": time.time(),
+        "target_agents": target_agents,
+    }
+    # ── R58 C2: End notification status ──
+
     # 更新管线状态
     _update_pipeline_step(round_name, next_step)
 
@@ -1622,7 +1696,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         admin_channel = p.ADMIN_CHANNEL
         notify_msg = (
             f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
         )
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
@@ -2065,7 +2139,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
         admin_channel = p.ADMIN_CHANNEL
         notify_msg = (
             f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref}"
+            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
         )
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
@@ -2160,12 +2234,24 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                     task_state = "🔄"  # R55 B: rejected, needs rework
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
+            # ── R58 C3: Notification status display ──
+            step_notifications = pstate.get("step_notifications", {})
+            notify_info = step_notifications.get(step_key, {})
+            notify_status = notify_info.get("status", "")
+            notify_mark = ""
+            if notify_status == "notified":
+                notify_mark = " 📨"
+            elif notify_status == "acknowledged":
+                notify_mark = " ✅ACK"
+            elif notify_status == "no_response":
+                notify_mark = " ❌静默"
+            # ── R58 C3: End notification status ──
             # ── R57 A-6: Backup takeover marker ──
             backup_suffix = ""
             pipeline_backup = pstate.get("backup_active", {})
             if step_key == pipeline_backup.get("step"):
                 backup_suffix = "（备用接替）"
-            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}")
+            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}{notify_mark}")
 
     if not lines:
         return "📊 当前无活跃管线"
