@@ -202,12 +202,12 @@ async def handle_auth(ws, msg: dict) -> str | None:
     logger.info("Agent %s in registration channel (code=%s)", agent_id[:20], new_code)
     # R36 B-1: Welcome message to unregistered agent (纯文本, write_chat_log)
     _reg_name_b1 = msg.get("name", agent_id)
-    write_chat_log("系统", f"[注册] 新代理 {_reg_name_b1}（{agent_id[:16]}）已连接，配对码：{new_code}")
+    write_chat_log("系统", f"[注册] 新代理 {_reg_name_b1}（{_get_agent_display(agent_id)}）已连接，配对码：{new_code}")
     # R36 B-2: Notify all online admins via _persist_admin_response
     _users_for_notify = auth.get_users()
     _admin_ids = {aid for aid, u in _users_for_notify.items() if u.get("role") == "admin"}
     _reg_name = msg.get("name", agent_id)
-    _notify_content = f"新代理注册请求：{_reg_name}（{agent_id[:16]}）配对码：{new_code} 使用 /approve 核准"
+    _notify_content = f"新代理注册请求：{_reg_name}（{_get_agent_display(agent_id)}）配对码：{new_code} 使用 /approve 核准"
     for _admin_aid in _admin_ids:
         for _conn in list(_connections.get(_admin_aid, set())):
             try:
@@ -874,6 +874,21 @@ def _load_agent_cards() -> dict:
         return data.get("cards", {})
     except Exception:
         return {}
+
+
+def _get_agent_display(agent_id: str) -> str:
+    """统一 agent 显示名：display_name > name > role > agent_id[:12]"""
+    cards = _load_agent_cards()
+    card = cards.get(agent_id, {})
+    if card.get("display_name"):
+        return card["display_name"]
+    users = auth.get_users()
+    u = users.get(agent_id, {})
+    if u.get("name"):
+        return u["name"]
+    if u.get("role"):
+        return u["role"]
+    return agent_id[:12]
 
 
 def _save_agent_cards(cards: dict) -> bool:
@@ -1800,7 +1815,7 @@ async def _send_to_agent(agent_id: str, text: str, ws_id: str = "") -> bool:
                             pass
                 write_chat_log("系统", f"[回退广播 @{ws_id}] {text}", channel=ws_id)
         else:
-            write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
+            write_chat_log("系统", f"[定向通知 @{_get_agent_display(agent_id)}] {text}")
         return False
     payload = {
         "type": p.MSG_BROADCAST,
@@ -1817,7 +1832,7 @@ async def _send_to_agent(agent_id: str, text: str, ws_id: str = "") -> bool:
         except Exception:
             pass
     if not sent:
-        write_chat_log("系统", f"[定向通知 @{agent_id[:12]}] {text}")
+        write_chat_log("系统", f"[定向通知 @{_get_agent_display(agent_id)}] {text}")
     return sent
 
 
@@ -3395,8 +3410,7 @@ async def _notify_member_changed(ws_id: str, member_id: str, event: str) -> None
     resolved = ws_mod.get_workspace(ws_id)
     if not resolved:
         return
-    users = auth.get_users()
-    member_name = users.get(member_id, {}).get("name", member_id[:12])
+    member_name = _get_agent_display(member_id)
     payload = json.dumps({
         "type": p.MSG_MEMBER_CHANGED,
         p.FIELD_WORKSPACE_ID: ws_id,
