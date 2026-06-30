@@ -1330,15 +1330,18 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         "from_name": pm_name, "from": pm_name,
         "content": kickoff_msg, "ts": time.time(),
     })
-    for member_id in ws_obj.members:
-        for conn in list(_connections.get(member_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(kickoff_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(kickoff_payload)
-            except Exception:
-                pass
+    # 用 ws_mod.get_workspace 替代不存在的 ws_obj 变量（R58 A3 Bug）
+    ws_obj_2 = ws_mod.get_workspace(ws_id)
+    if ws_obj_2:
+        for member_id in ws_obj_2.members:
+            for conn in list(_connections.get(member_id, set())):
+                try:
+                    if hasattr(conn, "send_str"):
+                        await conn.send_str(kickoff_payload)
+                    elif hasattr(conn, "send"):
+                        await conn.send(kickoff_payload)
+                except Exception:
+                    pass
     # ── R58 A3: End kickoff notification ──
 
     # 点名架构师，附带文档 URL（R48: 有自定义 URL 时只传 WORK_PLAN 链接）
