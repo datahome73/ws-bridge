@@ -23,7 +23,7 @@
 | F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | — | ⬜ 待规划 |
 || F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
 ||| F-17 | **管线状态不同步** — `!step_complete` 未执行时管线 state 停留在原地，即使 Step 工作已实质完成。需要执行者自驱调用 `!step_complete` 推进状态，否则后续 Step 无法自动点名、管线永久阻塞。R48 已将 `step_complete` 的 `min_role` 从 3 降为 1 使成员可自驱交接，但根本问题是缺乏「不调则阻塞」的闭环保证。需后续轮次建立超时检测或状态一致性核查机制 | 🟡 P2 | R48 | ▶ 本轮暴露，待规划 |
-|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |\n|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | 待分配 | ⬜ 待启动 |\n|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | R53 | 🟢 已完成 ✅ |
+|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |\n|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | R57 | 🟢 已完成 ✅ |\n|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | R53 | 🟢 已完成 ✅ |
 
 ### L. 代码层清理
 
@@ -128,7 +128,9 @@
 
 | 版本 | 日期 | 变更 |
 
-||| v2.23 | 2026-06-29 | 🎯 **R56 完成 ✅** — 通信层修复轮（3 方向）：A — _send_to_agent 失败回退到工作室广播（39ef407），B — 通信链路诊断方案，C — 过渡期 PM SOP。审查通过（e505d9d），合并部署 ws-bridge:r56 |\n||| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线（6 方向 A-F）完结：放开角色校验、!step_reject 退回命令、git ls-remote 验证、!pipeline_status 增强、--mode auto/manual + !pipeline_mode、定向发送减少回声。合并部署 ws-bridge:r55 |
+||| v2.24 | 2026-06-30 | 🎯 **R57 完成 ✅** — 在线状态预检+备用自动换人（方向A）+角色名显示（方向C F-19）。方向 B PM 流程规范。审查通过（81db83d），13/13 项 100% 追溯，1 💡 改进建议。16/16 代码级验收通过，合并部署 ws-bridge:r57 |
+||| v2.23 | 2026-06-29 | 🎯 **R56 完成 ✅** — 通信层修复轮（3 方向）：A — _send_to_agent 失败回退到工作室广播（39ef407），B — 通信链路诊断方案，C — 过渡期 PM SOP。审查通过（e505d9d），合并部署 ws-bridge:r56 |
+||| v2.22 | 2026-06-29 | 🎯 **R55 完成 ✅** — 自动驾驶管线（6 方向 A-F）完结：放开角色校验、!step_reject 退回命令、git ls-remote 验证、!pipeline_status 增强、--mode auto/manual + !pipeline_mode、定向发送减少回声。合并部署 ws-bridge:r55 |
 ||| v2.21 | 2026-06-29 | 🐛 新增 R36-3 — wsim bot 列表 "Hermes" 名字确认（Gateway 默认 bot_name 为 "Hermes"，待排查清理） |
 ||| | v2.20 | 2026-06-29 | 🎯 **R53 完成 ✅** — F-20（P0）`!pipeline_start` 缺 `_broadcast_active_channel()` 修复（ACK 确认制点名与派活方向 A/B/C 中止，仅 F-20 编码完成，+142/-170，净-28行） |
 ||| | v2.19 | 2026-06-29 | 🎯 **R52 完成 ✅** — F-18 移除 📊 进度 Tab（纯前端 -99/+1，6 定点删除 + 零残留引用） |
@@ -137,7 +139,6 @@
 | | v2.12 | 2026-06-27 | 🎯 **R44 完成 ✅** — F-12 管线入口直达已修复
 | | v2.10 | 2026-06-26 | 🐛 新增 F-12 (PM无法直接触发管线入口) + F-13 (管线创建工作区无成员，点名派活失败) |
 | | v2.9 | 2026-06-26 | 🎯 TODO 盘点 — 归档已完成项（M-1/3/4/5、R28-1/2、R33-2、R36-D、R36-1），取消 F-7，移除空 M 段 |
-|| | v2.9 | 2026-06-29 | 🎯 R56 完成 ✅ — `_send_to_agent` 回退广播 + B/C 诊断/流程文档 + 合并部署 r56 |
 | | v2.6 | 2026-06-25 | 🎯 R40-A 完成 ✅ — Web 端 GitHub OAuth 认证已合并部署上线 |
 | | v2.5 | 2026-06-25 | 🎯 关闭 F-8（R39 已修复 ✅）；F-9/F-10/F-11 清空轮次标记，回归待启动池 |
 | | v2.4 | 2026-06-24 | 🐛 新增 F-10/F-11 — 进度 Tab 空白 + Hot Standby 信号死锁，R39 必修或排入下轮 |
