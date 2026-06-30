@@ -92,3 +92,23 @@ if _override_raw.strip():
         PIPELINE_STEP_MAP.update(override)
     except _json2.JSONDecodeError:
         pass
+
+
+# ── R59 B: Arch display name override ──────────────────────────
+# R59 方向 A 实验确定 arch 需要 from_name=小谷 才能触发。
+# Environment variable WS_ARCH_FROM_NAME overrides the default.
+PIPELINE_ARCH_FROM_NAME: str = os.environ.get("WS_ARCH_FROM_NAME", "小谷")
+
+
+# ── R59 C: Pipeline role overrides ─────────────────────────────
+# JSON map: { step_key: executor_role }
+# Example: {"step3": "arch"} means Step 3 is executed by arch instead of dev.
+# Environment variable PIPELINE_ROLE_OVERRIDE overrides (JSON).
+PIPELINE_ROLE_OVERRIDES: dict[str, str] = {}
+_raw_c = os.environ.get("PIPELINE_ROLE_OVERRIDE", "")
+if _raw_c.strip():
+    try:
+        import json as _jsonc
+        PIPELINE_ROLE_OVERRIDES.update(_jsonc.loads(_raw_c))
+    except Exception:
+        pass

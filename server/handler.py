@@ -1314,6 +1314,11 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 查 Step 映射表，找起始角色（必须在 R58 A3 之前，因为 kickoff_msg 引用 target_role）
     start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
+    # ── R59 C: Apply role override if configured for kickoff ──
+    _role_overrides = getattr(config, "PIPELINE_ROLE_OVERRIDES", {})
+    if start_step in _role_overrides:
+        target_role = _role_overrides[start_step]
+    # ── R59 C: End role override ──
 
     # ── R58 A3: Initial kickoff PM @mention notification ──
     pm_name = config.PIPELINE_PM_NAME
@@ -1552,6 +1557,11 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
 
     next_step = step_keys[current_idx + 1]
     next_role = step_config[next_step]["role"]
+    # ── R59 C: Apply role override if configured ──
+    _role_overrides = getattr(config, "PIPELINE_ROLE_OVERRIDES", {})
+    if next_step in _role_overrides:
+        next_role = _role_overrides[next_step]
+    # ── R59 C: End role override ──
 
     # ── R43 D: Resolve next role display name ──
     # ── R49 B: Use agent cards if available ──
@@ -1616,16 +1626,33 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             )
         else:
             # ── R58 A2: PM @mention broadcast (trigger work mode) ──
-            pm_name = config.PIPELINE_PM_NAME
+            # ── R59 B: Role-differentiated from_name + message format ──
+            if next_role == "arch":
+                pm_name = config.PIPELINE_ARCH_FROM_NAME
+            else:
+                pm_name = config.PIPELINE_PM_NAME
             req_url = f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md"
             plan_url = pstate.get("work_plan_url", f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md")
-            mention_msg = (
-                f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
-                f"📄 需求：{req_url}\n"
-                f"📋 WORK_PLAN：{plan_url}\n"
-                f"🔗 上一步产出：{output_ref}\n\n"
-                f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
-            )
+
+            # R59 B: Arch gets code block around instructions for extra reliability
+            if next_role == "arch":
+                mention_msg = (
+                    f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+                    f"📄 需求：{req_url}\n"
+                    f"📋 WORK_PLAN：{plan_url}\n"
+                    f"🔗 上一步产出：{output_ref}\n\n"
+                    f"```\n"
+                    f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>\n"
+                    f"```"
+                )
+            else:
+                mention_msg = (
+                    f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+                    f"📄 需求：{req_url}\n"
+                    f"📋 WORK_PLAN：{plan_url}\n"
+                    f"🔗 上一步产出：{output_ref}\n\n"
+                    f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
+                )
             _persist_broadcast(sender_ch, pm_name, mention_msg)
             mention_payload = json.dumps({
                 "type": "broadcast", "channel": sender_ch,
@@ -1690,6 +1717,22 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         "target_agents": target_agents,
     }
     # ── R58 C2: End notification status ──
+
+    # ── R59 B3: PM auto-fallback monitor for dev ──
+    # dev(爱泰) 无法通过 ws-bridge 代码自动触发（方向 A 实验确认任何 from_name 均无效）。
+    # B3 兜底成为 dev 触发的主要通道（而非备用）。
+    if next_role == "dev" and next_step != "step6":
+        asyncio.create_task(_r59_auto_fallback_monitor(
+            round_name=round_name,
+            next_step=next_step,
+            next_role=next_role,
+            primary_agent=locals().get('primary_agent', None),
+            primary_name=locals().get('primary_name', next_role),
+            sender_ch=sender_ch,
+            ws_obj=ws_obj,
+            timeout_minutes=5,
+        ))
+    # ── R59 B3: End ──
 
     # 更新管线状态
     _update_pipeline_step(round_name, next_step)
@@ -1880,6 +1923,89 @@ async def _r57_wait_for_ack(agent_id: str, timeout: int = 30) -> bool:
         _r57_rollcall_events.pop(agent_id, None)
 
 
+# ── R59 B3: PM auto-fallback monitor ──────────────────────────
+
+
+async def _r59_auto_fallback_monitor(
+    round_name: str, next_step: str, next_role: str,
+    primary_agent: str | None, primary_name: str,
+    sender_ch: str, ws_obj,
+    timeout_minutes: int = 5,
+) -> None:
+    """R59 B3: PM 自动兜底 — 检查 dev 是否在超时内响应。
+
+    R59 方向 A 实验证实 dev(爱泰) 对任何 from_name 均无响应。
+    此兜底机制成为 dev 触发的主要通道（而非备用）。
+
+    超时后：
+    1. 在工作室内输出催促消息（@bot 点名）
+    2. 通过 _admin 频道日志通知项目负责人（由 TG 桥接转发）
+    """
+    await asyncio.sleep(timeout_minutes * 60)
+
+    try:
+        # 检查 pipeline_state 中的 notification status
+        pstate = _PIPELINE_STATE.get(round_name, {})
+        step_notif = pstate.get("step_notifications", {}).get(next_step, {})
+        ack_status = step_notif.get("ack_status", "")
+
+        # 检查是否有活跃 Task（表示 bot 已响应并开始工作）
+        has_active_task = False
+        try:
+            tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+            has_active_task = any(
+                t.get("name") == next_step and
+                t.get("state") not in ("completed", "pending")
+                for t in tasks
+            )
+        except Exception:
+            pass
+
+        already_responded = has_active_task or ack_status in ("acknowledged", "completed")
+
+        if not already_responded:
+            # Bot 未响应 → 在工作室内催促
+            reminder_msg = (
+                f"@{primary_name} ⏰ Step「{next_step}」已通知 {timeout_minutes} 分钟，"
+                f"请确认收到。若无法响应，请联系项目负责人处理。"
+            )
+            _persist_broadcast(sender_ch, config.PIPELINE_PM_NAME, reminder_msg)
+            reminder_payload = json.dumps({
+                "type": "broadcast", "channel": sender_ch,
+                "from_name": config.PIPELINE_PM_NAME, "from": config.PIPELINE_PM_NAME,
+                "content": reminder_msg, "ts": time.time(),
+            })
+            for member_id in ws_obj.members:
+                for conn in list(_connections.get(member_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(reminder_payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(reminder_payload)
+                    except Exception:
+                        pass
+
+            # TG 通知项目负责人（走 _admin 频道日志，由 TG 桥接转发）
+            try:
+                admin_channel = p.ADMIN_CHANNEL
+                tg_alert = (
+                    f"📋 [R59_FALLBACK] {round_name} | Step「{next_step}」({next_role}) "
+                    f"已通知 {timeout_minutes} 分钟但 bot {primary_name} 未响应。\n"
+                    f"工作室: {sender_ch}\n"
+                    f"请检查是否需要 TG 转发触发。"
+                )
+                ms.save_message(
+                    msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                    from_agent="系统", from_name="系统",
+                    content=tg_alert, ts=time.time(),
+                    data_dir=config.DATA_DIR, channel=admin_channel,
+                )
+                write_chat_log("系统", tg_alert, channel=admin_channel)
+            except Exception:
+                pass
+    except Exception as e:
+        write_chat_log("系统", f"[R59_FALLBACK 异常] {e}")
+# ── R59 B3: End ──
 # ── R55 B: Step reject command ─────────────────────────────
 
 
@@ -2287,6 +2413,42 @@ async def _cmd_pipeline_mode(sender_id: str, params: dict) -> str:
     return f"✅ 管线 {round_name} 已切换为 {icon} {target_mode} 模式"
 
 
+# ── R59 C: Pipeline role override ────────────────────────────
+
+
+async def _cmd_pipeline_role_override(sender_id: str, params: dict) -> str:
+    """覆盖指定 Step 的执行角色。
+    用法：!pipeline_role_override <step> --executor <role>
+
+    示例：
+      !pipeline_role_override step3 --executor arch
+      → Step 3（编码）由 arch 执行而非 dev
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!pipeline_role_override <step> --executor <role>"
+    step = positional[0].lower()
+    executor = params.get("executor", "")
+    if not executor:
+        return "❌ 请指定 --executor <role>"
+
+    # 验证 step 存在
+    step_config = _load_step_config()
+    if step not in step_config:
+        return f"❌ Step「{step}」不存在"
+
+    # 保存覆盖到配置
+    if not hasattr(config, "PIPELINE_ROLE_OVERRIDES"):
+        config.PIPELINE_ROLE_OVERRIDES = {}
+    config.PIPELINE_ROLE_OVERRIDES[step] = executor
+
+    original_role = step_config[step]["role"]
+    return (
+        f"✅ Step「{step}」执行角色覆盖为「{executor}」（原：{original_role}）\n"
+        f"📋 约束提醒：若覆盖导致写方案者=编码者，请在 WORK_PLAN 中显式豁免"
+    )
+
+
 # ── R49 B: Agent Card commands ──────────────────────────────────────
 
 
@@ -2537,6 +2699,11 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "pipeline_mode": {
         "handler": _cmd_pipeline_mode, "min_role": 3, "workspace_scope": True,
         "usage": "!pipeline_mode <auto|manual>",
+    },
+    # ── R59 C: Pipeline role override ──
+    "pipeline_role_override": {
+        "handler": _cmd_pipeline_role_override, "min_role": 3, "workspace_scope": True,
+        "usage": "!pipeline_role_override <step> --executor <role>",
     },
 }
 
