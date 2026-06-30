@@ -1,0 +1,131 @@
+# R43 开发计划 — Hot Standby 信号死锁
+
+> **版本：** v1.0 ✅（已审批）
+> **状态：** ✅ 已审核
+> **日期：** 2026-06-26
+> **需求文档：** [R43-product-requirements.md](R43-product-requirements.md)
+
+---
+
+## 角色分工
+
+| 角色 | 成员 |
+|:----:|:----:|
+| 🦸 项目管理 | admin-bot |
+| 🧐 需求分析师 | pm-bot |
+| 🏗️ 架构师 | arch-bot |
+| 💻 开发工程师 | dev-bot |
+| 🔍 审查工程师 | review-bot |
+| 🦐 测试工程师 | qa-bot |
+
+---
+
+## 开发步骤
+
+### 🔶 前置决策区（全部通过）
+
+#### ✅ Step A — 需求文档 🧐 pm-bot ✅
+- **v1.0 ✅（项目负责人审核通过）**
+- 四个方向：A(看门狗10min扫描) / B(Step超时配置+6步映射表更新) / C(超时通知30min重复) / D(交接响应机制)
+- 本轮为首轮使用新管线流程的试点轮
+- `PIPELINE_STEP_MAP` 同步更新为 6 步结构（step1~step6）
+- `server/config.py` 配置变更已预提交
+
+#### ✅ Step B — 工作计划 🧐 pm-bot ✅
+- ✅ v1.0 已审核通过（本文件）
+
+---
+
+### 🟢 自动化管线（6 步管线 — 首轮试点）
+
+#### Step 1 — `!pipeline_start R43` 🤖 服务器自动 ✅
+
+| 事项 | 状态 |
+|:-----|:----:|
+| 触发方式 | ✅ `_admin` 频道 `!pipeline_start R43` 已执行 |
+| 自动操作 | ✅ 验证前置决策 ✅ 创建工作室 R43-dev ✅ 点名全员 ✅ 点名架构师出技术方案 |
+| 完成时间 | 2026-06-27 |
+
+#### Step 2 — 技术方案 🏗️ arch-bot ✅
+
+| 事项 | 状态 |
+|:-----|:----:|
+| 产出文件 | ✅ `docs/R43/R43-tech-plan.md`（530 行，四方向全覆盖） |
+| 提交 | ✅ `c5c1df6` 推送到 `origin/dev` |
+| 完成标志 | ✅ `!step_complete step2 --output c5c1df6` 已执行 |
+| 移交 | ✅ 点名 dev-bot Step 3，看门狗 12h 超时已就绪 |
+
+**已覆盖内容：**
+
+| 方向 | 内容 | 核心关注点 |
+|:----:|:-----|:-----------|
+| **A** | 看门狗定时器 | 10min 周期 asyncio 后台任务、惰性启动、CancelledError 优雅退出、_watchdog_alerts 去重字典 |
+| **B** | Step 超时配置 | `PIPELINE_STEP_MAP` 扩展 `timeout_hours`+`escalation`、`STEP_TIMEOUT_DEFAULTS` 兜底、env override 兼容 |
+| **C** | 超时通知 | 三段式：首次告警→30min 重复→解除通知，纯文本 _admin 频道广播 |
+| **D** | 交接响应增强 | `!step_complete` 返回值追加「已点名 <角色>，等待确认」 |
+
+#### ✅ Step 3 — 编码实现 💻 dev-bot ✅ `312b3ab`
+
+| 方向 | 预期改动量 | 实际改动量 |
+|:----:|:----------:|:----------:|
+| A 看门狗定时器 | ~40-60 行 | ✅ 惰性启动 + 10min 扫描 + CancelledError 退出 |
+| B 超时配置 | ~10-20 行 | ✅ PIPELINE_STEP_MAP 扩展 + STEP_TIMEOUT_DEFAULTS |
+| C 超时通知 | ~30-50 行 | ✅ 三段通知（首次/30min重复/解除）+ 纯文本 _admin 广播 |
+| D 交接响应 | ~10-15 行 | ✅ 返回值增强 + _rollcall_confirmed 确认机制 |
+
+| 文件 | 操作 | 行数 |
+|:-----|:----|:----:|
+| `server/config.py` | 🔄 扩展 PIPELINE_STEP_MAP + STEP_TIMEOUT_DEFAULTS | +23 |
+| `server/handler.py` | 🔄 新增看门狗函数 + _cmd_step_complete 增强 | +199 |
+
+#### Step 4 — 代码审查 🔍 review-bot
+
+**审查重点：**
+- 方向 A：看门狗生命周期（启动/停止/异常处理）、扫描逻辑正确性、重复告警防范
+- 方向 B：超时配置数据结构完整性、默认值处理、环境变量覆盖优先级
+- 方向 C：通知格式、三段通知（首次/重复/解除）覆盖全、`_admin` 频道兼容性
+- 方向 D：`!step_complete` 返回值向后兼容
+- **向后兼容：** 无活跃管线时看门狗零输出；超时配置可省略；旧流程不受影响
+
+#### Step 5 — 测试验证 🦐 qa-bot
+
+> **产出要求：** `docs/R43/R43-test-report.md`
+
+| 序号 | 测试项 | 对应需求 |
+|:----:|:-------|:--------:|
+| T-A1 | 服务启动后背景看门狗任务启动 | A-1 |
+| T-A2 | 无活跃管线时扫描零输出 | A-2 |
+| T-A3 | 超时时看门狗生成告警但不直接广播（由方向 C 处理） | A-3 |
+| T-A4 | 同一 Step 不会重复告警 | A-4 |
+| T-A5 | 服务停止时看门狗终止 | A-5 |
+| T-B1 | `PIPELINE_STEP_MAP` 中每个 Step 可配置 `timeout_hours` | B-1 |
+| T-B2 | 每个 Step 配置了 `escalation` 字段 | B-2 |
+| T-B3 | 未配置超时时使用默认值 | B-3 |
+| T-B4 | `PIPELINE_STEP_MAP` 已更新为 6 步（step1~step6） | B-4 |
+| T-B5 | 超时配置支持环境变量覆盖 | B-5 |
+| T-C1 | Step 超时时 `_admin` 频道收到告警 | C-1 |
+| T-C2 | 告警包含：管线名、Step、责任人、挂起时间、阈值 | C-2 |
+| T-C3 | Step 完成后 `_admin` 收到解除通知 | C-3 |
+| T-C4 | 首次超时后每 30 分钟重复通知 | C-4 |
+| T-C5 | 通知使用纯文本格式 | C-5 |
+| T-D1 | `!step_complete` 返回值含「已点名 <角色>，等待确认」 | D-1 |
+
+#### Step 6 — 合并部署 + 归档 🦸 admin-bot ✅
+
+| 事项 | 状态 |
+|:-----|:----:|
+| `git merge dev` 到 main | ✅ `2b4b615` 已推送 |
+| 更新 TODO.md（F-11 🟢 已完成） | ✅ docs/TODO.md v2.11 |
+| R43 文档存档 | ✅ tech-plan / code-review / test-report / WORK_PLAN 均到位 |
+| 关闭 R43 开发工作室 | ✅ `!close_workspace R43-dev` |
+
+---
+
+## 关键约束
+
+1. **只改第①类服务器代码** — 不涉及 Web 端、客户端脚本
+2. **向后兼容** — 无活跃管线时看门狗零输出，超时配置可省略
+3. **纯服务端系统层** — 所有定时器/通知逻辑用 `_ADMIN_COMMANDS` 模式，零 token 消耗
+4. **首轮试行新管线** — R43 用 `!pipeline_start R43` 触发，项目负责人通过 Web 端观察 + TG 协调
+5. **`PIPELINE_STEP_MAP` 已同步为 6 步** — 所有文档/代码中的 Step 编号以新结构为准
+6. **超时值初始偏保守** — 前 2 轮运行后根据实际数据调优

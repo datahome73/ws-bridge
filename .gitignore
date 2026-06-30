@@ -1,0 +1,7 @@
+*.egg-info/
+__pycache__/
+.env
+data/
+ws_bridge_state.json
+wiki/
+test_data/

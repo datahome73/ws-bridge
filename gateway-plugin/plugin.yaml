@@ -1,0 +1,4 @@
+name: ws-bridge-channel
+version: 1.0.0
+description: "Hermes Gateway plugin for WS Bridge — broadcast group chat for bots"
+author: Hermes Agent
