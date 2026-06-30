@@ -1311,6 +1311,10 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
     await _broadcast_active_channel(ws_id)
 
+    # 查 Step 映射表，找起始角色（必须在 R58 A3 之前，因为 kickoff_msg 引用 target_role）
+    start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
+    target_role = step_config[start_step]["role"]
+
     # ── R58 A3: Initial kickoff PM @mention notification ──
     pm_name = config.PIPELINE_PM_NAME
     kickoff_msg = (
@@ -1336,10 +1340,6 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             except Exception:
                 pass
     # ── R58 A3: End kickoff notification ──
-
-    # 查 Step 映射表，找起始角色
-    start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
-    target_role = step_config[start_step]["role"]
 
     # 点名架构师，附带文档 URL（R48: 有自定义 URL 时只传 WORK_PLAN 链接）
     if work_plan_url:
