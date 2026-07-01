@@ -1,6 +1,6 @@
 # R62 技术方案 — 管线参数化改造
 
-> **版本：** v1.0
+> **版本：** v1.1（审阅确认回复 v1.0 → v1.1）
 > **编写：** 🏗️ 小开
 > **日期：** 2026-07-01
 > **状态：** 📝 初稿
@@ -501,3 +501,78 @@ write_chat_log("系统", f"📋 {round_name}：使用旧格式配置（无 machi
 - [ ] `!step_complete` 交接消息中的 URL 来自 config（非硬编码）
 - [ ] `!pipeline_status` 在 state 为空时能展示 config step 列表
 - [ ] `grep -n 'raw.githubusercontent.com.*{round_name}'` handler.py 确认硬编码 URL 已减少
+
+---
+
+## 6. 审阅确认回复
+
+> 🧐 小谷 R-1~R-5 确认答复（v1.0 → v1.1）
+
+### R-1: `_parse_frontmatter()` 解析能力边界 ✅ 已明确
+
+**支持的 YAML 子集：**
+| 特征 | 支持 | 说明 |
+|:-----|:----:|:------|
+| String values `key: val` | ✅ | 含中文、特殊字符 |
+| Nested dicts (2-space indent) | ✅ | `parent:\n  child: val` |
+| 注释行 `# comment` | ✅ | 静默跳过 |
+| Scalar types (int, float, bool) | ✅ | 自动类型推断 |
+| quoted strings `"..."` / `'...'` | ✅ | 去引号后保留 |
+| template vars `${pipeline.xxx}` | ✅ | 保留为字符串，由上层替换 |
+| List of scalars `- item` | ✅ | 返回 Python list |
+| Empty lines | ✅ | 静默跳过 |
+| List of dicts `- key: val` | ❌ | 静默忽略（未来扩展前保持不支持）|
+| Block scalars `|` / `>` | ❌ | 静默忽略 |
+| Aliases `&anchor` / `*alias` | ❌ | 静默忽略 |
+| Multi-doc `---` `...` | ❌ | 只解析第一个 frontmatter 块 |
+
+### R-2: 参数映射表 ✅ 已补充
+
+| # | 当前硬编码位置（handler.py）| 硬编码内容 | 新 config key 路径 | 默认值 |
+|:-:|:---------------------------|:-----------|:--------------------|:-------|
+| 1 | L1340-1346 kickoff_msg | `f"下一棒：{target_role} → {start_step}"` | `steps.{step}.title` | `start_step` 自身 |
+| 2 | L1343 kickoff_msg URL | `f"raw.githubusercontent.com/.../docs/{round_name}/..."` | `pipeline.requirements_url` | `config.WORK_PLAN_REPO_URL + ...` |
+| 3 | L1343 kickoff_msg WORK_PLAN URL | 同上 | `pipeline.work_plan_url` | 同上 |
+| 4 | L1529 step_keys 排序 | `sorted(step_config.keys(), key=...)` | `steps` dict 的 keys | `PIPELINE_STEP_MAP.keys()` |
+| 5 | L1601 context_summary | `f"上一 Step「{step_name}」产出: {output_ref}"` | 每 step 的 `title` | `step_name` 自身 |
+| 6 | L1635-1640 req_url | `f"raw.githubusercontent.com/.../docs/{round_name}/..."` | `steps.{step}.context.requirements_url` | `pipeline.requirements_url` |
+| 7 | L1635-1640 plan_url | 同上 | `steps.{step}.context.work_plan_url` | `pipeline.work_plan_url` |
+| 8 | L1643-1665 mention_msg 格式 | `f"@{primary_name} 🚨 Step「{next_step}」到你了！"` | `steps.{step}.title` 替换 `{next_step}` | `next_step` 自身 |
+| 9 | L2313 `_cmd_pipeline_status` | `if not _PIPELINE_STATE: return "..."` | 新增：state 为空时从 config 读 step 列表 | — |
+
+### R-3: `!close_workspace` 与 config 的关系 ✅ 确认
+
+`_cmd_close_workspace()` (L462) **不调用 `_clear_pipeline_state()`**，只调 `ws_mod.force_close(ws_id)`。Config 清理仅发生在管线自然结束（`_cmd_step_complete` L1564 / `_cmd_step_handoff` L2228 的最后一步）。所以：
+- `!close_workspace` → `_PIPELINE_CONFIG` **不受影响**
+- 管线 step_complete 最后一步 → `_clear_pipeline_state` + config 不受影响
+
+### R-4: 半退 vs 全退 ✅ 补充说明
+
+R62 过渡轮次建议**全退**，原因：
+1. frontmatter 是新事物，生效条件应该是**要么全有用，要么全不用**
+2. 半退需要逐字段异常处理，增加 ~30 行防御代码
+3. 旧格式退化仍能正常跑管线——功能一致
+4. 下个轮次（R63）可改为半退，到时流程更成熟
+
+**例外：** 如果 `pipeline.requirements_url` 字段缺失，仅该字段降级为旧硬编码拼接，不整块退化。
+
+### R-5: 调试辅助命令 ✅ 采纳
+
+扩展 `!pipeline_status --verbose`（或 `--dump`），输出当前 round 的 `_PIPELINE_CONFIG` JSON 摘要。
+
+```python
+# 在 _cmd_pipeline_status 中（约 L2311）：
+if params.get("verbose") or params.get("dump"):
+    lines.append("")
+    lines.append("📋 _PIPELINE_CONFIG:")
+    pconfig = _PIPELINE_CONFIG.get(round_name, {})
+    lines.append(f"  round: {pconfig.get('round', '')}")
+    lines.append(f"  goal: {pconfig.get('goal', '')}")
+    lines.append(f"  work_plan_url: {pconfig.get('work_plan_url', '')}")
+    lines.append(f"  requirements_url: {pconfig.get('requirements_url', '')}")
+    for step_key in sorted(pconfig.get('steps', {}).keys(), key=_step_sort_key):
+        step_cfg = pconfig['steps'][step_key]
+        lines.append(f"  {step_key}: role={step_cfg.get('role','')} | title={step_cfg.get('title','')}")
+```
+
+此改动已纳入技术方案改动清单。
