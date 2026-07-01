@@ -158,7 +158,7 @@ _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WO
    - 各函数的签名和调用链
    - 对旧格式的退化测试策略
 
-**完成条件：** 技术方案文档提交到 dev 分支。
+**完成条件：** ✅ 技术方案文档已提交 dev 分支 [9350a0f](https://github.com/datahome73/ws-bridge/blob/9350a0f/docs/R62/R62-tech-plan.md)
 
 ### Step 3 — Dev 编码实现
 
@@ -256,4 +256,4 @@ _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WO
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
-| v1.0 | 2026-07-01 | 初始版本，基于 R62 需求文档 v1.0 ✅ |
+| v2.0 | 2026-07-01 | Step 2 ✅ 技术方案完成 — 推 dev `9350a0f` ||
