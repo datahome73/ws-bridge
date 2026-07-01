@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.26
+> **版本：** v2.28
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -128,6 +128,7 @@
 
 | 版本 | 日期 | 变更 |
 
+|| v2.28 | 2026-07-01 | 🎯 **R62 完成 ✅** — 管线参数化改造：_PIPELINE_CONFIG + frontmatter 解析 + config/state 分离 + 兼容守卫，12/12 验收通过，合并部署 ws-bridge:r62 `0294fdb` |
 || v2.27 | 2026-06-30 | 🎯 **R61 完成 ✅** — 纯验证轮次：F-19（_get_agent_display 角色名）+ F-20（_broadcast_active_channel 自动切活跃频道）在真实管线中实测验证通过。零代码修改。QA 大宏拍板跳过。工作室已关闭 |
 |||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |
 ||||| v2.25 | 2026-06-30 | 🎯 **R58 完成 ✅** — 系统通知→自然 @mention 改造（方向A P0）：from_name从"系统"改为 config.PIPELINE_PM_NAME，工作室广播替代 _send_to_agent 主力路径，@mention+完整上下文模板。方向B P1：ACK超时软检查+日志。方向C P2：pstate 通知状态跟踪 + !pipeline_status 展示 📨/✅ACK/❌静默。双保险保留。审查 2🔴 blocking→修复 a4d961c ✅。合并部署 ws-bridge:r58 |
