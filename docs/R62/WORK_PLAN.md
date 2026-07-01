@@ -64,8 +64,8 @@ pipeline:
 
 # R62 工作计划 — 管线参数化改造（过渡轮次）
 
-> **版本：** v1.0 ✅（项目负责人审核通过）
-> **状态：** 📋 定稿
+> **版本：** v2.0 ✅（已归档）
+> **状态：** ✅ 已归档
 > **项目协调人：** 🧐 PM
 > **基于需求文档：** docs/R62/R62-product-requirements.md v1.0 ✅
 
@@ -229,18 +229,18 @@ _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WO
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | `!pipeline_start R62` 解析 frontmatter | ⏳ |
-| ✅-2 | `_PIPELINE_CONFIG` 与 `_PIPELINE_STATE` 分离 | ⏳ |
-| ✅-3 | `!step_complete` 从 config 读参数 | ⏳ |
-| ✅-4 | `!step_handoff` 从 config 读下一 step | ⏳ |
-| ✅-5 | state 丢失后 `!pipeline_status` 仍可读 config | ⏳ |
-| ✅-6 | step 交接消息使用 `steps.stepN.title` | ⏳ |
-| ✅-7 | 旧格式 WORK_PLAN 不报错 | ⏳ |
-| ✅-8 | 退化时写一条日志 | ⏳ |
-| ✅-9 | frontmatter 格式错误不阻塞 | ⏳ |
-| ✅-10 | `!step_handoff` 跳过后 pipeline_status 仍返回 step 列表 | ⏳ |
-| ✅-11 | state 清空后 pipeline_start 不报「已活跃」 | ⏳ |
-| ✅-12 | 正常流转与改造前一致 | ⏳ |
+| ✅-1 | `!pipeline_start R62` 解析 frontmatter | ✅ |
+| ✅-2 | `_PIPELINE_CONFIG` 与 `_PIPELINE_STATE` 分离 | ✅ |
+| ✅-3 | `!step_complete` 从 config 读参数 | ✅ |
+| ✅-4 | `!step_handoff` 从 config 读下一 step | ✅ |
+| ✅-5 | state 丢失后 `!pipeline_status` 仍可读 config | ✅ |
+| ✅-6 | step 交接消息使用 `steps.stepN.title` | ✅ |
+| ✅-7 | 旧格式 WORK_PLAN 不报错 | ✅ |
+| ✅-8 | 退化时写一条日志 | ✅ |
+| ✅-9 | frontmatter 格式错误不阻塞 | ✅ |
+| ✅-10 | `!step_handoff` 跳过后 pipeline_status 仍返回 step 列表 | ✅ |
+| ✅-11 | state 清空后 pipeline_start 不报「已活跃」 | ✅ |
+| ✅-12 | 正常流转与改造前一致 | ✅ |
 
 ---
 
@@ -256,4 +256,5 @@ _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WO
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
-| v2.0 | 2026-07-01 | Step 2 ✅ 技术方案完成 — 推 dev `9350a0f` ||
+| v2.0 | 2026-07-01 | Step 6 ✅ 合并部署归档 — dev→main `0294fdb`，部署 ws-bridge:r62，12/12 验收全通过 |
+| v1.0 | 2026-07-01 | Step 2 ✅ 技术方案完成 — 推 dev `9350a0f` ||
