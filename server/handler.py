@@ -42,6 +42,10 @@ _offline_push_queue: dict[str, list[dict]] = {}
 
 # ── R42: Pipeline state ──────────────────────────────────────────
 _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
+
+# ── R62: Pipeline config (read-only, separate from runtime state) ──
+_PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
+
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
 
@@ -922,6 +926,132 @@ def _find_agents_by_role(role: str, member_ids: list[str], cards: dict) -> list[
 # ── R42: Pipeline helpers ──────────────────────────────────────────
 
 
+# ── R62: NoFrontmatterError ──
+class NoFrontmatterError(ValueError):
+    """Raised when WORK_PLAN content has no YAML frontmatter block."""
+    pass
+
+
+# ── R62 A2: Lightweight YAML frontmatter parser ──
+_R62_REPO_BASE = "https://raw.githubusercontent.com/datahome73/ws-bridge/dev"
+
+
+def _parse_scalar(value: str):
+    """Parse a scalar YAML value."""
+    value = value.strip()
+    if not value:
+        return value
+    if (value.startswith('"') and value.endswith('"')) or \
+       (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+    if value.lower() in ('true', 'yes', 'on'):
+        return True
+    if value.lower() in ('false', 'no', 'off'):
+        return False
+    try:
+        if '.' in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _parse_frontmatter(content: str) -> dict:
+    """Extract and parse YAML frontmatter from WORK_PLAN.md content.
+    Supports: strings, nested dicts via indentation, list values.
+    Returns: pipeline section dict or raises NoFrontmatterError.
+    """
+    parts = content.split('---')
+    if len(parts) < 3:
+        raise NoFrontmatterError("No YAML frontmatter block found")
+    frontmatter_text = parts[1].strip()
+    lines = frontmatter_text.split('\n')
+    result = {}
+    stack = [(0, None, result)]
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if stripped.startswith('- '):
+            item_text = stripped[2:].strip()
+            if stack and stack[-1][2] is not None:
+                parent_key = stack[-1][1]
+                parent_dict = stack[-1][2]
+                if parent_key and parent_key not in parent_dict:
+                    parent_dict[parent_key] = []
+                if parent_key:
+                    parent_dict[parent_key].append(_parse_scalar(item_text))
+        elif ':' in stripped:
+            key, _, value = stripped.partition(':')
+            key = key.strip()
+            value = value.strip()
+            if stack:
+                parent_dict = stack[-1][2]
+                if value:
+                    parent_dict[key] = _parse_scalar(value)
+                    stack.append((indent, key, {}))
+                else:
+                    parent_dict[key] = {}
+                    stack.append((indent, key, parent_dict[key]))
+    return result
+
+
+def _build_pipeline_config(frontmatter: dict, round_name: str, base_urls: dict) -> dict:
+    """Build _PIPELINE_CONFIG from frontmatter dict."""
+    config = frontmatter.get("pipeline", {})
+    if not config:
+        raise ValueError("Frontmatter missing 'pipeline' key")
+    config["round"] = round_name
+    config["work_plan_url"] = base_urls.get("work_plan_url", "")
+    config["requirements_url"] = base_urls.get("requirements_url",
+        f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-product-requirements.md")
+    config["steps"] = config.get("steps", {})
+    for step_key, step_cfg in config["steps"].items():
+        context = step_cfg.get("context", {})
+        for ctx_key, ctx_value in list(context.items()):
+            if isinstance(ctx_value, str) and "${pipeline." in ctx_value:
+                ref_key = ctx_value.replace("${pipeline.", "").rstrip("}")
+                if ref_key in config:
+                    context[ctx_key] = str(config[ref_key])
+    return config
+
+
+def _build_fallback_config(round_name: str, base_urls: dict) -> dict:
+    """Build _PIPELINE_CONFIG from hardcoded PIPELINE_STEP_MAP (old format compat)."""
+    step_map = _r42cfg.PIPELINE_STEP_MAP
+    work_plan_url = base_urls.get("work_plan_url", "")
+    requirements_url = base_urls.get("requirements_url",
+        f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-product-requirements.md")
+    steps = {}
+    for step_key, step_cfg in step_map.items():
+        if step_key == "step1":
+            continue
+        role = step_cfg.get("role", "")
+        steps[step_key] = {
+            "role": role,
+            "title": step_cfg.get("name", step_key),
+            "context": {
+                "requirements_url": requirements_url,
+                "work_plan_url": work_plan_url,
+            },
+            "output_desc": "",
+            "feedback_channel": "_admin",
+            "timeout_minutes": int(step_cfg.get("timeout_hours", 6) * 60),
+            "escalation": step_cfg.get("escalation", "notify_pm"),
+        }
+    return {
+        "round": round_name,
+        "goal": "",
+        "work_plan_url": work_plan_url,
+        "requirements_url": requirements_url,
+        "steps": steps,
+    }
+
+
 def _step_sort_key(step_name: str) -> tuple:
     """Sort step1, step2, ..., step10 naturally."""
     import re
@@ -948,6 +1078,7 @@ def _update_pipeline_step(round_name: str, step: str) -> None:
 
 def _clear_pipeline_state(round_name: str) -> None:
     _PIPELINE_STATE.pop(round_name, None)
+    # R62: _PIPELINE_CONFIG is NOT cleared here — config/state separation
 
 
 def pipeline_is_active(round_name: str) -> bool:
@@ -1245,6 +1376,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
 
     # 验证前置决策状态 — R48 A: --work-plan-url 参数优先 + R45 fallback
     work_plan_url = params.get("work_plan_url", "")
+    _remote_url = ""  # R62: initialize early
     work_plan_ok = False
     import urllib.request as _r45url
     if work_plan_url:
@@ -1274,6 +1406,39 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             work_plan_ok = _r42os.path.exists(work_plan_path)
         if not work_plan_ok:
             return f"❌ {round_name} 未找到 WORK_PLAN.md（远程+本地均失败），请先完成 Step A/B"
+
+    # ── R62 A3: Parse frontmatter → Build _PIPELINE_CONFIG ──
+    _pipeline_config = _PIPELINE_CONFIG.get(round_name)
+    if not _pipeline_config:
+        import urllib.request as _r62url
+        try:
+            _r62req = _r62url.Request(work_plan_url or _remote_url)
+            with _r62url.urlopen(_r62req, timeout=5) as _r62resp:
+                wp_content = _r62resp.read().decode('utf-8')
+        except Exception:
+            wp_content = ""
+        if wp_content:
+            try:
+                frontmatter = _parse_frontmatter(wp_content)
+                config_data = _build_pipeline_config(frontmatter, round_name, {
+                    "work_plan_url": work_plan_url or _remote_url,
+                    "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+                })
+                _PIPELINE_CONFIG[round_name] = config_data
+            except (NoFrontmatterError, ValueError):
+                config_data = _build_fallback_config(round_name, {
+                    "work_plan_url": work_plan_url or _remote_url,
+                    "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+                })
+                _PIPELINE_CONFIG[round_name] = config_data
+                write_chat_log("系统", f"📋 {round_name}：使用旧格式配置（无 machine-frontmatter）")
+        else:
+            config_data = _build_fallback_config(round_name, {
+                "work_plan_url": work_plan_url or "",
+                "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+            })
+            _PIPELINE_CONFIG[round_name] = config_data
+    # ── R62 A3: End ──
 
     # 锁定管线（防重复）
     if pipeline_is_active(round_name):
@@ -1337,11 +1502,20 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
 
     # ── R58 A3: Initial kickoff PM @mention notification ──
     pm_name = config.PIPELINE_PM_NAME
+    # ── R62: Read from _PIPELINE_CONFIG ──
+    _pconfig = _PIPELINE_CONFIG.get(round_name, {})
+    _pconfig_steps = _pconfig.get("steps", {})
+    _step_cfg_from_pconfig = _pconfig_steps.get(start_step, {})
+    _step_title = _step_cfg_from_pconfig.get("title", start_step)
+    _req_url = _pconfig.get("requirements_url",
+        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
+    _plan_url = _pconfig.get("work_plan_url",
+        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md")
     kickoff_msg = (
         f"@全员 🚀 {round_name} 管线已启动！\n"
-        f"下一棒：{target_role} → {start_step}\n\n"
-        f"📄 需求：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md\n"
-        f"📋 WORK_PLAN：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md\n\n"
+        f"下一棒：{target_role} → {_step_title}\n\n"
+        f"📄 需求：{_req_url}\n"
+        f"📋 WORK_PLAN：{_plan_url}\n\n"
         f"各 bot 请切换活跃频道到此工作室，确认就绪。"
     )
     _persist_broadcast(ws_id, pm_name, kickoff_msg)
@@ -1525,7 +1699,12 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     pstate.pop("backup_active", None)
 
     # 查 Step 映射表 → 找下一角色
-    step_config = _load_step_config()
+    # ── R62: Try _PIPELINE_CONFIG first, fallback to legacy ──
+    _pconfig_s = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {})
+    if _pconfig_s:
+        step_config = _pconfig_s
+    else:
+        step_config = _load_step_config()
     step_keys = sorted(step_config.keys(), key=_step_sort_key)
     current_idx = None
     for i, k in enumerate(step_keys):
@@ -1646,13 +1825,22 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 pm_name = config.PIPELINE_ARCH_FROM_NAME
             else:
                 pm_name = config.PIPELINE_PM_NAME
-            req_url = f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md"
-            plan_url = pstate.get("work_plan_url", f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md")
+            # ── R62: Read URLs from _PIPELINE_CONFIG ──
+            _pconfig_n = _PIPELINE_CONFIG.get(round_name, {})
+            req_url = _pconfig_n.get("requirements_url",
+                f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
+            plan_url = _pconfig_n.get("work_plan_url",
+                pstate.get("work_plan_url",
+                    f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"))
+            # ── R62: Step title from config ──
+            _pconfig_steps_n = _pconfig_n.get("steps", {})
+            _next_step_cfg = _pconfig_steps_n.get(next_step, {})
+            _next_step_title = _next_step_cfg.get("title", next_step)
 
             # R59 B: Arch gets code block around instructions for extra reliability
             if next_role == "arch":
                 mention_msg = (
-                    f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+                    f"@{primary_name} 🚨 Step「{_next_step_title}」到你了！\n\n"
                     f"📄 需求：{req_url}\n"
                     f"📋 WORK_PLAN：{plan_url}\n"
                     f"🔗 上一步产出：{output_ref}\n\n"
@@ -1662,7 +1850,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 )
             else:
                 mention_msg = (
-                    f"@{primary_name} 🚨 Step「{next_step}」到你了！\n\n"
+                    f"@{primary_name} 🚨 Step「{_next_step_title}」到你了！\n\n"
                     f"📄 需求：{req_url}\n"
                     f"📋 WORK_PLAN：{plan_url}\n"
                     f"🔗 上一步产出：{output_ref}\n\n"
@@ -2212,7 +2400,12 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     task_result = await _cmd_task_update(sender_id, task_update_params)
 
     # Look up next step
-    step_config = _load_step_config()
+    # ── R62: Try _PIPELINE_CONFIG first, fallback to legacy ──
+    _pconfig_s_h = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {})
+    if _pconfig_s_h:
+        step_config = _pconfig_s_h
+    else:
+        step_config = _load_step_config()
     step_keys = sorted(step_config.keys(), key=_step_sort_key)
     current_idx = None
     for i, k in enumerate(step_keys):
@@ -2310,10 +2503,32 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
 
 async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
     """查询当前所有活跃管线的 Step 进度表。"""
-    if not _PIPELINE_STATE:
-        return "📊 当前无活跃管线"
-
     lines = []
+
+    # ── R62: Config-only mode (no state, but config exists) ──
+    if _PIPELINE_CONFIG and not _PIPELINE_STATE:
+        for round_name, pconfig in sorted(_PIPELINE_CONFIG.items()):
+            if round_name in _PIPELINE_STATE:
+                continue
+            lines.append(f"📊 **{round_name} 管线配置（state 不存在，config 仍在）**")
+            lines.append(f"  目标: {pconfig.get('goal', '')}")
+            step_config_c = pconfig.get("steps", {})
+            for step_key, step_info in sorted(
+                step_config_c.items(),
+                key=lambda item: _step_sort_key(item[0]),
+            ):
+                role = step_info.get("role", "?")
+                title = step_info.get("title", step_key)
+                lines.append(f"  ⏳ {step_key} — {role}（{title}）")
+            lines.append("")
+
+    if not _PIPELINE_STATE and not lines:
+        # ── R62: If verbose is requested but no state/config, show empty
+        if params.get("verbose") or params.get("dump"):
+            lines.append("📊 当前无活跃管线（无 _PIPELINE_CONFIG）")
+        else:
+            return "📊 当前无活跃管线"
+
     for round_name, pstate in sorted(_PIPELINE_STATE.items()):
         if not pstate.get("active"):
             continue
@@ -2399,6 +2614,18 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
 
     if not lines:
         return "📊 当前无活跃管线"
+    # ── R62: --verbose / --dump: show _PIPELINE_CONFIG summary ──
+    if params.get("verbose") or params.get("dump"):
+        lines.append("")
+        lines.append("📋 _PIPELINE_CONFIG:")
+        if _PIPELINE_CONFIG:
+            for _rname, _pconf in sorted(_PIPELINE_CONFIG.items()):
+                lines.append(f"  [{_rname}] round={_pconf.get('round','')} | goal={_pconf.get('goal','')} | work_plan_url={_pconf.get('work_plan_url','')} | requirements_url={_pconf.get('requirements_url','')}")
+                for _sk in sorted(_pconf.get('steps', {}).keys(), key=_step_sort_key):
+                    _sc = _pconf['steps'][_sk]
+                    lines.append(f"    {_sk}: role={_sc.get('role','')} | title={_sc.get('title','')}")
+        else:
+            lines.append("  无 _PIPELINE_CONFIG")
     return "\n".join(lines)
 
 
