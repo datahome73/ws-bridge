@@ -114,6 +114,19 @@ if _raw_c.strip():
         pass
 
 
+# ── R65: Git pipeline sync ──────────────────────────────────
+# 管线 git 同步自动检测开关
+ENABLE_GIT_SYNC: bool = os.environ.get("R65_ENABLE_GIT_SYNC", "1") == "1"
+# git 检测间隔（秒）
+GIT_SYNC_INTERVAL: int = int(os.environ.get("R65_GIT_SYNC_INTERVAL", "120"))
+# 默认工作分支
+GIT_SYNC_BRANCH: str = os.environ.get("R65_GIT_SYNC_BRANCH", "dev")
+# 兜底开关（任意新 commit 即推进）
+GIT_SYNC_FALLBACK: bool = os.environ.get("R65_GIT_SYNC_FALLBACK", "1") == "1"
+# Git 仓库本地路径
+REPO_PATH: str = os.environ.get("R65_REPO_PATH", "/opt/data/ws-bridge")
+
+
 # ── R63 Phase 5: Feature toggle switches ──────────────────────────
 # Environment variables to enable/disable R63 features independently.
 # Default: all enabled ("1").
