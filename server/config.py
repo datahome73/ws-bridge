@@ -112,3 +112,11 @@ if _raw_c.strip():
         PIPELINE_ROLE_OVERRIDES.update(_jsonc.loads(_raw_c))
     except Exception:
         pass
+
+
+# ── R63 Phase 5: Feature toggle switches ──────────────────────────
+# Environment variables to enable/disable R63 features independently.
+# Default: all enabled ("1").
+R63_ENABLE_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
+R63_ENABLE_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
+R63_ENABLE_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
