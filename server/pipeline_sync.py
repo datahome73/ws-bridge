@@ -186,13 +186,6 @@ class PipelineGitSync:
 
     def _get_commit_files(self, sha: str) -> list[str]:
         """获取 commit 修改的文件列表。"""
-        rc, stdout, stderr = _run_git(
-            ["diff-tree", "--no-commit-id", "-r", "--name-only", sha],
-            self.repo_path,
-            timeout=5.0,
-        )
-        # _run_git is async — need to run in event loop
-        # Use a sync wrapper
         import subprocess
         try:
             result = subprocess.run(
