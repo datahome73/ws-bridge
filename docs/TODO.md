@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.29
+> **版本：** v2.30
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -20,7 +20,7 @@
 | F-12 | **PM 无法直接触发管线入口** — `!pipeline_start` 需 P3+ 权限，PM(member) 无法在 TG DM 直接触发，需经 code 块中转给管理员执行 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-13 | **`!pipeline_start` 创建的工作室没有开发成员** — 未传 `--members` 参数，工作室内只有执行者一人。导致 `_cmd_rollcall_next` 找 arch 角色时工作区无人匹配 → 点名+派活静默失败 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-14 | **`task_store` 缺少 `get_tasks_by_context` 方法** — `!pipeline_status` 和 `!step_complete` 调用此方法报错 `module 'server.task_store' has no attribute 'get_tasks_by_context'`，阻断管线状态查询和 Step 完成流程 | 🟡 P2 | R47 | 🟢 已完成 ✅ |
-| F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | — | ⬜ 待规划 |
+| F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | R63 | 🟢 已完成 ✅ |
 | F-21 | **Gateway mention_keyword 多触发词支持** — `gateway-plugin/__init__.py` 中 `mention_keyword` 为单字符串，各 bot 只能配置一个触发词（如 `小开`）。导致 `@arch` 角色名无法触发 arch bot。解决方案：`mention_keyword` 改为分号/逗号分割多值，`if any(kw in content for kw in self._mention_keyword.split(';'))`。各 bot 配 `mention_keyword: "小开;arch"` 等，角色名和 bot 名均可触发。R63 实战暴露 | 🟡 P2 | R64 | ⬜ 待规划 |
 || F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | 待分配 | ⬜ 待启动 |
 ||| F-17 | **管线状态不同步** — `!step_complete` 未执行时管线 state 停留在原地，即使 Step 工作已实质完成。需要执行者自驱调用 `!step_complete` 推进状态，否则后续 Step 无法自动点名、管线永久阻塞。R48 已将 `step_complete` 的 `min_role` 从 3 降为 1 使成员可自驱交接，但根本问题是缺乏「不调则阻塞」的闭环保证。需后续轮次建立超时检测或状态一致性核查机制 | 🟡 P2 | R48 | ▶ 本轮暴露，待规划 |
@@ -101,7 +101,7 @@
 | M-4 | **写开源版 README.md** — 通用接入指南 | R42 | 🟢 已完成 |
 || M-5 | **添加开源标配文档** — LICENSE、CONTRIBUTING.md、CODE_OF_CONDUCT.md | R42 | 🟢 已完成 |
 || R40-A | **Web 端 GitHub OAuth 认证** — 引入 GitHub OAuth 2.0 Authorization Code 流程，与现有绑定码并行运行。支持身份映射表、session 持久化、7 天 cookie 无感登录 | R40 | 🟢 已完成 |
-||| **R56** | **通信层修复轮 — 方向 A _send_to_agent 回退广播（39ef407）+ 方向 B 诊断 + 方向 C SOP。审查通过（e505d9d）。合并部署 ws-bridge:r56** | R56 | 🟢 已完成 |\n||| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
+||| **R63** | **多 Agent 协作基础设施 — timeout_tracker + Agent Card 角色映射 + ACK 状态机 + 退化开关。29/30 验收 (W-1 闭包清理)。合并部署 ws-bridge:r63** | R63 | 🟢 已完成 ✅ |\n||| **R56** | **通信层修复轮 — 方向 A _send_to_agent 回退广播（39ef407）+ 方向 B 诊断 + 方向 C SOP。审查通过（e505d9d）。合并部署 ws-bridge:r56** | R56 | 🟢 已完成 |\n||| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
 || F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | — | ❌ 已取消 |
 
 ### 已验证功能（无需改动）

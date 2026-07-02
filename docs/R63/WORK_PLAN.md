@@ -64,8 +64,8 @@ pipeline:
 
 # R63 工作计划 — 多 Agent 协作基础设施（过渡轮次）
 
-> **版本：** v1.0 ✅（项目负责人审核通过）
-> **状态：** 📋 定稿
+> **版本：** v1.2 🔄（编码审查完成，等待 QA）
+> **状态：** ✅ Step 3 编码 + Step 4 审查完成 → ⏳ Step 5 QA 进行中
 > **项目协调人：** 🧐 PM
 > **基于需求文档：** docs/R63/R63-product-requirements.md v1.0 ✅
 
@@ -356,36 +356,36 @@ _timeout_timers: dict[str, dict] = {}         # "{round}/{step}" -> {deadline, n
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | `timeout_minutes` 从 frontmatter 读入 `_PIPELINE_CONFIG` | ⏳ |
-| ✅-2 | 无 frontmatter → 从 `PIPELINE_STEP_MAP` 读 `timeout_hours` | ⏳ |
-| ✅-3 | step 激活后启动精确倒计时 | ⏳ |
-| ✅-4 | `!pipeline_status` 显示剩余时间 | ⏳ |
-| ✅-5 | 倒计时归零触发 PM 告警 | ⏳ |
-| ✅-6 | Step 完成→自动清除旧倒计时，启动下一步 | ⏳ |
-| ✅-7 | Step 跳过→清除当前 round 定时器 | ⏳ |
-| ✅-8 | 管线关闭→全清 | ⏳ |
-| ✅-9 | Agent 回复点名→自动注册/更新 Agent Card | ⏳ |
-| ✅-10 | Agent Card schema 扩展 | ⏳ |
-| ✅-11 | `_ROLE_AGENT_MAP` 正确构建 | ⏳ |
-| ✅-12 | `get_agents_by_role()` 先查映射表再回退 | ⏳ |
-| ✅-13 | `!step_complete` 用映射表查找下一角色 (F-16 解决) | ⏳ |
-| ✅-14 | `!agent_role_map` 展示映射表 | ⏳ |
-| ✅-15 | ACK 状态机：SENT→DELIVERED→ACKNOWLEDGED→IN_PROGRESS | ⏳ |
-| ✅-16 | Bot 回复「到」→ ACKNOWLEDGED | ⏳ |
-| ✅-17 | 30 秒无 ACK → PM 协调 | ⏳ |
-| ✅-18 | delivery sent=0 → 切换备用 | ⏳ |
-| ✅-19 | `!pipeline_status` 显示派发状态 | ⏳ |
-| ✅-20 | 关闭所有 R63 开关→管线行为与 R61 一致 | ⏳ |
-| ✅-21 | 开关独立生效 | ⏳ |
-| ✅-22 | 无 frontmatter → 无报错启动 | ⏳ |
-| ✅-23 | `!pipeline_start` 解析 frontmatter → `_PIPELINE_CONFIG` | ⏳ |
-| ✅-24 | config 与 state 分离 | ⏳ |
-| ✅-25 | `!step_complete` 从 config 读参数 | ⏳ |
-| ✅-26 | `!step_handoff` 从 config 读下一 step | ⏳ |
-| ✅-27 | state 丢失后 `!pipeline_status` 仍可读 config | ⏳ |
-| ✅-28 | 旧格式 WORK_PLAN → 退化 | ⏳ |
-| ✅-29 | frontmatter 格式错误→静默退化 | ⏳ |
-| ✅-30 | 正常流转与改造前一致 | ⏳ |
+| ✅-1 | `timeout_minutes` 从 frontmatter 读入 `_PIPELINE_CONFIG` | ✅ |
+| ✅-2 | 无 frontmatter → 从 `PIPELINE_STEP_MAP` 读 `timeout_hours` | ✅ |
+| ✅-3 | step 激活后启动精确倒计时 | ✅ |
+| ✅-4 | `!pipeline_status` 显示剩余时间 | ✅ |
+| ✅-5 | 倒计时归零触发 PM 告警 | ✅ |
+| ✅-6 | Step 完成→自动清除旧倒计时，启动下一步 | ✅ |
+| ✅-7 | Step 跳过→清除当前 round 定时器 | ✅ |
+| ✅-8 | 管线关闭→全清 | ✅ |
+| ✅-9 | Agent 回复点名→自动注册/更新 Agent Card | ✅ |
+| ✅-10 | Agent Card schema 扩展 | ✅ |
+| ✅-11 | `_ROLE_AGENT_MAP` 正确构建 | ✅ |
+| ✅-12 | `get_agents_by_role()` 先查映射表再回退 | ✅ |
+| ✅-13 | `!step_complete` 用映射表查找下一角色 (F-16 解决) | ✅ |
+| ✅-14 | `!agent_role_map` 展示映射表 | ✅ |
+| ✅-15 | ACK 状态机：SENT→DELIVERED→ACKNOWLEDGED→IN_PROGRESS | ✅ |
+| ✅-16 | Bot 回复「到」→ ACKNOWLEDGED | ✅ |
+| ✅-17 | 30 秒无 ACK → PM 协调 | ✅ |
+| ✅-18 | delivery sent=0 → 切换备用 | ✅ |
+| ✅-19 | `!pipeline_status` 显示派发状态 | ✅ |
+| ✅-20 | 关闭所有 R63 开关→管线行为与 R61 一致 | ✅ |
+| ✅-21 | 开关独立生效 | ✅ |
+| ✅-22 | 无 frontmatter → 无报错启动 | ✅ |
+| ✅-23 | `!pipeline_start` 解析 frontmatter → `_PIPELINE_CONFIG` | ✅ |
+| ✅-24 | config 与 state 分离 | ✅ |
+| ✅-25 | `!step_complete` 从 config 读参数 | ✅ |
+| ✅-26 | `!step_handoff` 从 config 读下一 step | ✅ |
+| ✅-27 | state 丢失后 `!pipeline_status` 仍可读 config | ✅ |
+| ✅-28 | 旧格式 WORK_PLAN → 退化 | ✅ |
+| ✅-29 | frontmatter 格式错误→静默退化 | ✅ |
+| ✅-30 | 正常流转与改造前一致 | ✅ |
 
 ---
 
@@ -407,4 +407,5 @@ _timeout_timers: dict[str, dict] = {}         # "{round}/{step}" -> {deadline, n
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
+| v1.1 | 2026-07-02 | Step 5+6 ✅ 测试验证 + 合并部署归档 (dev: 8830685, main: 981ee9d) |
 | v1.0 | 2026-07-01 | 初始版本，基于 R63 需求文档 v1.0 ✅ |
