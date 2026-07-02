@@ -145,8 +145,8 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._should_reconnect = True
 
         logger.warning(
-            "[WSBridge] Initialized (agent=%s url=%s role=%s mention=%s)",
-            self._agent_id[:20], self._url, self._role, self._mention_mode,
+            "[WSBridge] Initialized (agent=%s url=%s role=%s keywords=%s)",
+            self._agent_id[:20], self._url, self._role, self._mention_keywords,
         )
 
     # ── Lifecycle ──────────────────────────────────────────────────────
