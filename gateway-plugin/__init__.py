@@ -131,7 +131,10 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._role = extra.get("role") or "member"
         self._mention_mode = bool(extra.get("mention_mode", False))
         raw = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or "admin-bot"
-        self._mention_keywords = [kw.strip() for kw in raw.split(";") if kw.strip()]
+        self._mention_keywords = sorted(
+            (kw.strip() for kw in raw.split(";") if kw.strip()),
+            key=len, reverse=True,
+        )
         self._last_msg_ts: float = 0.0
         self._active_channel: str = "lobby"
 
