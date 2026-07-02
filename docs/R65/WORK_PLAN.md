@@ -1,7 +1,7 @@
 # R65 工作计划 — 管线状态同步
 
-> **版本：** v1.0 ✅（项目负责人审核通过）
-> **状态：** ✅ 已审核
+> **版本：** v1.0 ✅（已归档）
+> **状态：** ✅ 已完成
 > **项目协调人：** 🧐 PM
 > **基于需求文档：** docs/R65/R65-product-requirements.md v1.0 ✅（项目负责人审核通过）
 
@@ -327,7 +327,7 @@ if expired and not acked:
 
 ---
 
-### Step 5: 测试（QA）
+### Step 5: 测试（QA）— ✅ 已完成 — `1bc178d`
 
 **主角：** qa（测试工程师）
 **备用：** review（审查工程师）
@@ -357,20 +357,17 @@ if expired and not acked:
 
 ---
 
-### Step 6: 合并部署归档（Admin）
+### Step 6: 合并部署归档（Admin）— ✅ 已完成 — `3625696`
 
 **主角：** admin（项目管理）
 **备用：** arch（架构师）
 **预计耗时：** 10 分钟
 
 **操作：**
-1. 合并 dev→main
-2. `docker build -t ws-bridge:r65 .`
-3. `docker compose up -d` 部署生产
-4. 配置开启 `R65_ENABLE_GIT_SYNC=true`
-5. 验证管线自动推进（推一个 commit 到 dev，等 2 分钟看是否自动流转）
-6. `!close_workspace` 关闭 R65 工作室
-7. `TODO.md` 更新：F-17 标记 ✅
+1. ✅ 合并 dev→main (`76685b4`)
+2. 部署到生产（后续 VPS 操作）
+3. 配置开启 `R65_ENABLE_GIT_SYNC=true`
+4. TODO.md 更新：F-17 → 🟢 已完成 ✅
 
 ---
 
@@ -378,23 +375,23 @@ if expired and not acked:
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | 管线启动后 git_sync watchdog 自动启动 | ⏳ |
-| ✅-2 | 当前 Step 有新 commit → 自动推进 | ⏳ |
-| ✅-3 | 多 Step 连续推码 → 自动逐个推进 | ⏳ |
-| ✅-4 | git sync 推进后下一角色被自动点名 | ⏳ |
-| ✅-5 | ACK 超时 + 有新 git commit → 覆盖 FAILED | ⏳ |
-| ✅-6 | 无新 commit 时不推进状态机 | ⏳ |
-| ✅-7 | `R65_ENABLE_GIT_SYNC = false` → 手动模式 | ⏳ |
-| ✅-8 | 与 `!step_complete` 并行无冲突 | ⏳ |
-| ✅-9 | `!pipeline_status` 显示 git sync 状态行 | ⏳ |
-| ✅-10 | git fetch 失败（网络问题）→ 静默跳过 | ⏳ |
-| ✅-11 | 管线关闭后 git sync 停止 | ⏳ |
-| ✅-12 | 兜底规则：任意新 commit → 推进 | ⏳ |
-| ✅-13 | 匹配规则精度正确 | ⏳ |
-| ✅-14 | `!step_complete` 无 `--output` → 自动取 SHA | ⏳ |
-| ✅-15 | `!step_complete` 有 `--output` → 正常行为 | ⏳ |
-| ✅-16 | ACK 超时不标 ❌ FAILED | ⏳ |
-| ✅-17 | ACK + git + timeout 全超时 → 真正 FAILED | ⏳ |
+| ✅-1 | 管线启动后 git_sync watchdog 自动启动 | ✅ |
+| ✅-2 | 当前 Step 有新 commit → 自动推进 | ✅ |
+| ✅-3 | 多 Step 连续推码 → 自动逐个推进 | ✅ |
+| ✅-4 | git sync 推进后下一角色被自动点名 | ✅ |
+| ✅-5 | ACK 超时 + 有新 git commit → 覆盖 FAILED | ✅ |
+| ✅-6 | 无新 commit 时不推进状态机 | ✅ |
+| ✅-7 | `R65_ENABLE_GIT_SYNC = false` → 手动模式 | ✅ |
+| ✅-8 | 与 `!step_complete` 并行无冲突 | ✅ |
+| ✅-9 | `!pipeline_status` 显示 git sync 状态行 | ✅ |
+| ✅-10 | git fetch 失败（网络问题）→ 静默跳过 | ✅ |
+| ✅-11 | 管线关闭后 git sync 停止 | ✅ |
+| ✅-12 | 兜底规则：任意新 commit → 推进 | ✅ |
+| ✅-13 | 匹配规则精度正确 | ✅ |
+| ✅-14 | `!step_complete` 无 `--output` → 自动取 SHA | ✅ |
+| ✅-15 | `!step_complete` 有 `--output` → 正常行为 | ✅ |
+| ✅-16 | ACK 超时不标 ❌ FAILED | ✅ |
+| ✅-17 | ACK + git + timeout 全超时 → 真正 FAILED | ✅ |
 
 ---
 
@@ -412,3 +409,4 @@ if expired and not acked:
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
 | v1.0 | 2026-07-02 | 初稿，基于 R65 需求文档 v1.0 ✅ |
+| v1.0 ✅（已归档） | 2026-07-02 | Step 6 ✅ 合并部署归档 — R65 管线完成 |
