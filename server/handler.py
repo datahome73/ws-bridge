@@ -14,6 +14,7 @@ from .audit import AuditLogger
 from .web_viewer import write_chat_log
 from . import task_store as ts
 from . import timeout_tracker  # R63 Phase 1: Step countdown
+from . import pipeline_sync as pps  # R65: Pipeline git sync
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
@@ -54,6 +55,9 @@ _ENABLE_R63_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
 _ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
 _step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
 # ── R63 Phase 5: End ──
+
+# ── R65: Git pipeline sync state ───────────────────────────────
+_GIT_SYNC_TASK: asyncio.Task | None = None
 
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
@@ -1221,6 +1225,179 @@ def _ensure_watchdog() -> None:
                 WATCHDOG_SCAN_INTERVAL, WATCHDOG_REALERT_INTERVAL)
 
 
+# ── R65 A2: Git sync lifecycle ──────────────────────────────────
+
+
+def _ensure_git_scan() -> None:
+    """在 handler 初始化时调用一次。启动 git sync 定时循环。"""
+    global _GIT_SYNC_TASK
+    if not config.ENABLE_GIT_SYNC:
+        logger.info("[R65] Git sync 已禁用（ENABLE_GIT_SYNC=false）")
+        return
+    if _GIT_SYNC_TASK is None or _GIT_SYNC_TASK.done():
+        _GIT_SYNC_TASK = asyncio.create_task(_start_git_sync_loop())
+        logger.info("[R65] Git sync watchdog 已启动（interval=%ds）", config.GIT_SYNC_INTERVAL)
+
+
+async def _start_git_sync_loop():
+    """独立的 git 同步定时循环，每 GIT_SYNC_INTERVAL 秒执行一次。"""
+    while True:
+        await asyncio.sleep(config.GIT_SYNC_INTERVAL)
+        try:
+            await _pipeline_git_sync_scan()
+        except Exception as e:
+            logger.warning("[R65] git_sync_scan error: %s", e)
+
+
+async def _pipeline_git_sync_scan():
+    """遍历所有活跃管线，检查 git 同步。"""
+    for pid, pstate in list(_PIPELINE_STATE.items()):
+        if not pstate.get("active"):
+            continue
+        if not config.ENABLE_GIT_SYNC:
+            continue
+
+        # 从 _PIPELINE_CONFIG 读取管线专属配置
+        pconfig = _PIPELINE_CONFIG.get(pid, {})
+        sync_config = {
+            "branch": pconfig.get("git_sync_branch", config.GIT_SYNC_BRANCH),
+            "repo_path": pconfig.get("repo_path", config.REPO_PATH),
+            "last_sha": pstate.get("last_output_sha", ""),
+            "fallback_enabled": config.GIT_SYNC_FALLBACK,
+        }
+
+        syncer = pps.PipelineGitSync(pid, sync_config)
+        result = await syncer.sync()
+        if result and result.get("synced"):
+            await _auto_advance_pipeline(pid, result)
+            pstate["_last_git_sync_ts"] = time.time()
+# ── R65 A2: End ──
+
+
+async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
+    """Git sync 检测到新产出后自动推进状态机。
+
+    Args:
+        round_name: 管线标识
+        result: PipelineGitSync.sync() 返回值
+
+    Returns:
+        广播消息文本。
+    """
+    pstate = _PIPELINE_STATE.get(round_name)
+    if not pstate:
+        return ""
+
+    step_config = _load_step_config()
+    current_step = pstate.get("current_step", "")
+    if not current_step:
+        return ""
+
+    # 获取当前 Step 在 step_config 中的索引
+    step_keys = sorted(step_config.keys(), key=_step_sort_key)
+    try:
+        idx = step_keys.index(current_step)
+    except ValueError:
+        return ""
+
+    if idx + 1 >= len(step_keys):
+        return ""  # 已是最后一步
+
+    next_step = step_keys[idx + 1]
+    new_sha = result.get("new_sha", "")
+
+    # 1. 状态机推进
+    pstate["current_step"] = next_step
+    pstate["last_output_sha"] = new_sha
+    # 更新 Task state
+    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+    for t in tasks:
+        if t.get("name") == current_step and t.get("state") != p.TaskState.COMPLETED.value:
+            await _cmd_task_update("系统", {
+                "_positional": [t["id"]],
+                "state": p.TaskState.COMPLETED.value,
+                "output": new_sha,
+            })
+        if t.get("name") == next_step and t.get("state") == p.TaskState.PENDING.value:
+            await _cmd_task_update("系统", {
+                "_positional": [t["id"]],
+                "state": p.TaskState.WORKING.value,
+            })
+
+    # 2. 清理旧 ACK FAILED 标记
+    old_ack_key = f"{round_name}/{current_step}"
+    if old_ack_key in _step_ack_states:
+        if _step_ack_states[old_ack_key].get("state") == "FAILED":
+            _step_ack_states.pop(old_ack_key, None)
+            logger.info("[R65] 清除 %s 的 FAILED 标记（git sync 发现新产出）", old_ack_key)
+
+    # 3. 广播自动同步消息
+    ws_id = pstate.get("ws_id", "")
+    commit_short = new_sha[:7] if new_sha else "?"
+    mode = result.get("mode", "auto")
+    mode_label = "" if mode == "default" else f"（{mode} 匹配）"
+
+    msg = (
+        f"💻 {round_name} {current_step} → {next_step} 已自动同步\n"
+        f"  commit: {commit_short}{mode_label}\n"
+        f"→ @{next_step} 到你了！"
+    )
+
+    if ws_id:
+        pm_name = config.PIPELINE_PM_NAME
+        _persist_broadcast(ws_id, pm_name, msg)
+        payload = json.dumps({
+            "type": "broadcast", "channel": ws_id,
+            "from_name": pm_name, "from": pm_name,
+            "content": msg, "ts": time.time(),
+        })
+        ws_obj = ws_mod.get_workspace(ws_id)
+        if ws_obj:
+            for member_id in ws_obj.members:
+                for conn in list(_connections.get(member_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(payload)
+                    except Exception:
+                        pass
+
+    # 4. 点名下一角色（复用 R63 @role_name → @bot_name 机制）
+    next_role = step_config[next_step].get("role", "")
+    if next_role:
+        cards = _load_agent_cards()
+        ws_obj = ws_mod.get_workspace(ws_id) if ws_id else None
+        if ws_obj and cards:
+            matched = _find_agents_by_role(next_role, ws_obj.members, cards)
+            users = auth.get_users()
+            for aid in matched:
+                name = users.get(aid, {}).get("name", aid[:12])
+                mention = f"@{name} 🏗️ {round_name} {next_step} 到你了！"
+                mention_payload = json.dumps({
+                    "type": "broadcast", "channel": ws_id,
+                    "from_name": pm_name, "from": pm_name,
+                    "content": mention, "ts": time.time(),
+                })
+                for conn in list(_connections.get(aid, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(mention_payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(mention_payload)
+                    except Exception:
+                        pass
+
+    # 5. 启动下一 Step timeout_tracker 倒计时
+    if _ENABLE_R63_TIMEOUT:
+        timeout_min = step_config.get(next_step, {}).get("timeout_minutes", 20)
+        timeout_tracker.start_timer(round_name, next_step, timeout_min)
+
+    logger.info("[R65] 管线 %s 已自动推进：%s → %s (sha=%s)",
+                round_name, current_step, next_step, commit_short)
+    return msg
+
+
 async def _watchdog_loop() -> None:
     """Background watchdog loop — scans all active pipelines every 10 min."""
     try:
@@ -1363,18 +1540,65 @@ ACK_TIMEOUT_SEC = 30  # Seconds from SENT to FAILED
 async def _ack_timeout_task(ack_key: str) -> None:
     """30-second ACK timeout detection.
 
-    If no ACK received within timeout, marks state as FAILED
-    and triggers PM escalation.
+    If no ACK received within timeout, marks state as ack_timeout
+    (not FAILED) — waits for git sync to detect new output instead.
 
-    Args:
-        ack_key: Key in _step_ack_states (format: "{round}/{step}").
+    R65 C1: ACK 超时不标记 FAILED，改为 ack_timeout 等待标记。
+    只有当 git sync + timeout_tracker 都无产出时才标记真正 FAILED。
     """
     await asyncio.sleep(ACK_TIMEOUT_SEC)
     state = _step_ack_states.get(ack_key, {})
     if state.get("state") in ("SENT", "DELIVERED"):
-        state["state"] = "FAILED"
-        logger.info("ACK timeout: %s (agent=%s)", ack_key, state.get("agent_id", "?"))
-        await _trigger_ack_escalation(ack_key, state)
+        # ── R65 C1: ACK 超时 → 标记 ack_timeout（不标 FAILED）──
+        state["state"] = "ack_timeout"
+        logger.info("[R65 C1] ACK 超时: %s (agent=%s) — 等待 git 产出，不标 FAILED",
+                    ack_key, state.get("agent_id", "?"))
+        # 仅发送信息性消息，不触发 escalation
+        await _send_ack_timeout_info(ack_key, state)
+
+
+async def _send_ack_timeout_info(ack_key: str, state: dict) -> str:
+    """ACK 超时信息通知（非告警）。"""
+    parts = ack_key.split("/", 1)
+    round_name = parts[0] if len(parts) > 0 else "?"
+    step_name = parts[1] if len(parts) > 1 else "?"
+    agent_id = state.get("agent_id", "")
+    display_name = _get_agent_display(agent_id) if agent_id else "未知"
+
+    info = (
+        f"⏰ [ACK 未响应] {round_name} {step_name}\n"
+        f"  目标: {display_name} — 30s 内未回复 ACK\n"
+        f"  状态: ⚠️ 等待 git 产出（不标记失败）\n"
+        f"  Git sync 将自动检测并推进"
+    )
+
+    # 广播到工作室
+    for rname, pstate in _PIPELINE_STATE.items():
+        if rname == round_name:
+            ws_id = pstate.get("ws_id", "")
+            if ws_id:
+                pm_name = config.PIPELINE_PM_NAME
+                _persist_broadcast(ws_id, pm_name, info)
+                payload = json.dumps({
+                    "type": "broadcast", "channel": ws_id,
+                    "from_name": pm_name, "from": pm_name,
+                    "content": info, "ts": time.time(),
+                })
+                ws_obj = ws_mod.get_workspace(ws_id)
+                if ws_obj:
+                    for member_id in ws_obj.members:
+                        for conn in list(_connections.get(member_id, set())):
+                            try:
+                                if hasattr(conn, "send_str"):
+                                    await conn.send_str(payload)
+                                elif hasattr(conn, "send"):
+                                    await conn.send(payload)
+                            except Exception:
+                                pass
+            break
+
+    logger.info("[R65 C1] ACK 超时信息: %s (target=%s)", ack_key, display_name)
+    return info
 
 
 async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
@@ -1938,6 +2162,31 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         return "❌ 用法：!step_complete <step_name> [--output <commit/file>]"
     step_name = positional[0].lower()
     output_ref = params.get("output", "")
+
+    # ── R65 B1: Auto-detect SHA when --output is missing ──
+    if not output_ref and config.ENABLE_GIT_SYNC:
+        try:
+            branch = config.GIT_SYNC_BRANCH
+            proc = await asyncio.create_subprocess_exec(
+                "git", "log", "-1", "--format=%H", f"origin/{branch}",
+                cwd=config.REPO_PATH,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            if proc.returncode == 0:
+                sha = stdout.decode().strip()
+                if sha:
+                    output_ref = sha
+                    logger.info("[R65 B1] 自动检测最新 SHA: %s", sha)
+            else:
+                logger.warning("[R65 B1] git log 失败: %s", stderr.decode().strip())
+        except Exception as e:
+            logger.warning("[R65 B1] 自动检测 SHA 异常: %s", e)
+    # ── R65 B1: End ──
+
+    if not output_ref:
+        return "❌ 缺少 --output <sha>，且无法自动检测最新 commit"
 
     sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
     ws_obj = ws_mod.get_workspace(sender_ch)
@@ -2947,6 +3196,19 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                 backup_suffix = "（备用接替）"
             lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}{notify_mark}")
 
+        # ── R65 A4: Git sync status line ──
+        if config.ENABLE_GIT_SYNC and _GIT_SYNC_TASK is not None:
+            last_sync_ts = pstate.get("_last_git_sync_ts", 0)
+            if last_sync_ts:
+                delta = int(time.time() - last_sync_ts)
+                sync_display = f"{delta}s 前" if delta < 120 else f"{delta // 60}m 前"
+            else:
+                sync_display = "—"
+            pconfig = _PIPELINE_CONFIG.get(round_name, {})
+            branch = pconfig.get("git_sync_branch", config.GIT_SYNC_BRANCH) if _PIPELINE_CONFIG.get(round_name, {}) else config.GIT_SYNC_BRANCH
+            lines.append(f"  🔄 Git 同步: 启用 ✅（最后检查: {sync_display}, {branch}）")
+        # ── R65 A4: End ──
+
     if not lines:
         return "📊 当前无活跃管线"
     # ── R62: --verbose / --dump: show _PIPELINE_CONFIG summary ──
@@ -3498,6 +3760,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     _ensure_watchdog()
     # R49 C: Restore pipeline timers on start
     _restore_pipeline_timers()
+    # ── R65 A2: Start git sync loop ──
+    _ensure_git_scan()
 
     content = msg.get("content", "")
     channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
