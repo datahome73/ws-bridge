@@ -13,6 +13,7 @@ from . import workspace as ws_mod
 from .audit import AuditLogger
 from .web_viewer import write_chat_log
 from . import task_store as ts
+from . import timeout_tracker  # R63 Phase 1: Step countdown
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
@@ -45,6 +46,14 @@ _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws
 
 # ── R62: Pipeline config (read-only, separate from runtime state) ──
 _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
+
+# ── R63 Phase 2-4: Feature toggle switches (env overridable) ─────
+_ENABLE_R63_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
+_ENABLE_R63_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
+_ENABLE_R63_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
+_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
+_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
+# ── R63 Phase 5: End ──
 
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
@@ -476,6 +485,7 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
             return "❌ 权限不足：你不是该工作室的管理员"
     reason = params.get("reason", "管理操作")
     ws_mod.force_close(ws_id)
+    timeout_tracker.reset()
     return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
 
 
@@ -923,6 +933,91 @@ def _find_agents_by_role(role: str, member_ids: list[str], cards: dict) -> list[
     ]
 
 
+# ── R63 Phase 3: Role-agent mapping ────────────────────────────────
+
+
+def _refresh_role_agent_map() -> None:
+    """Rebuild _ROLE_AGENT_MAP from Agent Card pipeline_roles.
+
+    Called on:
+    - Agent card registration / update
+    - !agent_role_map --refresh command
+    - Handler initialization (load_cards)
+    """
+    global _ROLE_AGENT_MAP
+    cards = _load_agent_cards()
+    _ROLE_AGENT_MAP = {}
+    for aid, card in cards.items():
+        roles = card.get("pipeline_roles", [])
+        for role in roles:
+            if role not in _ROLE_AGENT_MAP:
+                _ROLE_AGENT_MAP[role] = []
+            if aid not in _ROLE_AGENT_MAP[role]:
+                _ROLE_AGENT_MAP[role].append(aid)
+    logger.info("R63 role-agent map refreshed: %d roles, %d entries",
+                len(_ROLE_AGENT_MAP),
+                sum(len(v) for v in _ROLE_AGENT_MAP.values()))
+
+
+def _get_agents_by_role(role: str,
+                        workspace_members: list[str] = None) -> list[str]:
+    """Find agents by pipeline role.
+
+    Priority chain:
+    1. _ROLE_AGENT_MAP (from Agent Card pipeline_roles)
+    2. Fallback: auth.get_users().role (legacy compat)
+    3. Optional: filter by workspace_members
+
+    Args:
+        role: Pipeline role name (arch/dev/review/qa/admin).
+        workspace_members: Optional list of member IDs to filter by.
+
+    Returns:
+        List of matching agent IDs.
+    """
+    agents = _ROLE_AGENT_MAP.get(role, [])
+    if not agents:
+        # Fallback to auth roles
+        users = auth.get_users()
+        agents = [aid for aid, u in users.items()
+                  if u.get("role", "member") == role]
+    if workspace_members:
+        agents = [a for a in agents if a in workspace_members]
+    return agents
+
+
+async def _handle_rollcall_ack(sender_id: str, content: str,
+                                ws_id: str) -> None:
+    """Handle rollcall response → auto-register/update Agent Card.
+
+    R63 Phase 3: When agent replies to rollcall, register or update card.
+
+    Args:
+        sender_id: Agent ID who replied.
+        content: Message content (checked for ack keywords).
+        ws_id: Workspace ID (for context, unused in registration).
+    """
+    cards = _load_agent_cards()
+    users = auth.get_users()
+    u = users.get(sender_id, {})
+    name = u.get("name", sender_id[:12])
+    role = u.get("role", "member")
+
+    if sender_id in cards:
+        # Update existing card
+        cards[sender_id]["last_online"] = time.time()
+        cards[sender_id]["status"] = "online"
+    else:
+        # Smart register
+        from . import agent_card as ac_mod
+        ac_mod.register_agent(sender_id, name, role)
+        logger.info("R63 auto-registered agent from rollcall: %s (%s)", sender_id, name)
+
+    _save_agent_cards(cards)
+    _refresh_role_agent_map()
+# ── R63 Phase 3: End ──
+
+
 # ── R42: Pipeline helpers ──────────────────────────────────────────
 
 
@@ -1152,6 +1247,29 @@ async def _watchdog_scan() -> None:
         if not step_name:
             continue
 
+        ws_id = pstate.get("ws_id", "")
+
+        # ── R63 Phase 2: Use timeout_tracker if enabled ──
+        if _ENABLE_R63_TIMEOUT:
+            if not timeout_tracker.is_expired(round_name, step_name):
+                continue  # Not yet expired, skip
+
+            # Check dedup — only alert if not already notified
+            timer_info = timeout_tracker.get_timer_info(round_name, step_name)
+            if timer_info and timer_info.get("notified"):
+                continue  # Already notified, skip
+
+            # Mark notified and send alert
+            if timer_info is not None:
+                timer_info["notified"] = True
+            await _trigger_timeout_escalation(round_name, step_name, ws_id=ws_id)
+
+            # Also mark in old watchdog_alerts for backward compat
+            key = f"{round_name}/{step_name}"
+            _watchdog_alerts[key] = now
+            continue
+        # ── R63 Phase 2: End timeout_tracker path ──
+
         # Calculate elapsed time
         started_at = pstate.get("started_at", now)
         elapsed_hours = (now - started_at) / 3600.0
@@ -1183,6 +1301,191 @@ def _get_step_timeout(step_name: str) -> float:
     if step_info and "timeout_hours" in step_info:
         return float(step_info["timeout_hours"])
     return float(_STEP_TIMEOUT_DEFAULTS.get(step_name, float("inf")))
+
+
+# ── R63 Phase 2: Timeout escalation ─────────────────────────────
+
+
+async def _trigger_timeout_escalation(round_name: str, step_name: str,
+                                       ws_id: str = "") -> str:
+    """超时触发 → 工作室 @PM + _admin 频道告警 (R63 Phase 2).
+
+    Args:
+        round_name: Pipeline round name (e.g. "R63").
+        step_name: Step key (e.g. "step2").
+        ws_id: Workspace ID for broadcasting alert.
+
+    Returns:
+        Alert message string.
+    """
+    step_cfg = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {}).get(step_name, {})
+    timeout_mins = step_cfg.get("timeout_minutes", 15)
+    remaining = timeout_tracker.get_remaining(round_name, step_name)
+    over_by = max(0, int(timeout_mins * 60 - remaining))
+
+    alert = (
+        f"⏰ [超时告警] {round_name} {step_name}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"⏱ 预期完成时间: {timeout_mins}分钟\n"
+        f"🕐 已超时: {over_by // 60}分{over_by % 60}秒\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"请 @PM 协调：是否跳过 / 换人 / 手动干预"
+    )
+
+    if ws_id:
+        pm_name = config.PIPELINE_PM_NAME
+        _persist_broadcast(ws_id, pm_name, alert)
+        payload = json.dumps({
+            "type": "broadcast", "channel": ws_id,
+            "from_name": pm_name, "from": pm_name,
+            "content": alert, "ts": time.time(),
+        })
+        ws_obj = ws_mod.get_workspace(ws_id)
+        if ws_obj:
+            for member_id in ws_obj.members:
+                for conn in list(_connections.get(member_id, set())):
+                    try:
+                        if hasattr(conn, "send_str"):
+                            await conn.send_str(payload)
+                        elif hasattr(conn, "send"):
+                            await conn.send(payload)
+                    except Exception:
+                        pass
+    return alert
+# ── R63 Phase 2: End ──
+
+
+# ── R63 Phase 4: ACK state machine ──────────────────────────────
+
+ACK_TIMEOUT_SEC = 30  # Seconds from SENT to FAILED
+
+
+async def _ack_timeout_task(ack_key: str) -> None:
+    """30-second ACK timeout detection.
+
+    If no ACK received within timeout, marks state as FAILED
+    and triggers PM escalation.
+
+    Args:
+        ack_key: Key in _step_ack_states (format: "{round}/{step}").
+    """
+    await asyncio.sleep(ACK_TIMEOUT_SEC)
+    state = _step_ack_states.get(ack_key, {})
+    if state.get("state") in ("SENT", "DELIVERED"):
+        state["state"] = "FAILED"
+        logger.info("ACK timeout: %s (agent=%s)", ack_key, state.get("agent_id", "?"))
+        await _trigger_ack_escalation(ack_key, state)
+
+
+async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
+    """ACK timeout → PM escalation alert.
+
+    Args:
+        ack_key: Key in _step_ack_states.
+        state: Current state dict.
+
+    Returns:
+        Alert message string.
+    """
+    parts = ack_key.split("/", 1)
+    round_name = parts[0] if len(parts) > 0 else "?"
+    step_name = parts[1] if len(parts) > 1 else "?"
+    agent_id = state.get("agent_id", "")
+    display_name = _get_agent_display(agent_id) if agent_id else "未知"
+
+    alert = (
+        f"🕐 [ACK 超时] {round_name} {step_name}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🎯 目标: {display_name}\n"
+        f"📨 状态: {state.get('state', 'UNKNOWN')}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"请 @PM 协调：等待 / 换备用 / 手动驱动 / 跳过"
+    )
+
+    # Broadcast to workspace if available
+    for rname, pstate in _PIPELINE_STATE.items():
+        if rname == round_name:
+            ws_id = pstate.get("ws_id", "")
+            if ws_id:
+                pm_name = config.PIPELINE_PM_NAME
+                _persist_broadcast(ws_id, pm_name, alert)
+                payload = json.dumps({
+                    "type": "broadcast", "channel": ws_id,
+                    "from_name": pm_name, "from": pm_name,
+                    "content": alert, "ts": time.time(),
+                })
+                ws_obj = ws_mod.get_workspace(ws_id)
+                if ws_obj:
+                    for member_id in ws_obj.members:
+                        for conn in list(_connections.get(member_id, set())):
+                            try:
+                                if hasattr(conn, "send_str"):
+                                    await conn.send_str(payload)
+                                elif hasattr(conn, "send"):
+                                    await conn.send(payload)
+                            except Exception:
+                                pass
+            break
+
+    logger.info("ACK escalation: %s (target=%s)", ack_key, display_name)
+    return alert
+
+
+def _update_step_ack_state(sender_id: str, content: str) -> None:
+    """Update _step_ack_states when bot responds in a workspace.
+
+    R63 Phase 4: Bot ACK detection — any message from a target agent
+    is treated as ACK. If content contains ack keywords, mark IN_PROGRESS.
+
+    Args:
+        sender_id: Agent ID who sent the message.
+        content: Message content (checked for ack keywords).
+    """
+    if not _ENABLE_R63_ACK:
+        return
+
+    ack_keywords = ["收到", "好的", "在", "到", "接", "OK", "ok", "开始", "done"]
+    is_ack = any(kw in content for kw in ack_keywords)
+
+    for ack_key, ack_state in _step_ack_states.items():
+        if ack_state.get("agent_id") == sender_id and ack_state["state"] in ("SENT", "DELIVERED"):
+            old_state = ack_state["state"]
+            if is_ack:
+                ack_state["state"] = "IN_PROGRESS"
+            else:
+                ack_state["state"] = "ACKNOWLEDGED"
+            logger.info("ACK updated: %s %s → %s (from %s)",
+                        ack_key, old_state, ack_state["state"], sender_id[:12])
+
+
+def _format_ack_status(ack_key: str) -> str:
+    """Format ACK state for pipeline_status display.
+
+    Args:
+        ack_key: Key in _step_ack_states.
+
+    Returns:
+        Formatted status string, or empty string if not tracked.
+    """
+    state = _step_ack_states.get(ack_key)
+    if not state:
+        return ""
+    s = state["state"]
+    elapsed = time.time() - state.get("sent_at", time.time())
+    if s == "SENT":
+        return f"📨 SENT → 等待 ACK ({int(elapsed)}秒)"
+    elif s == "DELIVERED":
+        return f"📬 DELIVERED → 等待 ACK ({int(elapsed)}秒)"
+    elif s == "ACKNOWLEDGED":
+        return f"✅ ACKNOWLEDGED ({int(elapsed)}秒确认)"
+    elif s == "IN_PROGRESS":
+        return f"🟢 IN_PROGRESS ({int(elapsed)}秒)"
+    elif s == "FAILED":
+        return f"❌ FAILED — 超时无响应"
+    return f"❓ {s}"
+
+
+# ── R63 Phase 4: End ──
 
 
 def _check_watchdog_alert(round_name: str, step_name: str) -> str | None:
@@ -1960,6 +2263,27 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if _clear_watchdog_alert(round_name, step_name):
         await _send_clear_alert(round_name, step_name, output_ref)
 
+    # ── R63 Phase 2: Step-complete → clear old timer, start next step timer ──
+    if _ENABLE_R63_TIMEOUT:
+        timeout_tracker.clear_timer(round_name)
+        _step_timeout_mins = _pconfig_s.get(next_step, {}).get("timeout_minutes",
+            int(step_config.get(next_step, {}).get("timeout_hours", 6) * 60))
+        timeout_tracker.start_timer(round_name, next_step, int(_step_timeout_mins))
+    # ── R63 Phase 2: End ──
+
+    # ── R63 Phase 4: Start ACK state machine for next step assignment ──
+    if _ENABLE_R63_ACK:
+        ack_key = f"{round_name}/{next_step}"
+        _step_ack_states[ack_key] = {
+            "state": "SENT",
+            "agent_id": primary_agent if 'primary_agent' in dir() and primary_agents else "",
+            "sent_at": time.time(),
+            "deadline": time.time() + 30,
+            "delivery_sent": 0,
+        }
+        asyncio.create_task(_ack_timeout_task(ack_key))
+    # ── R63 Phase 4: End ──
+
     # ── R53 D: Enhanced return value with ACK confirm ──
     # ── R55 F: Use targeted handoff result ──
     return (
@@ -2593,6 +2917,17 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                     task_state = "🔄"  # R55 B: rejected, needs rework
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
+            # ── R63 Phase 2: Countdown display on current step ──
+            if current and _ENABLE_R63_TIMEOUT:
+                remaining_str = timeout_tracker.format_remaining(round_name, step_key)
+                current += f" ({remaining_str})"
+            # ── R63 Phase 2: End countdown ──
+            # ── R63 Phase 4: ACK state display on current step ──
+            if current:
+                ack_status = _format_ack_status(f"{round_name}/{step_key}")
+                if ack_status:
+                    current += f" | {ack_status}"
+            # ── R63 Phase 4: End ──
             # ── R58 C3: Notification status display ──
             step_notifications = pstate.get("step_notifications", {})
             notify_info = step_notifications.get(step_key, {})
@@ -2812,6 +3147,96 @@ async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
     return "Reloaded agent cards: {0} records".format(count)
 
 
+# ── R63 Phase 3: Agent role map + card registration commands ─────
+
+
+async def _cmd_agent_role_map(sender_id: str, params: dict) -> str:
+    """展示当前角色↔Agent 映射表。
+    用法：!agent_role_map [--refresh]
+    """
+    if params.get("refresh"):
+        _refresh_role_agent_map()
+        cards = _load_agent_cards()
+        # Also rebuild from auth for roles not in cards
+        users = auth.get_users()
+        for aid, u in users.items():
+            role = u.get("role", "member")
+            if role and role != "member":
+                if role not in _ROLE_AGENT_MAP:
+                    _ROLE_AGENT_MAP[role] = []
+                if aid not in _ROLE_AGENT_MAP[role]:
+                    _ROLE_AGENT_MAP[role].append(aid)
+
+    lines = [f"📋 角色↔Agent 映射表 ({len(_ROLE_AGENT_MAP)} 个角色):"]
+    for role, agents in sorted(_ROLE_AGENT_MAP.items()):
+        names = []
+        for aid in agents:
+            display = _get_agent_display(aid)
+            online = "🟢" if aid in _connections and _connections[aid] else "🔴"
+            names.append(f"{online}{display}")
+        lines.append(f"  {role} → {' | '.join(names) if names else '(无)'}")
+
+    # Show unregistered roles
+    all_roles = {v.get("role") for v in auth.get_users().values()
+                 if v.get("role") and v.get("role") != "member"}
+    registered_roles = set(_ROLE_AGENT_MAP.keys())
+    unregistered = all_roles - registered_roles
+    if unregistered:
+        lines.append(f"  ⚠️ 未注册角色: {', '.join(sorted(unregistered))}")
+
+    return "\n".join(lines) if len(lines) > 1 else "📋 当前无角色映射"
+
+
+async def _cmd_agent_card_register(sender_id: str, params: dict) -> str:
+    """强制注册/更新 Agent Card。
+    用法：!agent_card register <agent_id> [--name <name>] [--role <role>]
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!agent_card register <agent_id> [--name <name>] [--role <role>]"
+    target_id = positional[0]
+    name = params.get("name", "")
+    role = params.get("role", "")
+
+    users = auth.get_users()
+    u = users.get(target_id, {})
+    if not name:
+        name = u.get("name", target_id[:12])
+    if not role:
+        role = u.get("role", "member")
+
+    from . import agent_card as ac_mod
+    card = ac_mod.register_agent(target_id, name, role, force=True)
+    _refresh_role_agent_map()
+    return (
+        f"✅ Agent Card 已注册：{target_id}\n"
+        f"  名称: {name}\n"
+        f"  角色: {role}\n"
+        f"  pipeline_roles: {card.get('pipeline_roles', [])}"
+    )
+
+
+async def _cmd_agent_card_auto_register(sender_id: str, params: dict) -> str:
+    """扫描所有在线 agent，自动补全缺失的 card。
+    用法：!agent_card auto-register
+    """
+    online_agents = list(_connections.keys())
+    users = auth.get_users()
+    name_map = {aid: users.get(aid, {}).get("name", aid[:12]) for aid in online_agents}
+    role_map = {aid: users.get(aid, {}).get("role", "member") for aid in online_agents}
+
+    from . import agent_card as ac_mod
+    count = ac_mod.auto_register_missing(online_agents, name_map, role_map)
+    _refresh_role_agent_map()
+
+    if count:
+        return f"✅ 自动注册了 {count} 个 Agent Card\n  !agent_role_map 查看最新映射表"
+    return "✅ 所有在线 Agent 已有 Card，无需注册"
+
+
+# ── R63 Phase 3: End ──
+
+
 # ── R35: Admin command registry ──────────────────────────────────
 
 _ADMIN_COMMANDS: dict[str, dict] = {
@@ -2901,6 +3326,20 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "handler": _cmd_agent_card_reload, "min_role": 3, "workspace_scope": True,
         "usage": "!agent_card reload",
     },
+    # ── R63 Phase 3: Agent role map + card registration ──
+    "agent_role_map": {
+        "handler": _cmd_agent_role_map, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_role_map [--refresh]",
+    },
+    "agent_card_register": {
+        "handler": _cmd_agent_card_register, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card register <agent_id> [--name <name>] [--role <role>]",
+    },
+    "agent_card_auto_register": {
+        "handler": _cmd_agent_card_auto_register, "min_role": 3, "workspace_scope": True,
+        "usage": "!agent_card auto-register",
+    },
+    # ── R63 Phase 3: End ──
 # ── R41 D: Roll-call commands ──
     "rollcall_role": {
         "handler": _cmd_rollcall_role, "min_role": 3, "workspace_scope": True,
@@ -3105,6 +3544,17 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         if event and not event.is_set():
             event.set()
             logger.info("R57 rollcall ACK from %s (%s)", sender_id[:12], sender_name)
+
+    # ── R63 Phase 3: Rollcall auto-register ──
+    # If in a workspace, try to register/update agent card on response
+    if channel.startswith(p.WORKSPACE_ID_PREFIX) or channel.startswith("ws:"):
+        try:
+            await _handle_rollcall_ack(sender_id, content, channel)
+        except Exception:
+            pass
+
+    # ── R63 Phase 4: Bot ACK detection for step assignment ──
+    _update_step_ack_state(sender_id, content)
 
     # ── R26 P0: 📢 broadcast admin-only check ──
     if content.startswith("📢") and sender_role != "admin":
