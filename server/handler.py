@@ -485,6 +485,7 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
             return "❌ 权限不足：你不是该工作室的管理员"
     reason = params.get("reason", "管理操作")
     ws_mod.force_close(ws_id)
+    timeout_tracker.reset()
     return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
 
 
