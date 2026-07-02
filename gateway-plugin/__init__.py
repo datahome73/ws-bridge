@@ -130,7 +130,8 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._bot_name = extra.get("bot_name") or _env("BOT_NAME") or "Hermes"
         self._role = extra.get("role") or "member"
         self._mention_mode = bool(extra.get("mention_mode", False))
-        self._mention_keyword = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or "admin-bot"
+        raw = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or "admin-bot"
+        self._mention_keywords = [kw.strip() for kw in raw.split(";") if kw.strip()]
         self._last_msg_ts: float = 0.0
         self._active_channel: str = "lobby"
 
@@ -356,16 +357,19 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
             # Mention mode: only respond when keyword present
             if self._mention_mode:
-                if self._mention_keyword not in content:
+                if not any(kw in content for kw in self._mention_keywords):
                     logger.warning(
-                        "[WSBridge] Silent: no mention keyword '%s'", self._mention_keyword
+                        "[WSBridge] Silent: no mention keyword in %s",
+                        self._mention_keywords,
                     )
                     return
 
-            # Strip mention prefix if present
+            # Strip mention prefix if present — try each keyword (longest first)
             text = content
-            if text.startswith(self._mention_keyword):
-                text = text[len(self._mention_keyword):].strip()
+            for kw in sorted(self._mention_keywords, key=len, reverse=True):
+                if text.startswith(kw):
+                    text = text[len(kw):].strip()
+                    break
 
             await self._process_inbound_message(text, msg)
 
@@ -431,7 +435,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
     def _determine_channel(self, content: str, context_channel: str) -> str:
         """Determine channel: @admin goes to lobby, others use active channel."""
-        if "@admin" in content or f"@{self._mention_keyword}" in content:
+        if "@admin" in content or any(f"@{kw}" in content for kw in self._mention_keywords):
             return "lobby"
         return self._active_channel or "lobby"
 
