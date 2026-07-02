@@ -17,12 +17,12 @@ ws-bridge 的每个 bot 容器通过 Gateway 插件连接，配置了 `mention_k
 
 | Bot | 角色 | 当前 mention_keyword | 问题 |
 |:---|:----|:---------------------|:----|
-| 🟣 爱泰 | dev | `爱泰` | `@dev` 点名不触发 |
-| 🔵 小开 | arch | `小开` | `@arch` 点名不触发 |
-| 🟢 小周 | review | `小周` | `@review` 点名不触发 |
-| 🟡 小爱 | admin | `小爱` | `@admin` 点名不触发 |
-| 🟠 泰虾 | qa | TG 通道（无 Gateway mention_keyword） | PM 需通过 TG DM 点名，`@qa` 无法直接触发 |
-| 🔴 小谷 | PM | Hermes Agent（无 Gateway mention_keyword） | `@PM` 点名由 handler.py 解析，不经过 Gateway 触发链 |
+| 🟣 Dev bot | dev | `爱泰` | `@dev` 点名不触发 |
+| 🔵 Arch bot | arch | `小开` | `@arch` 点名不触发 |
+| 🟢 Review bot | review | `小周` | `@review` 点名不触发 |
+| 🟡 Admin bot | admin | `小爱` | `@admin` 点名不触发 |
+| 🟠 QA bot | qa | TG 通道（无 Gateway mention_keyword） | PM 需通过 TG DM 点名，`@qa` 无法直接触发 |
+| 🔴 PM | PM | Hermes Agent（无 Gateway mention_keyword） | `@PM` 点名由 handler.py 解析，不经过 Gateway 触发链 |
 
 **R63 实战暴露的断裂场景：**
 
@@ -165,24 +165,17 @@ for kw in self._mention_keywords:
 
 #### A5 — 高频词去重（可选优化）
 
-如果 `_mention_keywords` 长度超过 10 时，触发检查的 `any(kw in content for kw in ...)` 可能带来性能压力。但当前 4 个 bot 各配 2 个词 → 总长不超过 6，**不需要优化**。
+如果 `_mention_keywords` 长度超过 10 时，触发检查的 `any(kw in content for kw in ...)` 可能带来性能压力。但当前各 bot 各配 2 个词 → 总长不超过 6，**不需要优化**。
 
 ---
 
 ### 方向 B（建议）：配置更新 🟡 P2
 
-**目标：** 各 bot 自查自调，将自身配置更新为「bot 名 + 角色名」双触发词。
+**目标：** 各 Gateway bot 自查自调，将自身 `mention_keyword` 更新为「bot 名 + 角色名」双触发词（如 `"bot名;角色名"`）。
 
-**这是各 bot 的自主配置行为，非代码层改动。** 部署新版 Gateway 插件后，各 bot 自行修改各自容器的 `config.yaml` 中 `mention_keyword` 配置（或环境变量 `MENTION_KEYWORD`），然后重启容器生效。
+**这是各 bot 的自主配置行为，非代码层改动。** 部署新版 Gateway 插件后，各 bot 自行修改各自容器的 `config.yaml` 中 `mention_keyword` 配置（或环境变量 `MENTION_KEYWORD`），重启容器生效。
 
-| Bot | 角色 | mention_keyword 配置 | 说明 |
-|:---|:----|:---------------------|:-----|
-| 🟣 爱泰 | dev | `"爱泰;dev"` | Gateway bot，改 `config.yaml` |
-| 🔵 小开 | arch | `"小开;arch"` | Gateway bot，改 `config.yaml` |
-| 🟢 小周 | review | `"小周;review"` | Gateway bot，改 `config.yaml` |
-| 🟡 小爱 | admin | `"小爱;admin"` | Gateway bot，改 `config.yaml` |
-| 🟠 泰虾 | qa | **不适用**（TG 通道 bot） | 无 Gateway mention_keyword，PM 通过 TG DM 点名 |
-| 🔴 小谷 | PM | **不适用**（Hermes Agent） | 无 Gateway mention_keyword，`@PM` 由 handler.py 解析 |
+> **管线调度说明：** PM 在 `!pipeline_start` 启动工作室后，先开一个「配置通知晨会」——在工作室中逐个 @通知 各 Gateway bot 告知需调整的触发词配置。确认全部就绪后，再继续后续 Step（方案设计 → 编码 → 审查 → 测试）。具体 bot 名称和角色对应关系不下沉到需求文档，由 PM 在工作室通知中传达。
 
 ---
 
@@ -205,27 +198,25 @@ for kw in self._mention_keywords:
 | ✅-1 | 单值 `mention_keyword: "小开"` → `["小开"]` | 零行为变化 | 单元测试 `split(";")` |
 | ✅-2 | 多值 `mention_keyword: "小开;arch"` → `["小开", "arch"]` | 两个词均生效 | 单元测试 |
 | ✅-3 | 前后空格被 trim：`" 小开 ; arch "` → `["小开", "arch"]` | 健壮解析 | 单元测试 |
-| ✅-4 | `@小开 收到` → `"小开"` 匹配 → 触发 | bot 回复 | 实测 |
-| ✅-5 | `@arch 收到` → `"arch"` 匹配 → 触发（小开回复） | bot 回复 | 实测 |
-| ✅-6 | `@dev 编码` → `"dev"` 匹配 → 触发（爱泰回复） | bot 回复 | 实测 |
+| ✅-4 | `@角色名 收到` → 角色名匹配 → 对应 bot 触发 | bot 回复 | 实测 |
+| ✅-5 | `@角色英文名 收到` → 英文角色名匹配 → 对应 bot 触发 | bot 回复 | 实测 |
+| ✅-6 | 另一角色的英文名触发另一 bot | 对应 bot 回复 | 实测 |
 | ✅-7 | 内容不含任何 trigger keyword → 静默不触发 | 不回复、日志 silent | 实测 |
-| ✅-8 | 前缀剥离：`小开 收到` → 剥离 `小开` → 处理 `收到` | 消息去掉触发词前缀 | 实测 |
-| ✅-9 | 前缀剥离：`arch 方案` → 剥离 `arch` → 处理 `方案` | 同上 | 实测 |
-| ✅-10 | 前缀剥离长词优先：`小开发布` → `小开` 匹配（非 `小`） | 长词优先剥离 | 单元测试 |
-| ✅-11 | `@小开` 路由到 lobby（`_determine_channel` 正确） | 与改造前一致 | 实测 |
-| ✅-12 | `@arch` 路由到 lobby | `@arch` 视为 `@小开` 同等 | 实测 |
-| ✅-13 | 环境变量 `MENTION_KEYWORD="小爱;admin"` 可覆盖配置 | 多值受支持 | 实测 |
+| ✅-8 | 前缀剥离：`bot名 收到` → 剥离 bot 名 → 处理 `收到` | 消息去掉触发词前缀 | 实测 |
+| ✅-9 | 前缀剥离：`角色名 内容` → 剥离角色名 → 处理 `内容` | 同上 | 实测 |
+| ✅-10 | 前缀剥离长词优先：长触发词优先于短触发词 | 长词优先剥离 | 单元测试 |
+| ✅-11 | `@bot名` 路由到 lobby | 与改造前一致 | 实测 |
+| ✅-12 | `@角色英文名` 路由到 lobby | 视为 `@bot名` 同等 | 实测 |
+| ✅-13 | 环境变量 `MENTION_KEYWORD="bot名;角色名"` 可覆盖配置 | 多值受支持 | 实测 |
 
-### 🎯 3.2 方向 B（配置更新 — 各 bot 自查自调）
+### 🎯 3.2 方向 B（配置更新 — PM 工作室通知）
 
-| # | 检查项 | 责任方 |
-|:-:|:-------|:-------|
-| ✅-14 | 爱泰自查：`mention_keyword` 是否已配置为 `"爱泰;dev"` | 爱泰 |
-| ✅-15 | 小开自查：`mention_keyword` 是否已配置为 `"小开;arch"` | 小开 |
-| ✅-16 | 小周自查：`mention_keyword` 是否已配置为 `"小周;review"` | 小周 |
-| ✅-17 | 小爱自查：`mention_keyword` 是否已配置为 `"小爱;admin"` | 小爱 |
-| ✅-18 | 泰虾确认：TG 通道无 mention_keyword，接受 PM 通过 TG DM 点名 | 泰虾 |
-| ✅-19 | 小谷确认：Hermes Agent 无 mention_keyword，`@PM` 由 handler 解析 | 小谷 |
+| # | 检查项 |
+|:-:|:-------|
+| ✅-14 | PM 在工作室中逐个 @通知 各 Gateway bot 告知新的触发词配置 |
+| ✅-15 | 各 Gateway bot 收到通知后自查确认 |
+| ✅-16 | 非 Gateway bot（TG 通道 / Hermes Agent）确认自身工作模式 |
+| ✅-17 | 全部确认后 PM 记录「配置就绪」，继续后续 Step |
 
 ---
 
