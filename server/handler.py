@@ -507,6 +507,17 @@ async def _cmd_list_workspaces(sender_id: str, params: dict) -> str:
     for w in visible:
         status_icon = {"active": "🟢", "closing": "🟡", "archived": "⚫"}.get(
             w.state.value if hasattr(w.state, 'value') else str(w.state), "⚪")
+
+    # ── R66 B4: Display step outputs in status ──
+    step_outputs = pstate.get("step_outputs", {})
+    if step_outputs:
+        lines.append("  📦 Step 产出:")
+        for out_step_key, out_info in sorted(step_outputs.items(), key=lambda x: _step_sort_key(x[0])):
+            sha = out_info.get("sha", "")[:7]
+            desc = out_info.get("output_desc", "")
+            if sha or desc:
+                lines.append(f"    {out_step_key}: {sha}" + (" — " + desc if desc else ""))
+
         lines.append(f"  {status_icon} {w.id} \"{w.name}\" ({len(w.members)}人)")
     return "\n".join(lines)
 
@@ -1166,6 +1177,77 @@ def _load_step_config() -> dict[str, dict]:
     return _r42cfg.PIPELINE_STEP_MAP
 
 
+
+def _get_step_config(round_name: str) -> dict[str, dict]:
+    """Unified step config reader: prefer frontmatter, fallback to legacy."""
+    pconfig = _PIPELINE_CONFIG.get(round_name, {})
+    psteps = pconfig.get("steps", {})
+    if psteps:
+        return psteps
+    return _build_fallback_steps(round_name)
+
+
+def _build_fallback_steps(round_name: str) -> dict[str, dict]:
+    """Build fallback steps from PIPELINE_STEP_MAP, syncing primary/backup."""
+    step_map = config.PIPELINE_STEP_MAP
+    steps = {}
+    for step_key, step_cfg in step_map.items():
+        if step_key == "step1":
+            continue
+        steps[step_key] = {
+            "role": step_cfg.get("role", ""),
+            "title": step_cfg.get("name", step_key),
+            "primary": step_cfg.get("primary"),
+            "backup": step_cfg.get("backup"),
+            "context": {
+                "requirements_url": _get_requirements_url(round_name),
+                "work_plan_url": _get_work_plan_url(round_name),
+            },
+            "output_desc": "",
+            "feedback_channel": "_admin",
+            "timeout_minutes": int(step_cfg.get("timeout_hours", 6) * 60),
+            "escalation": step_cfg.get("escalation", "notify_pm"),
+        }
+    return steps
+
+
+def _render_context(context: dict, round_name: str, step_outputs: dict) -> dict:
+    """Resolve template variables like ${steps.stepN.sha} in context values."""
+    resolved = {}
+    for ctx_key, ctx_value in context.items():
+        if not isinstance(ctx_value, str):
+            resolved[ctx_key] = ctx_value
+            continue
+        value = ctx_value
+        if "${steps." in value:
+            for match in _find_template_refs(value, "${steps."):
+                parts = match.split(".", 1)
+                if len(parts) == 2:
+                    step_key, field = parts
+                    step_out = step_outputs.get(step_key, {})
+                    replacement = str(step_out.get(field, ""))
+                    value = value.replace("${steps." + match + "}", replacement)
+        resolved[ctx_key] = value
+    return resolved
+
+
+def _find_template_refs(template_str: str, prefix: str) -> list[str]:
+    """Extract all template variable references from a string."""
+    refs = []
+    start = 0
+    while True:
+        pos = template_str.find(prefix, start)
+        if pos == -1:
+            break
+        end = template_str.find("}", pos)
+        if end == -1:
+            break
+        ref = template_str[pos + len(prefix):end]
+        refs.append(ref)
+        start = end + 1
+    return refs
+
+
 def _set_pipeline_state(round_name: str, state: dict) -> None:
     _PIPELINE_STATE[round_name] = state
 
@@ -1288,7 +1370,7 @@ async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
     if not pstate:
         return ""
 
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     current_step = pstate.get("current_step", "")
     if not current_step:
         return ""
@@ -1977,7 +2059,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # ── R44 F-13: Auto-collect workspace members ──────────
     # ── R49 B: Use agent cards if available ──────────
     cards = _load_agent_cards()
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     all_roles = set()
     for step_key, step_cfg in step_config.items():
         role = step_cfg.get("role", "")
@@ -2250,13 +2332,18 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # ── R57: Clear backup_active marker on step completion ──
     pstate.pop("backup_active", None)
 
+    # ── R66 B1: Record step output ──
+    pstate_b1 = _PIPELINE_STATE.get(round_name)
+    if pstate_b1:
+        step_outputs = pstate_b1.setdefault("step_outputs", {})
+        step_outputs[step_name] = {
+            "sha": output_ref or "",
+            "timestamp": time.time(),
+            "output_desc": step_config.get(step_name, {}).get("output_desc", ""),
+        }
+
     # 查 Step 映射表 → 找下一角色
-    # ── R62: Try _PIPELINE_CONFIG first, fallback to legacy ──
-    _pconfig_s = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {})
-    if _pconfig_s:
-        step_config = _pconfig_s
-    else:
-        step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_keys = sorted(step_config.keys(), key=_step_sort_key)
     current_idx = None
     for i, k in enumerate(step_keys):
@@ -2327,10 +2414,27 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         ]
     next_role_display = ", ".join(next_role_names) if next_role_names else next_role
 
+    # ── R66 B2: Render context for rollcall ──
+    _b2_step_outputs = pstate.get("step_outputs", {}) if pstate else {}
+    _b2_next_context = step_config.get(next_step, {}).get("context", {})
+    _b2_rendered = _render_context(_b2_next_context, round_name, _b2_step_outputs)
+    _b2_context_lines = []
+    for _k, _v in _b2_rendered.items():
+        if _v:
+            _labels = {
+                "requirements_url": "📄 需求",
+                "work_plan_url": "📋 WORK_PLAN",
+                "tech_plan_url": "🏗️ 技术方案",
+                "bug_report_url": "🐛 Bug 报告",
+            }
+            _label = _labels.get(_k, f"📎 {_k}")
+            _b2_context_lines.append(f"  {_label}: {_v}")
+    _b2_suffix = "\n" + "\n".join(_b2_context_lines) if _b2_context_lines else ""
+
     # ── R55 F: Targeted handoff (replace broadcast rollcall) ──
     # Send MSG_SET_ACTIVE_CHANNEL + task notification only to next step's agents
     context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
-    targeted_notify = f"🎯 新任务：{round_name} {next_step} ({next_role})\n{context_summary}"
+    targeted_notify = f"🎯 新任务：{round_name} {next_step} ({next_role})\n{context_summary}{_b2_suffix}"
 
     # ── R57 A: Online pre-check + rollcall with backup fallback ──
     member_ids = list(ws_obj.members)
@@ -2812,7 +2916,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
         return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
 
     # 前置校验：step 必须在 PIPELINE_STEP_MAP 中
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     if step_name not in step_config:
         return f"❌ Step「{step_name}」不存在于管线映射中"
 
@@ -2973,12 +3077,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     task_result = await _cmd_task_update(sender_id, task_update_params)
 
     # Look up next step
-    # ── R62: Try _PIPELINE_CONFIG first, fallback to legacy ──
-    _pconfig_s_h = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {})
-    if _pconfig_s_h:
-        step_config = _pconfig_s_h
-    else:
-        step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_keys = sorted(step_config.keys(), key=_step_sort_key)
     current_idx = None
     for i, k in enumerate(step_keys):
@@ -3025,10 +3124,20 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     next_role_display = ", ".join(next_role_names) if next_role_names else next_role
 
     # Rollcall next role
+    # ── R66 B2/B3: Render context for handoff rollcall ──
+    _h_pstate = _PIPELINE_STATE.get(round_name, {})
+    _h_step_outputs = _h_pstate.get("step_outputs", {})
+    _h_next_context = step_config.get(next_step, {}).get("context", {})
+    _h_rendered = _render_context(_h_next_context, round_name, _h_step_outputs)
+    _h_context_lines = []
+    for _k, _v in _h_rendered.items():
+        if _v:
+            _h_context_lines.append(f"  📎 {_k}: {_v}")
+    _h_suffix = "\n" + "\n".join(_h_context_lines) if _h_context_lines else ""
     context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
     rollcall_result = await _cmd_rollcall_next(sender_id, {
         "_positional": [next_role],
-        "context": f"{round_name} {next_step}: {context_summary}",
+        "context": f"{round_name} {next_step}: {context_summary}{_h_suffix}",
     })
 
     # Create next step Task
@@ -3136,7 +3245,7 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                 lines.append(
                     f"    {rstep}: 第{rinfo['reject_count']}轮 — {rinfo['last_reason'][:40]}"
                 )
-        step_config = _load_step_config()
+        step_config = _get_step_config(round_name)
         tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
 
         for step_key, step_info in sorted(
