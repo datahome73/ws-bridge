@@ -763,13 +763,13 @@ async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
 7. 归档工作室、恢复大厅
 
 **完成条件：**
-- [ ] 合并 dev→main 推远程
-- [ ] 镜像构建并部署
-- [ ] 健康检查通过
-- [ ] `!agent_card list` + `!agent_role_map` 正常
-- [ ] 文件热加载验证通过
-- [ ] TODO.md 已更新
-- [ ] `!step_complete step6 --output <sha>`
+- [x] 合并 dev→main 推远程
+- [x] 镜像构建并部署
+- [x] 健康检查通过
+- [x] `!agent_card list` + `!agent_role_map` 正常
+- [x] 文件热加载验证通过
+- [x] TODO.md 已更新
+- [x] `!step_complete step6 --output 01da56d`
 
 ---
 
@@ -799,4 +799,4 @@ async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
-| v1.0 | 2026-07-03 | 初稿，基于 R67 需求文档 v1.0 ✅ 起草 |
+|| v1.1 | 2026-07-03 | 🎯 **R67 完成 ✅** — Step 6 合并部署完成，15/15 验收全通过。镜像 ws-bridge:r67 已构建，dev + prod 容器已部署。合并 commit `01da56d` |\n|| v1.0 | 2026-07-03 | 初稿，基于 R67 需求文档 v1.0 ✅ 起草 |

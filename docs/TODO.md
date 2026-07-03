@@ -129,7 +129,7 @@
 
 | 版本 | 日期 | 变更 |
 
-|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
+|| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |\n|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
 || v2.28 | 2026-07-01 | 🎯 **R62 完成 ✅** — 管线参数化改造：_PIPELINE_CONFIG + frontmatter 解析 + config/state 分离 + 兼容守卫，12/12 验收通过，合并部署 ws-bridge:r62 `0294fdb` |
 || v2.27 | 2026-06-30 | 🎯 **R61 完成 ✅** — 纯验证轮次：F-19（_get_agent_display 角色名）+ F-20（_broadcast_active_channel 自动切活跃频道）在真实管线中实测验证通过。零代码修改。QA 大宏拍板跳过。工作室已关闭 |
 |||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |
