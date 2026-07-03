@@ -154,6 +154,16 @@ def update_card(agent_id: str, card_data: dict) -> None:
     save_cards()
 
 
+def remove_card(agent_id: str) -> bool:
+    """Remove a card by agent_id. Returns True if existed, False otherwise."""
+    global _cards
+    if agent_id in _cards:
+        del _cards[agent_id]
+        save_cards()
+        return True
+    return False
+
+
 # ---- R63 Phase 3: Registration ----------------------------------------
 
 

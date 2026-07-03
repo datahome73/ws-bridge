@@ -3487,14 +3487,12 @@ async def _cmd_agent_card_set(sender_id: str, params: dict) -> str:
         card["skills"] = [s.strip() for s in skills_str.split(",") if s.strip()]
     card["status"] = card.get("status", "online")
     card["updated_at"] = time.time()
-    cards[agent_id] = card
 
-    if ac_mod.save_cards():
-        _refresh_role_agent_map()
-        roles_display = ", ".join(card["pipeline_roles"])
-        name_display = card.get("display_name", agent_id[:12])
-        return "Card set: {0} -> {1} roles=[{2}]".format(agent_id[:24], name_display, roles_display)
-    return "Save failed"
+    ac_mod.update_card(agent_id, card)
+    _refresh_role_agent_map()
+    roles_display = ", ".join(card["pipeline_roles"])
+    name_display = card.get("display_name", agent_id[:12])
+    return "Card set: {0} -> {1} roles=[{2}]".format(agent_id[:24], name_display, roles_display)
 
 
 async def _cmd_agent_card_unset(sender_id: str, params: dict) -> str:
@@ -3505,14 +3503,10 @@ async def _cmd_agent_card_unset(sender_id: str, params: dict) -> str:
     if not positional:
         return "Usage: !agent_card unset <agent_id>"
     agent_id = positional[0]
-    cards = ac_mod.get_all_cards()
-    if agent_id not in cards:
-        return "No card for agent " + agent_id[:24]
-    del cards[agent_id]
-    if ac_mod.save_cards():
+    if ac_mod.remove_card(agent_id):
         _refresh_role_agent_map()
         return "Deleted card for " + agent_id[:24]
-    return "Save failed"
+    return "No card for agent " + agent_id[:24]
 
 
 async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
