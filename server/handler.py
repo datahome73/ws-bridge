@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 
+from . import agent_card as ac_mod  # R67: unified Agent Card interface
 from . import auth, config, persistence
 from . import message_store as ms
 from . import workspace as ws_mod
@@ -889,25 +890,9 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
 # ── R49 B: Agent Card persistence ──────────────────────────────────────
 
 
-def _load_agent_cards() -> dict:
-    """Load agent card mapping from persistent file.
-    Returns dict: {agent_id -> {name, display_name, pipeline_roles[], skills[], status}}
-    Falls back to empty dict if file missing.
-    """
-    path = os.path.join(str(config.DATA_DIR), "data", "agent_cards.json")
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-        return data.get("cards", {})
-    except Exception:
-        return {}
-
-
 def _get_agent_display(agent_id: str) -> str:
     """统一 agent 显示名：display_name > name > role > agent_id[:12]"""
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     card = cards.get(agent_id, {})
     if card.get("display_name"):
         return card["display_name"]
@@ -920,22 +905,10 @@ def _get_agent_display(agent_id: str) -> str:
     return agent_id[:12]
 
 
-def _save_agent_cards(cards: dict) -> bool:
-    """Save agent card mapping to persistent file."""
-    path = os.path.join(str(config.DATA_DIR), "data", "agent_cards.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, "w") as f:
-            json.dump({"version": 1, "cards": cards}, f, indent=2)
-        return True
-    except Exception:
-        return False
-
-
 def _get_agent_card_roles(agent_id: str, cards: dict = None) -> list[str]:
     """Get pipeline roles for an agent from cards. Returns [] if not found."""
     if cards is None:
-        cards = _load_agent_cards()
+        cards = ac_mod.get_all_cards()
     card = cards.get(agent_id, {})
     return card.get("pipeline_roles", [])
 
@@ -960,7 +933,7 @@ def _refresh_role_agent_map() -> None:
     - Handler initialization (load_cards)
     """
     global _ROLE_AGENT_MAP
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     _ROLE_AGENT_MAP = {}
     for aid, card in cards.items():
         roles = card.get("pipeline_roles", [])
@@ -972,6 +945,37 @@ def _refresh_role_agent_map() -> None:
     logger.info("R63 role-agent map refreshed: %d roles, %d entries",
                 len(_ROLE_AGENT_MAP),
                 sum(len(v) for v in _ROLE_AGENT_MAP.values()))
+
+
+# ---- R67 B1: Startup card load + watcher ------------------------------
+# These run at module import time (after _refresh_role_agent_map is defined).
+_cards_loaded_guard: bool = False
+_card_watcher: "ac_mod.CardFileWatcher | None" = None  # type: ignore[name-defined]
+
+
+def _ensure_agent_cards_loaded() -> None:
+    """Ensure agent cards are loaded and role map is built at startup.
+    Idempotent — only runs on first call.
+    """
+    global _cards_loaded_guard
+    if _cards_loaded_guard:
+        return
+    if not ac_mod.is_loaded():
+        ac_mod.load_cards()
+    _refresh_role_agent_map()
+    _cards_loaded_guard = True
+
+
+def _ensure_card_watcher() -> None:
+    """Ensure CardFileWatcher is running (idempotent)."""
+    global _card_watcher
+    if _card_watcher is not None and _card_watcher.is_running():
+        return
+    _card_watcher = ac_mod.CardFileWatcher(
+        ac_mod.get_cards_path(),
+        on_change=_refresh_role_agent_map,
+    )
+    _card_watcher.start()
 
 
 def _get_agents_by_role(role: str,
@@ -1003,32 +1007,23 @@ def _get_agents_by_role(role: str,
 
 async def _handle_rollcall_ack(sender_id: str, content: str,
                                 ws_id: str) -> None:
-    """Handle rollcall response → auto-register/update Agent Card.
+    """Handle rollcall response -> auto-register/update Agent Card.
 
     R63 Phase 3: When agent replies to rollcall, register or update card.
+    R67: Unified — always go through ac_mod.register_agent.
 
     Args:
         sender_id: Agent ID who replied.
         content: Message content (checked for ack keywords).
         ws_id: Workspace ID (for context, unused in registration).
     """
-    cards = _load_agent_cards()
     users = auth.get_users()
     u = users.get(sender_id, {})
     name = u.get("name", sender_id[:12])
     role = u.get("role", "member")
 
-    if sender_id in cards:
-        # Update existing card
-        cards[sender_id]["last_online"] = time.time()
-        cards[sender_id]["status"] = "online"
-    else:
-        # Smart register
-        from . import agent_card as ac_mod
-        ac_mod.register_agent(sender_id, name, role)
-        logger.info("R63 auto-registered agent from rollcall: %s (%s)", sender_id, name)
-
-    _save_agent_cards(cards)
+    # R67: Unified — always go through ac_mod.register_agent
+    ac_mod.register_agent(sender_id, name, role)
     _refresh_role_agent_map()
 # ── R63 Phase 3: End ──
 
@@ -1448,7 +1443,7 @@ async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
     # 4. 点名下一角色（复用 R63 @role_name → @bot_name 机制）
     next_role = step_config[next_step].get("role", "")
     if next_role:
-        cards = _load_agent_cards()
+        cards = ac_mod.get_all_cards()
         ws_obj = ws_mod.get_workspace(ws_id) if ws_id else None
         if ws_obj and cards:
             matched = _find_agents_by_role(next_role, ws_obj.members, cards)
@@ -1495,8 +1490,14 @@ async def _watchdog_scan() -> None:
     if not _PIPELINE_STATE:
         return  # A-2: no active pipelines → zero output
 
+    # ── R67 C2: Mark stale agents offline ──────────────────────
+    try:
+        ac_mod.mark_stale_offline()
+    except Exception:
+        pass  # non-blocking
+
     now = time.time()
-    step_config = _load_step_config()
+    step_config = _get_step_config("")  # R67 D: unified step config (watchdog global)
 
     for round_name, pstate in list(_PIPELINE_STATE.items()):
         if not pstate.get("active"):
@@ -1534,7 +1535,7 @@ async def _watchdog_scan() -> None:
         elapsed_hours = (now - started_at) / 3600.0
 
         # Get timeout threshold
-        timeout_hours = _get_step_timeout(step_name)
+        timeout_hours = _get_step_timeout(round_name, step_name)
 
         # Skip if not timed out
         if elapsed_hours <= timeout_hours:
@@ -1553,9 +1554,9 @@ async def _watchdog_scan() -> None:
         )
 
 
-def _get_step_timeout(step_name: str) -> float:
+def _get_step_timeout(round_name: str, step_name: str) -> float:
     """Get timeout_hours for a step — config > default > infinity."""
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_info = step_config.get(step_name, {})
     if step_info and "timeout_hours" in step_info:
         return float(step_info["timeout_hours"])
@@ -1838,7 +1839,7 @@ async def _send_watchdog_alert(
     alert_type: str,
 ) -> None:
     """Send timeout alert to _admin channel."""
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_info = step_config.get(step_name, {})
     step_display = step_info.get("name", step_name)
     role = step_info.get("role", "?")
@@ -1897,11 +1898,11 @@ async def _watchdog_rerollcall(round_name: str, step_name: str) -> None:
     ws_id = pstate.get("ws_id", "")
     if not ws_id:
         return
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_info = step_config.get(step_name, {})
     role = step_info.get("role", "?")
     try:
-        await _cmd_rollcall_role("\u7cfb\u7edf", {
+        await _cmd_rollcall_role("系统", {
             "_positional": [role],
             "context": round_name + " " + step_name + " timeout rerollcall",
         })
@@ -1911,7 +1912,7 @@ async def _watchdog_rerollcall(round_name: str, step_name: str) -> None:
 
 async def _send_clear_alert(round_name: str, step_name: str, output_ref: str) -> None:
     """Send recovery notification to _admin channel."""
-    step_config = _load_step_config()
+    step_config = _get_step_config(round_name)
     step_info = step_config.get(step_name, {})
     step_display = step_info.get("name", step_name)
 
@@ -2058,7 +2059,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
 
     # ── R44 F-13: Auto-collect workspace members ──────────
     # ── R49 B: Use agent cards if available ──────────
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     step_config = _get_step_config(round_name)
     all_roles = set()
     for step_key, step_cfg in step_config.items():
@@ -2288,7 +2289,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # In manual mode, only the step's role can advance
     pstate = _PIPELINE_STATE.get(round_name, {})
     if pstate.get("mode", "auto") == "manual":
-        step_config = _load_step_config()
+        step_config = _get_step_config(round_name)
         step_role = step_config.get(step_name, {}).get("role", "")
         if step_role:
             users = auth.get_users()
@@ -2399,7 +2400,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # ── R43 D: Resolve next role display name ──
     # ── R49 B: Use agent cards if available ──
     users = auth.get_users()
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     if cards:
         matched = _find_agents_by_role(next_role, ws_obj.members, cards)
         next_role_names = [
@@ -2995,7 +2996,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
     # 通知被退回角色（方向 F：定向发送）
     users = auth.get_users()
     step_role = step_config[step_name].get("role", "")
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     member_ids = list(ws_obj.members)
     if cards:
         target_agents = _find_agents_by_role(step_role, member_ids, cards)
@@ -3405,9 +3406,9 @@ async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
     """Display all current agent cards.
     Also serves as subcommand dispatcher for !agent_card <sub> ... syntax.
     """
-    # R49 A: Subcommand dispatch — allow !agent_card get/set/unset/reload
+    # R49 A: Subcommand dispatch — allow !agent_card get/set/unset/reload/watch
     positional = params.get("_positional", [])
-    if positional and positional[0] in ("get", "set", "unset", "reload"):
+    if positional and positional[0] in ("get", "set", "unset", "reload", "watch"):
         sub_cmd = positional[0]
         sub_params = dict(params)
         sub_params["_positional"] = positional[1:]
@@ -3416,10 +3417,11 @@ async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
             "set": _cmd_agent_card_set,
             "unset": _cmd_agent_card_unset,
             "reload": _cmd_agent_card_reload,
+            "watch": _cmd_agent_card_watch,
         }
         return await handler_map[sub_cmd](sender_id, sub_params)
     # Otherwise list all cards
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     if not cards:
         return "No agent cards found."
     lines = ["Agent Cards ({0}):".format(len(cards))]
@@ -3443,7 +3445,7 @@ async def _cmd_agent_card_get(sender_id: str, params: dict) -> str:
     if not positional:
         return "Usage: !agent_card get <agent_id>"
     agent_id = positional[0]
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     card = cards.get(agent_id)
     if not card:
         return "No card for agent " + agent_id[:24]
@@ -3476,7 +3478,7 @@ async def _cmd_agent_card_set(sender_id: str, params: dict) -> str:
     name = params.get("name", "")
     skills_str = params.get("skills", "")
 
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     card = cards.get(agent_id, {})
     card["pipeline_roles"] = [r.strip() for r in role_str.split(",") if r.strip()]
     if name:
@@ -3487,7 +3489,8 @@ async def _cmd_agent_card_set(sender_id: str, params: dict) -> str:
     card["updated_at"] = time.time()
     cards[agent_id] = card
 
-    if _save_agent_cards(cards):
+    if ac_mod.save_cards():
+        _refresh_role_agent_map()
         roles_display = ", ".join(card["pipeline_roles"])
         name_display = card.get("display_name", agent_id[:12])
         return "Card set: {0} -> {1} roles=[{2}]".format(agent_id[:24], name_display, roles_display)
@@ -3502,20 +3505,51 @@ async def _cmd_agent_card_unset(sender_id: str, params: dict) -> str:
     if not positional:
         return "Usage: !agent_card unset <agent_id>"
     agent_id = positional[0]
-    cards = _load_agent_cards()
+    cards = ac_mod.get_all_cards()
     if agent_id not in cards:
         return "No card for agent " + agent_id[:24]
     del cards[agent_id]
-    if _save_agent_cards(cards):
+    if ac_mod.save_cards():
+        _refresh_role_agent_map()
         return "Deleted card for " + agent_id[:24]
     return "Save failed"
 
 
 async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
-    """Reload agent cards from disk (no restart needed)."""
-    cards = _load_agent_cards()
-    count = len(cards)
-    return "Reloaded agent cards: {0} records".format(count)
+    """Reload agent cards from disk (no restart needed). R67: also refresh role map."""
+    ac_mod.reload_cards()
+    _refresh_role_agent_map()
+    cards = ac_mod.get_all_cards()
+    return "Reloaded agent cards: {0} records, role map refreshed".format(len(cards))
+
+
+async def _cmd_agent_card_watch(sender_id: str, params: dict) -> str:
+    """启动/停止文件变动监听。
+    用法：!agent_card watch [start|stop|status]
+    """
+    global _card_watcher
+    positional = params.get("_positional", ["status"])
+    if not positional:
+        return "用法：!agent_card watch [start|stop|status]"
+    sub = positional[0]
+
+    if sub == "start":
+        if _card_watcher and _card_watcher.is_running():
+            return "✅ 文件监听已在运行"
+        _card_watcher = ac_mod.CardFileWatcher(
+            ac_mod.get_cards_path(),
+            on_change=_refresh_role_agent_map,
+        )
+        _card_watcher.start()
+        return "✅ 文件监听已启动"
+    elif sub == "stop":
+        if _card_watcher and _card_watcher.is_running():
+            _card_watcher.stop()
+            return "✅ 文件监听已停止"
+        return "⚠️ 无运行中的文件监听"
+    else:
+        running = _card_watcher is not None and _card_watcher.is_running()
+        return "📋 文件监听状态：{}".format("🟢 运行中" if running else "🔴 已停止")
 
 
 # ── R63 Phase 3: Agent role map + card registration commands ─────
@@ -3527,7 +3561,7 @@ async def _cmd_agent_role_map(sender_id: str, params: dict) -> str:
     """
     if params.get("refresh"):
         _refresh_role_agent_map()
-        cards = _load_agent_cards()
+        cards = ac_mod.get_all_cards()
         # Also rebuild from auth for roles not in cards
         users = auth.get_users()
         for aid, u in users.items():
@@ -3871,6 +3905,9 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     _restore_pipeline_timers()
     # ── R65 A2: Start git sync loop ──
     _ensure_git_scan()
+    # ── R67 B1: Ensure agent cards loaded + watcher running ──
+    _ensure_agent_cards_loaded()
+    _ensure_card_watcher()
 
     content = msg.get("content", "")
     channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
@@ -5201,6 +5238,16 @@ async def handler(ws):
 
                 else:
                     await _send(ws, {"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
+
+            # ── R67 C1: Heartbeat — update last_online silently ──────
+            elif msg_type == p.MSG_HEARTBEAT:
+                agent_id = sender_id
+                card = ac_mod.get_agent_card(agent_id)
+                if card:
+                    card["last_online"] = time.time()
+                    card["status"] = "online"
+                    ac_mod.save_cards()
+                continue  # do NOT broadcast heartbeat
 
             # ── R53 A-4: Channel switch ACK ──────────────────────
             elif msg_type == p.MSG_ACK and agent_id:

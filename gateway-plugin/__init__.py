@@ -151,7 +151,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
-    async def connect(self) -> bool:
+    async def connect(self, **kwargs) -> bool:
         """Connect with exponential backoff — single retry loop."""
         if not self._agent_id or not self._url:
             logger.error("[WSBridge] Missing agent_id or url")
