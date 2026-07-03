@@ -200,6 +200,9 @@ TASK_STATE_ICONS = {
     "input_required": "🟡",
 }
 
+# R67: Heartbeat — Agent liveness check
+MSG_HEARTBEAT = "heartbeat"
+
 # R38: Task state machine message types
 MSG_TASK_CREATE = "task_create"    # Create new Task instance
 MSG_TASK_UPDATE = "task_update"    # Update Task state (validated transition)

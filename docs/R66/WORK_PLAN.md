@@ -1,7 +1,7 @@
 # R66 工作计划 — 管线参数化完善
 
-> **版本：** v1.0 ✅（项目负责人审核通过）
-> **状态：** 📋 定稿
+> **版本：** v1.1 ✅（已归档）
+> **状态：** 🏁 已完成 — 合并部署 main `b4fc86b`，镜像 `ws-bridge:r66`
 > **项目协调人：** 🧐 PM
 > **基于需求文档：** docs/R66/R66-product-requirements.md v1.0 ✅（项目负责人审核通过）
 
@@ -129,8 +129,8 @@ R62 建了骨架（frontmatter 解析器 + `_PIPELINE_CONFIG`），R66 让筋肉
 - `_render_context()` 需要兼容原有的 `${pipeline.xxx}` 变量
 
 **完成条件：**
-- [ ] 技术方案文档推 dev
-- [ ] `!step_complete step2 --output <sha>`
+- [x] 技术方案文档推 dev (`e88a97f`)
+- [x] `!step_complete step2 --output e88a97f`
 
 ---
 
@@ -296,16 +296,16 @@ for step_key in completed_steps:
 - 部署后先用 R65 WORK_PLAN 走一次管线验证退化路径
 
 **完成条件：**
-- [ ] 代码推 dev
-- [ ] 代码包含 `_get_step_config()` + `_build_fallback_steps()`
-- [ ] 6 处消费点全部替换
-- [ ] `_auto_advance_pipeline()` 动态化
-- [ ] B1 产出记录逻辑
-- [ ] B2 `_render_context()` 实现
-- [ ] B3 点名消息注入上下文
-- [ ] B4 `!pipeline_status` 展示产出
-- [ ] 旧格式兼容守卫
-- [ ] `!step_complete step3 --output <sha>`
+- [x] 代码推 dev (`7a09f72`)
+- [x] 代码包含 `_get_step_config()` + `_build_fallback_steps()`
+- [x] 6 处消费点全部替换
+- [x] `_auto_advance_pipeline()` 动态化
+- [x] B1 产出记录逻辑
+- [x] B2 `_render_context()` 实现
+- [x] B3 点名消息注入上下文
+- [x] B4 `!pipeline_status` 展示产出
+- [x] 旧格式兼容守卫
+- [x] `!step_complete step3 --output 7a09f72`
 
 ---
 
@@ -322,8 +322,8 @@ for step_key in completed_steps:
 6. ✅ 编码者 ≠ 审查者 ✅
 
 **完成条件：**
-- [ ] 审查报告推 dev
-- [ ] `!step_complete step4 --output <sha>`
+- [x] 审查报告推 dev (`66d50cc`)
+- [x] `!step_complete step4 --output 66d50cc`
 
 ---
 
@@ -352,8 +352,8 @@ for step_key in completed_steps:
 | ✅-14~16 | 旧格式兼容 | 代码审计：退化路径无侵入 |
 
 **完成条件：**
-- [ ] 测试报告推 dev
-- [ ] `!step_complete step5 --output <sha>`
+- [x] 测试报告推 dev (`686d329`)
+- [x] `!step_complete step5 --output 686d329`
 
 ---
 
@@ -371,13 +371,13 @@ for step_key in completed_steps:
 7. 归档工作室、恢复大厅
 
 **完成条件：**
-- [ ] 合并 dev→main 推远程
-- [ ] 镜像构建并部署
-- [ ] 健康检查通过
-- [ ] `!pipeline_status` 正常
-- [ ] 旧 R65 WORK_PLAN 启动验证通过
-- [ ] TODO.md 已更新
-- [ ] `!step_complete step6 --output <sha>`
+- [x] 合并 dev→main 推远程 (`b4fc86b`)
+- [x] 镜像构建并部署 (`ws-bridge:r66`)
+- [x] 健康检查通过 (6 agents online)
+- [x] `!pipeline_status` 正常
+- [x] 旧 R65 WORK_PLAN 启动验证通过
+- [x] TODO.md 已更新 (v2.32)
+- [x] `!step_complete step6 --output f96b02d`
 
 ---
 
@@ -385,22 +385,22 @@ for step_key in completed_steps:
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | frontmatter 定义 3 步 → 管线只走 3 步 | ⏳ |
-| ✅-2 | frontmatter 定义 7 步 → 正常走 7 步 | ⏳ |
-| ✅-3 | frontmatter 定义新角色 → 点名正确 | ⏳ |
-| ✅-4 | `_get_step_config()` 无 frontmatter → fallback 6 步 | ⏳ |
-| ✅-5 | fallback 包含 primary/backup | ⏳ |
-| ✅-6 | 6 处消费全部替换，零残留 | ⏳ |
-| ✅-7 | auto-advance 动态找下一步 | ⏳ |
-| ✅-8 | 自定义 Step 名可运行 | ⏳ |
-| ✅-9 | 产出自动记录 | ⏳ |
-| ✅-10 | 点名消息含上下文 | ⏳ |
-| ✅-11 | `${steps.stepN.sha}` 模板变量正确解 | ⏳ |
-| ✅-12 | 未完成 Step 容错（空值） | ⏳ |
-| ✅-13 | `!pipeline_status` 展示产出 | ⏳ |
-| ✅-14 | 无 frontmatter → 管线正常 | ⏳ |
-| ✅-15 | 旧格式主备正常 | ⏳ |
-| ✅-16 | partial frontmatter → fallback 正常 | ⏳ |
+| ✅-1 | frontmatter 定义 3 步 → 管线只走 3 步 | ✅ |
+| ✅-2 | frontmatter 定义 7 步 → 正常走 7 步 | ✅ |
+| ✅-3 | frontmatter 定义新角色 → 点名正确 | ✅ |
+| ✅-4 | `_get_step_config()` 无 frontmatter → fallback 6 步 | ✅ |
+| ✅-5 | fallback 包含 primary/backup | ✅ |
+| ✅-6 | 6 处消费全部替换，零残留 | ✅ |
+| ✅-7 | auto-advance 动态找下一步 | ✅ |
+| ✅-8 | 自定义 Step 名可运行 | ✅ |
+| ✅-9 | 产出自动记录 | ✅ |
+| ✅-10 | 点名消息含上下文 | ✅ |
+| ✅-11 | `${steps.stepN.sha}` 模板变量正确解 | ✅ |
+| ✅-12 | 未完成 Step 容错（空值） | ✅ |
+| ✅-13 | `!pipeline_status` 展示产出 | ✅ |
+| ✅-14 | 无 frontmatter → 管线正常 | ✅ |
+| ✅-15 | 旧格式主备正常 | ✅ |
+| ✅-16 | partial frontmatter → fallback 正常 | ✅ |
 
 ---
 
@@ -408,4 +408,5 @@ for step_key in completed_steps:
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
+| v1.1 | 2026-07-03 | 🏁 归档 — 合并部署 main `b4fc86b`，镜像 `ws-bridge:r66`，健康检查通过 |
 | v1.0 | 2026-07-03 | 初稿，基于 R66 需求文档 v1.0 ✅ 起草 |
