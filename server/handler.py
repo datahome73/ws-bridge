@@ -2007,7 +2007,8 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     round_name = positional[0].upper()
     from_step = params.get("from", "")
     # ── R71: Optional --workspace-id to attach to existing workspace ──
-    explicit_ws_id = params.get("workspace_id", params.get("ws", ""))
+    # Note: _parse_command stores --workspace-id as params["workspace-id"] (hyphen, not underscore)
+    explicit_ws_id = params.get("workspace-id", params.get("ws", params.get("workspace_id", "")))
 
     # ── R55 E: Mode parameter ──
     mode = params.get("mode", "auto").lower()
