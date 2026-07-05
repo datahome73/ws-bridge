@@ -3210,7 +3210,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
             if _h_fb_users.get(aid, {}).get("role", "member") == next_role
         ]
         _h_fb_display = ", ".join(_h_fb_role_names) if _h_fb_role_names else next_role
-        _h_fb_plan_url = _pconfig_n.get("work_plan_url", "")
+        _h_fb_plan_url = _PIPELINE_CONFIG.get(round_name, {}).get("work_plan_url", "")
         _h_fb_msg = (
             f"@{_h_fb_display} 🚨 Step「{next_step}」到你了！\n\n"
             f"📋 WORK_PLAN：{_h_fb_plan_url}\n"

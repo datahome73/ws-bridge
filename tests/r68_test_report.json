@@ -1,0 +1,194 @@
+{
+  "total": 37,
+  "passed": 37,
+  "failed": 0,
+  "warnings": 0,
+  "all_pass": true,
+  "results": [
+    [
+      true,
+      "INBOX_CHANNEL_PREFIX constant exists in protocol.py",
+      "value='_inbox:'"
+    ],
+    [
+      true,
+      "INBOX_CHANNEL_PREFIX = \"_inbox:\"",
+      "Got '_inbox:', expected '_inbox:'"
+    ],
+    [
+      true,
+      "get_inbox_channel() function exists",
+      ""
+    ],
+    [
+      true,
+      "get_inbox_channel('test-agent-123') returns valid inbox channel",
+      "Got '_inbox:test-agent-123'"
+    ],
+    [
+      true,
+      "is_inbox_channel() returns True for inbox channels",
+      ""
+    ],
+    [
+      true,
+      "is_inbox_channel() returns False for non-inbox channels",
+      ""
+    ],
+    [
+      true,
+      "resolve_inbox_owner() extracts agent_id from inbox channel",
+      "Got 'user-42'"
+    ],
+    [
+      true,
+      "resolve_inbox_owner() returns None for non-inbox channel",
+      ""
+    ],
+    [
+      true,
+      "auth.py approve() calls get_inbox_channel() (auto-registration)",
+      "Checked AST of approve() function"
+    ],
+    [
+      true,
+      "auth.py approve() calls set_agent_channel(agent_id, get_inbox_channel(agent_id))",
+      "Agent registration auto-creates inbox channel"
+    ],
+    [
+      true,
+      "handle_broadcast() has inbox channel intercept (resolves inbox owner, unicasts)",
+      "Inbox routing: owner resolution + unicast present"
+    ],
+    [
+      true,
+      "Inbox routing uses unicast (only sends to target agent's connections)",
+      "Only matching agent_id connections are targeted (unicast, not broadcast)"
+    ],
+    [
+      true,
+      "Inbox routing does NOT broadcast to workspace (unicast only)",
+      "Inbox branch sends directly to target agent's connections, not via workspace broadcast"
+    ],
+    [
+      true,
+      "Inbox handler checks 'if channel.startswith(p.INBOX_CHANNEL_PREFIX)' before routing",
+      "startswith check present"
+    ],
+    [
+      true,
+      "Inbox route checks 'if sender_role != \"admin\"'",
+      "Non-admin role check exists"
+    ],
+    [
+      true,
+      "Non-admin gets error message about permissions",
+      "Error message for non-admin: '权限不足：仅管理员可向收件箱发消息'"
+    ],
+    [
+      true,
+      "Admin sends: after role check passes, message is delivered (not early-returned for admin)",
+      "Permission guard only blocks non-admin; admin passes through"
+    ],
+    [
+      true,
+      "Admin → inbox → message is delivered (targets loop exists after role check)",
+      "Delivery loop present in inbox handler"
+    ],
+    [
+      true,
+      "Admin → inbox → ACK sent back",
+      "ACK message includes sent count"
+    ],
+    [
+      true,
+      "Inbox intercept comment 'R68 A2: Inbox channel intercept' found in handler.py",
+      "At line 4115"
+    ],
+    [
+      true,
+      "Admin intercept occurs BEFORE inbox intercept",
+      "admin_intercept L4092, inbox_intercept L4115"
+    ],
+    [
+      true,
+      "Inbox intercept occurs BEFORE channel resolution",
+      "inbox_intercept L4115, channel_resolution L4153"
+    ],
+    [
+      true,
+      "Inbox handler calls write_chat_log with channel=channel",
+      "write_chat_log call found"
+    ],
+    [
+      true,
+      "_send_inbox_task() calls ms.save_message() with channel=inbox_ch",
+      "Checking save_message in _send_inbox_task"
+    ],
+    [
+      true,
+      "_send_inbox_task() calls ms.save_message() for persistence",
+      "save_message call in _send_inbox_task body"
+    ],
+    [
+      true,
+      "_send_inbox_task() calls write_chat_log() for persistence",
+      "write_chat_log call in _send_inbox_task body"
+    ],
+    [
+      true,
+      "Inbox handler broadcast payload contains 'ts' field",
+      "Timestamp field present in inbox broadcast payload"
+    ],
+    [
+      true,
+      "_send_inbox_task() message payload includes ts field",
+      "Timestamp in _send_inbox_task payload"
+    ],
+    [
+      true,
+      "Same permission check covers ALL non-admin senders (includes agents)",
+      "Permission check is role-based; agents are not admin → rejected"
+    ],
+    [
+      true,
+      "Error message clearly states '仅管理员可向收件箱发消息'",
+      "Clear error message for agent/member attempting inbox write"
+    ],
+    [
+      true,
+      "_cmd_step_complete() calls _send_inbox_task() for task assignment",
+      "_send_inbox_task called from _cmd_step_complete"
+    ],
+    [
+      true,
+      "_cmd_step_complete() calls _send_inbox_task() (new inbox path)",
+      "Inbox task assignment present in step_complete body"
+    ],
+    [
+      true,
+      "_cmd_step_complete() does NOT use old broadcast pattern (mention_msg removed)",
+      "Legacy @mention broadcast removed from step_complete"
+    ],
+    [
+      true,
+      "_cmd_step_handoff() also calls _send_inbox_task()",
+      "Inbox task in handoff as well"
+    ],
+    [
+      true,
+      "_send_inbox_task() sends lightweight workspace notification",
+      "Lightweight notification with @mention and Step title"
+    ],
+    [
+      true,
+      "Workspace notification uses _persist_broadcast",
+      "Notification persisted to workspace"
+    ],
+    [
+      true,
+      "Workspace notification is lightweight (not full task, just @mention + status)",
+      "Notification says '已分配，请查看收件箱' — lightweight, not full task"
+    ]
+  ]
+}
