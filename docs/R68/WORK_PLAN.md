@@ -190,11 +190,11 @@ for member_id in ws_obj.members:
 
 ---
 
-### Step 3 — 💻 编码（Dev）
+### Step 3 — 💻 编码（Dev）✅ `6dc3400`
 
 **主角：** dev | **备用：** arch
 
-**完成条件：** 4 个文件按技术方案编码完成，git push dev，`!step_complete step3 --output <sha>`
+**完成条件：** ✅ 4 个文件按技术方案编码完成，git push dev，`!step_complete step3 --output 6dc3400`
 
 | 文件 | 改动 |
 |:-----|:------|
@@ -205,9 +205,15 @@ for member_id in ws_obj.members:
 
 ---
 
-### Step 4 — 🔍 审查（Review）
+### Step 4 — 🔍 审查（Review）✅ `5448543`
 
 **主角：** review | **备用：** qa
+
+**完成条件：** ✅ 审查通过 🟢 → 可进入 Step 5
+
+**审查报告：** `docs/R68/R68-code-review.md` (`5448543`)
+
+**审查结论：** 🟢 通过 — 无 🔴 问题, 2 🟡 Warning（已知 bug 已修复 89ac235）, 1 💡 Suggestion
 
 **审查重点：**
 1. ✅ `_inbox` 路由权限：仅 admin 可写，agent 不可写
