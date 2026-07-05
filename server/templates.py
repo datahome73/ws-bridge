@@ -275,8 +275,11 @@ function switchToActiveTab(wsId, wsName) {
 async function loadMessages(channel) {
   const list = document.getElementById('msgList');
   list.innerHTML = '<div class="empty">加载中...</div>';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN));
+    const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN), {signal: controller.signal});
+    clearTimeout(timeout);
     if (!resp.ok) {
       // R33: token expired → clear and redirect to bind page
       if (resp.status === 401) {
@@ -305,7 +308,12 @@ async function loadMessages(channel) {
       list.appendChild(el);
     }
   } catch(e) {
-    list.innerHTML = '<div class="empty">加载失败（网络异常）</div>';
+    clearTimeout(timeout);
+    if (e.name === 'AbortError') {
+      list.innerHTML = '<div class="empty">⏱ 连接超时，请刷新重试</div>';
+    } else {
+      list.innerHTML = '<div class="empty">加载失败（网络异常）</div>';
+    }
   }
 }
 
@@ -485,19 +493,24 @@ async function init() {
   }
   connectWS();
 
-  // 4. Poll fallback for messages
+  // 4. Poll fallback for messages (F-2: 10s timeout, F-3: incremental append)
   setInterval(async function() {
     try {
       const activeTab = TAB_STATE[activeTabId];
       const channel = activeTab ? activeTab.channel : null;
       if (!channel) return;
-      const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN), {signal: controller.signal});
+      clearTimeout(timeout);
       if (!resp.ok) return;
       const data = await resp.json();
       const msgs = data.messages || [];
       const existing = msgContainers[channel] || [];
-      if (msgs.length > existing.length) {
-        loadMessages(channel);
+      // F-3: incremental append — only new messages, no full reload
+      const newMsgs = msgs.slice(existing.length);
+      for (let i = 0; i < newMsgs.length; i++) {
+        appendMessage(channel, newMsgs[i]);
       }
     } catch(_) {}
   }, 5000);

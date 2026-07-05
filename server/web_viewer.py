@@ -24,6 +24,17 @@ _chat_buffers: dict[str, list[dict]] = {"lobby": []}
 _MAX_BUFFER = 1000
 _ws_clients: set = set()  # single set, JS does channel dispatch
 
+
+async def _do_ws_send(ws, payload: str) -> None:
+    """Fire-and-forget helper: safely send a WS payload, discard dead clients."""
+    try:
+        await ws.send_str(payload)
+    except (ConnectionError, RuntimeError, OSError):
+        _ws_clients.discard(ws)
+    except Exception:
+        pass
+
+
 # ── Daily chat log file (per channel) ──────────────────────────
 
 
@@ -67,13 +78,8 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
         "channel": channel,
         "message": entry,
     })
-    dead = set()
-    for ws in _ws_clients:
-        try:
-            ws.send_str(payload)
-        except Exception:
-            dead.add(ws)
-    _ws_clients -= dead
+    for ws in list(_ws_clients):
+        asyncio.create_task(_do_ws_send(ws, payload))
 
 
 def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
