@@ -27,6 +27,24 @@ HIDDEN_AGENTS: set[str] = set(
 )
 
 # ── R40: GitHub OAuth ─────────────────────────────────────────
+# Priority: env var > oauth_config.json (persistent data volume) > default empty
+_oauth_file = DATA_DIR / "oauth_config.json"
+if not os.environ.get("GITHUB_OAUTH_CLIENT_ID", "") and _oauth_file.exists():
+    import json as _jf
+    try:
+        _oc = _jf.loads(_oauth_file.read_text())
+        if _oc.get("GITHUB_OAUTH_CLIENT_ID"):
+            os.environ["GITHUB_OAUTH_CLIENT_ID"] = _oc["GITHUB_OAUTH_CLIENT_ID"]
+        if _oc.get("GITHUB_OAUTH_CLIENT_SECRET"):
+            os.environ["GITHUB_OAUTH_CLIENT_SECRET"] = _oc["GITHUB_OAUTH_CLIENT_SECRET"]
+        if _oc.get("GITHUB_OAUTH_REDIRECT_URI"):
+            os.environ["GITHUB_OAUTH_REDIRECT_URI"] = _oc["GITHUB_OAUTH_REDIRECT_URI"]
+        if _oc.get("OAUTH_NAME_MAP"):
+            os.environ["OAUTH_NAME_MAP"] = _oc["OAUTH_NAME_MAP"]
+        logger = None  # avoid circular import
+    except Exception:
+        pass
+
 GITHUB_OAUTH_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
 GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
 GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
