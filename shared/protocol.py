@@ -165,6 +165,9 @@ ROLE_UNREGISTERED = "unregistered"
 ADMIN_CHANNEL = "_admin"
 MSG_ADMIN_AUDIT = "admin_audit"    # Server → Web: audit feed
 
+# ── R68: Inbox Channel ─────────────────────────────────────────
+INBOX_CHANNEL_PREFIX = "_inbox:"
+
 # ── R37: Rollcall & Workspace-Lifecycle ──────────────────────────────────
 MSG_ROLLCALL_CONFIRM = "rollcall_confirm"   # Agent → Server: rollcall channel confirm
 MSG_ROLLCALL_VERIFY = "rollcall_verify"     # Server → Agent: rollcall verification
