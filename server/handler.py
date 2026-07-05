@@ -1998,14 +1998,16 @@ async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
 
 async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     """启动管线。
-    用法：!pipeline_start <R{N}> [--from <step>]
+    用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>]
     仅在 _admin 频道可用。
     """
     positional = params.get("_positional", [])
     if not positional:
-        return "❌ 用法：!pipeline_start <R{N}> [--from <step>]"
+        return "❌ 用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>]"
     round_name = positional[0].upper()
     from_step = params.get("from", "")
+    # ── R71: Optional --workspace-id to attach to existing workspace ──
+    explicit_ws_id = params.get("workspace_id", params.get("ws", ""))
 
     # ── R55 E: Mode parameter ──
     mode = params.get("mode", "auto").lower()
@@ -2115,26 +2117,40 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             if u.get("role", "member") in all_roles:
                 member_ids.append(aid)
 
-    # ── R70 Fix: 先检查是否已有当前 round 的工作室 ──
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
-    existing_ws = ws_mod.get_workspace(sender_ch) if sender_ch != p.LOBBY else None
-    if existing_ws and round_name in existing_ws.name:
-        # Reuse existing workspace instead of creating a new one
-        ws_id = existing_ws.id
-        create_result = f"✅ 复用现有工作室「{existing_ws.name}」({ws_id[:16]}…)"
-        logger.info(
-            "R70: Reusing existing workspace %s for pipeline %s (sender %s)",
-            ws_id, round_name, sender_id[:12],
-        )
+    # ── R71: Optional --workspace-id to attach to existing workspace ──
+    if explicit_ws_id:
+        # R71: Use the explicitly provided workspace ID — skip create/reuse
+        ws_id = explicit_ws_id
+        create_result = f"✅ 附着到已有工作室 {ws_id[:16]}…"
+        # Verify the workspace exists
+        _ws_check = ws_mod.get_workspace(ws_id)
+        if _ws_check:
+            create_result = f"✅ 附着到已有工作室「{_ws_check.name}」({ws_id[:16]}…)"
+        else:
+            create_result = f"⚠️ 指定工作室 {ws_id[:16]}… 不存在，仍以该 ID 启动管线"
+        # Skip member auto-discovery — workspace already has its members
+        member_ids = list(_ws_check.members) if _ws_check else []
     else:
-        # 创建工作室（带自动组建）
-        create_params = {
-            "_positional": [f"{round_name}-dev"],
-            "members": ",".join(member_ids),
-        }
-        create_result = await _cmd_create_workspace(sender_id, create_params)
-        # 从结果提取 ws_id（调用 persistence 获取最新频道）
-        ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
+        # ── R70 Fix: 先检查是否已有当前 round 的工作室 ──
+        sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+        existing_ws = ws_mod.get_workspace(sender_ch) if sender_ch != p.LOBBY else None
+        if existing_ws and round_name in existing_ws.name:
+            # Reuse existing workspace instead of creating a new one
+            ws_id = existing_ws.id
+            create_result = f"✅ 复用现有工作室「{existing_ws.name}」({ws_id[:16]}…)"
+            logger.info(
+                "R70: Reusing existing workspace %s for pipeline %s (sender %s)",
+                ws_id, round_name, sender_id[:12],
+            )
+        else:
+            # 创建工作室（带自动组建）
+            create_params = {
+                "_positional": [f"{round_name}-dev"],
+                "members": ",".join(member_ids),
+            }
+            create_result = await _cmd_create_workspace(sender_id, create_params)
+            # 从结果提取 ws_id（调用 persistence 获取最新频道）
+            ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
 
     # R50+: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
     # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
