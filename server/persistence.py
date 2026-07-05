@@ -149,3 +149,22 @@ def get_agent_channel(agent_id: str) -> str | None:
 def reset_agent_channel(agent_id: str) -> None:
     with _lock:
         _agent_active_channels.pop(agent_id, None)
+
+
+# ── R68: Inbox channel helpers ─────────────────────────────────
+def get_inbox_channel(agent_id: str) -> str:
+    """Get agent's dedicated inbox channel ID."""
+    import shared.protocol as p
+    return f"{p.INBOX_CHANNEL_PREFIX}{agent_id}"
+
+def is_inbox_channel(channel: str) -> bool:
+    """Check if a channel ID is an inbox channel."""
+    import shared.protocol as p
+    return channel.startswith(p.INBOX_CHANNEL_PREFIX)
+
+def resolve_inbox_owner(channel: str) -> str | None:
+    """Extract agent_id from inbox channel ID, or None."""
+    import shared.protocol as p
+    if channel.startswith(p.INBOX_CHANNEL_PREFIX):
+        return channel[len(p.INBOX_CHANNEL_PREFIX):]
+    return None

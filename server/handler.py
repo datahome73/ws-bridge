@@ -2236,6 +2236,94 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
     )
 
 
+# ── R68 A3: Send inbox task assignment + workspace notification ──
+async def _send_inbox_task(
+    target_agent_id: str,
+    round_name: str,
+    next_step: str,
+    step_config: dict,
+    output_ref: str,
+    workspace_id: str,
+    pm_name: str,
+) -> None:
+    """Send full task to target agent's inbox + lightweight workspace notification."""
+    inbox_ch = persistence.get_inbox_channel(target_agent_id)
+    _pstate = _PIPELINE_STATE.get(round_name, {})
+    _pconfig = _PIPELINE_CONFIG.get(round_name, {})
+
+    # Collect context URLs
+    req_url = _pconfig.get("requirements_url",
+        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
+    plan_url = _pconfig.get("work_plan_url",
+        _pstate.get("work_plan_url",
+            f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"))
+
+    _step_title = _pconfig.get("steps", {}).get(next_step, {}).get("title", next_step)
+    inbox_msg = (
+        f"📥 任务分配 — {round_name} Step「{_step_title}」\n\n"
+        f"背景上下文：\n"
+        f"  上一 Step 产出：{output_ref}\n\n"
+        f"任务描述：\n"
+        f"  请按技术方案完成 {next_step}\n\n"
+        f"参考文档：\n"
+        f"  📄 需求：{req_url}\n"
+        f"  📋 WORK_PLAN：{plan_url}\n"
+        f"  🔗 上一步产出：{output_ref}\n\n"
+        f"完成后：\n"
+        f"  1. git push dev\n"
+        f"  2. 在工作室回复 ✅ Step 完成 + commit SHA"
+    )
+
+    # Persist inbox message
+    write_chat_log(pm_name, inbox_msg, channel=inbox_ch)
+    ms.save_message(
+        msg_id=str(uuid.uuid4()), msg_type="broadcast",
+        from_agent="system", from_name=pm_name,
+        content=inbox_msg, ts=time.time(),
+        data_dir=config.DATA_DIR, channel=inbox_ch,
+    )
+
+    # Send to target agent's connections (unicast)
+    inbox_payload = json.dumps({
+        "type": "broadcast", "channel": inbox_ch,
+        "from_name": pm_name, "from": pm_name,
+        "content": inbox_msg, "ts": time.time(),
+    })
+    conns = _connections.get(target_agent_id, set())
+    for conn in list(conns):
+        try:
+            if hasattr(conn, "send_str"):
+                await conn.send_str(inbox_payload)
+            elif hasattr(conn, "send"):
+                await conn.send(inbox_payload)
+        except Exception:
+            pass
+
+    logger.info("Inbox task [%s] %s → %s", round_name, pm_name, target_agent_id[:12])
+
+    # 🏠 工作室轻量通知
+    ws_obj = ws_mod.get_workspace(workspace_id)
+    if ws_obj:
+        users = auth.get_users()
+        target_name = users.get(target_agent_id, {}).get("name", target_agent_id[:12])
+        notify_msg = f"@{target_name} 🔔 Step「{_step_title}」已分配，请查看收件箱 📥"
+        _persist_broadcast(workspace_id, "系统", notify_msg)
+        notify_payload = json.dumps({
+            "type": "broadcast", "channel": workspace_id,
+            "from_name": "系统", "from": "系统",
+            "content": notify_msg, "ts": time.time(),
+        })
+        for member_id in ws_obj.members:
+            for conn in list(_connections.get(member_id, set())):
+                try:
+                    if hasattr(conn, "send_str"):
+                        await conn.send_str(notify_payload)
+                    elif hasattr(conn, "send"):
+                        await conn.send(notify_payload)
+                except Exception:
+                    pass
+
+
 async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     """标记 Step 完成，自动点名下一人。
     用法：!step_complete <step_name> [--output <commit/file>]
@@ -2476,69 +2564,24 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 reason="primary_offline",
             )
         else:
-            # ── R58 A2: PM @mention broadcast (trigger work mode) ──
-            # ── R59 B: Role-differentiated from_name + message format ──
+            # ── R68 A3: inbox task assignment + workspace notification ──
             if next_role == "arch":
                 pm_name = config.PIPELINE_ARCH_FROM_NAME
             else:
                 pm_name = config.PIPELINE_PM_NAME
-            # ── R62: Read URLs from _PIPELINE_CONFIG ──
-            _pconfig_n = _PIPELINE_CONFIG.get(round_name, {})
-            req_url = _pconfig_n.get("requirements_url",
-                f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
-            plan_url = _pconfig_n.get("work_plan_url",
-                pstate.get("work_plan_url",
-                    f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"))
-            # ── R62: Step title from config ──
-            _pconfig_steps_n = _pconfig_n.get("steps", {})
-            _next_step_cfg = _pconfig_steps_n.get(next_step, {})
-            _next_step_title = _next_step_cfg.get("title", next_step)
 
-            # R59 B: Arch gets code block around instructions for extra reliability
-            if next_role == "arch":
-                mention_msg = (
-                    f"@{primary_name} 🚨 Step「{_next_step_title}」到你了！\n\n"
-                    f"📄 需求：{req_url}\n"
-                    f"📋 WORK_PLAN：{plan_url}\n"
-                    f"🔗 上一步产出：{output_ref}\n\n"
-                    f"```\n"
-                    f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>\n"
-                    f"```"
-                )
-            else:
-                mention_msg = (
-                    f"@{primary_name} 🚨 Step「{_next_step_title}」到你了！\n\n"
-                    f"📄 需求：{req_url}\n"
-                    f"📋 WORK_PLAN：{plan_url}\n"
-                    f"🔗 上一步产出：{output_ref}\n\n"
-                    f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
-                )
-            _persist_broadcast(sender_ch, pm_name, mention_msg)
-            mention_payload = json.dumps({
-                "type": "broadcast", "channel": sender_ch,
-                "from_name": pm_name, "from": pm_name,
-                "content": mention_msg, "ts": time.time(),
-            })
-            for member_id in ws_obj.members:
-                for conn in list(_connections.get(member_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(mention_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(mention_payload)
-                    except Exception:
-                        pass
-            # ── R58 A2: End PM broadcast ──
-            rollcall_msg = f"@**{primary_name}** Step「{next_step}」轮到你了，请在 30 秒内回复确认"
-            _persist_broadcast(sender_ch, "系统", rollcall_msg)
-            for conn in conns:
-                try:
-                    await _send(conn, {"type": "broadcast", "channel": sender_ch,
-                                       "from_name": "系统", "content": rollcall_msg, "ts": time.time()})
-                except Exception:
-                    pass
+            # Send full task to inbox
+            await _send_inbox_task(
+                target_agent_id=primary_agent,
+                round_name=round_name,
+                next_step=next_step,
+                step_config=step_config,
+                output_ref=output_ref,
+                workspace_id=sender_ch,
+                pm_name=pm_name,
+            )
 
-            # Start 30s rollcall timer
+            # Start 30s rollcall timer (keep existing rollcall logic)
             ack_received = await _r57_wait_for_ack(primary_agent, timeout=30)
 
             if ack_received:
@@ -3140,6 +3183,25 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
         "_positional": [next_role],
         "context": f"{round_name} {next_step}: {context_summary}{_h_suffix}",
     })
+
+    # ── R68 A3: Send inbox task to primary agent ──
+    _h_cards = ac_mod.get_all_cards() if 'ac_mod' in dir() else {}
+    _h_member_ids = list(ws_obj.members)
+    _h_primary_role = step_config.get(next_step, {}).get("primary")
+    _h_primary_agents = (
+        _find_agents_by_role(_h_primary_role, _h_member_ids, _h_cards)
+        if _h_cards and _h_primary_role else []
+    )
+    if _h_primary_agents:
+        await _send_inbox_task(
+            target_agent_id=_h_primary_agents[0],
+            round_name=round_name,
+            next_step=next_step,
+            step_config=step_config,
+            output_ref=output_ref,
+            workspace_id=ws_id,
+            pm_name="PM",
+        )
 
     # Create next step Task
     next_task_result = await _cmd_task_create(sender_id, {
@@ -4017,6 +4079,44 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         if not content.startswith("!"):
             resp = "ℹ️ 管理频道仅支持 ! 命令"
             await _persist_admin_response(ws, sender_id, "系统", resp)
+        return
+
+    # ── R68 A2: Inbox channel intercept ──
+    if channel.startswith(p.INBOX_CHANNEL_PREFIX):
+        owner_id = persistence.resolve_inbox_owner(channel)
+        if not owner_id:
+            await _send(ws, {"type": "error", "error": "❌ 无效的收件箱通道"})
+            return
+
+        # 权限：仅 admin 可向收件箱发消息
+        if sender_role != "admin":
+            await _send(ws, {"type": "error", "error": "❌ 权限不足：仅管理员可向收件箱发消息"})
+            return
+
+        # 仅投递给目标 agent（单播，不广播给其他人）
+        targets = [(aid, conns) for aid, conns in _connections.items() if aid == owner_id]
+        # 写日志
+        write_chat_log(sender_name, content, channel=channel)
+        # 构建广播消息
+        broadcast = json.dumps({
+            "type": "broadcast", "channel": channel,
+            "from_name": sender_name, "agent_id": sender_id,
+            "from": sender_name, "from_agent": sender_id,
+            "content": content, "ts": time.time(),
+        })
+        sent = 0
+        for agent_id, conns in targets:
+            for conn in list(conns):
+                try:
+                    if hasattr(conn, "send_str"):
+                        await conn.send_str(broadcast)
+                    elif hasattr(conn, "send"):
+                        await conn.send(broadcast)
+                    sent += 1
+                except Exception:
+                    pass
+        logger.info("Inbox [%s] %s→%s: %s", channel, sender_name, owner_id[:12] if owner_id else "?", content[:60])
+        await _send(ws, {"type": "ack", "channel": channel, "sent": sent, "to": owner_id})
         return
 
     # ── Channel resolution (fall back to lobby for unknown channels) ──

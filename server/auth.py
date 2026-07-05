@@ -45,6 +45,8 @@ def approve(code: str, role: str = "member") -> dict:
     users = persistence.get_approved_users()
     users[agent_id] = {"name": entry.get("name", agent_id), "role": role}
     persistence.set_approved_users(users)
+    # ── R68: Register inbox channel for approved agent ──
+    persistence.set_agent_channel(agent_id, persistence.get_inbox_channel(agent_id))
     del codes[code]
     persistence.set_pairing_codes(codes)
     return {"type": "approve_ok", "agent_id": agent_id}
