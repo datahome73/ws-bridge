@@ -3184,8 +3184,8 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
         "context": f"{round_name} {next_step}: {context_summary}{_h_suffix}",
     })
 
-    # ── R68 A3: Send inbox task to primary agent ──
-    _h_cards = ac_mod.get_all_cards() if 'ac_mod' in dir() else {}
+    # ── R68 A3: Send inbox task to primary agent (with workspace fallback) ──
+    _h_cards = ac_mod.get_all_cards()
     _h_member_ids = list(ws_obj.members)
     _h_primary_role = step_config.get(next_step, {}).get("primary")
     _h_primary_agents = (
@@ -3202,6 +3202,37 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
             workspace_id=ws_id,
             pm_name="PM",
         )
+    else:
+        _h_fb_users = auth.get_users()
+        _h_fb_role_names = [
+            _h_fb_users.get(aid, {}).get("name", aid[:12])
+            for aid in ws_obj.members
+            if _h_fb_users.get(aid, {}).get("role", "member") == next_role
+        ]
+        _h_fb_display = ", ".join(_h_fb_role_names) if _h_fb_role_names else next_role
+        _h_fb_plan_url = _pconfig_n.get("work_plan_url", "")
+        _h_fb_msg = (
+            f"@{_h_fb_display} 🚨 Step「{next_step}」到你了！\n\n"
+            f"📋 WORK_PLAN：{_h_fb_plan_url}\n"
+            f"🔗 上一步产出：{output_ref}\n\n"
+            f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
+        )
+        _persist_broadcast(ws_id, "系统", _h_fb_msg)
+        _h_fb_payload = json.dumps({
+            "type": "broadcast", "channel": ws_id,
+            "from_name": "系统", "from": "系统",
+            "content": _h_fb_msg, "ts": time.time(),
+        })
+        for _h_fb_mid in ws_obj.members:
+            for _h_fb_conn in list(_connections.get(_h_fb_mid, set())):
+                try:
+                    if hasattr(_h_fb_conn, "send_str"):
+                        await _h_fb_conn.send_str(_h_fb_payload)
+                    elif hasattr(_h_fb_conn, "send"):
+                        await _h_fb_conn.send(_h_fb_payload)
+                except Exception:
+                    pass
+        logger.info("R68 inbox fallback: broadcast @mention to workspace %s (no primary agent for %s)", ws_id, next_role)
 
     # Create next step Task
     next_task_result = await _cmd_task_create(sender_id, {
