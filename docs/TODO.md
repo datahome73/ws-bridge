@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.35
+> **版本：** v2.36
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -16,7 +16,7 @@
 | F-5 | **P3 工作室管理能力增强** — 增加管理工作室的权限/功能（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
 | F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
 | F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | ❌ 已取消 | — | — |
-| F-9 | **Web 端 Tab 页加载空白（服务器挂了）** — Web 端 Tab 页显示「加载中」，服务器服务异常 | 🔴 P0 | — | ⬜ 待定位 |
+| F-9 | **Web 端 Tab 页加载空白（服务器挂了）** — Web 端 Tab 页显示「加载中」，服务器服务异常 | 🔴 P0 | R70 | 🔄 诊断中 |
 | F-12 | **PM 无法直接触发管线入口** — `!pipeline_start` 需 P3+ 权限，PM(member) 无法在 TG DM 直接触发，需经 code 块中转给管理员执行 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-13 | **`!pipeline_start` 创建的工作室没有开发成员** — 未传 `--members` 参数，工作室内只有执行者一人。导致 `_cmd_rollcall_next` 找 arch 角色时工作区无人匹配 → 点名+派活静默失败 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-14 | **`task_store` 缺少 `get_tasks_by_context` 方法** — `!pipeline_status` 和 `!step_complete` 调用此方法报错 `module 'server.task_store' has no attribute 'get_tasks_by_context'`，阻断管线状态查询和 Step 完成流程 | 🟡 P2 | R47 | 🟢 已完成 ✅ |
@@ -130,7 +130,8 @@
 
 | 版本 | 日期 | 变更 |
 
-|| v2.35 | 2026-07-05 | 🎯 **R69 完成 ✅** — 收件箱上下文增强 + TODO 清理：step_outputs 扩展（title/summary/artifact_url）+ !step_complete --summary/-s --artifact-url/-u + _infer_artifact_url 自动推断 + _send_inbox_task 前序 Step 上下文注入 + payload 补齐 agent_id（L-5 ✅）+ !workspace_reset 命令（F-15 ✅）+ pipeline_status 结构展示。~47 行净增。合并部署 ws-bridge:r69 |\n||| v2.34 | 2026-07-05 | 🎯 **R68 完成 ✅** — Bot 私有收件箱通道：INBOX_CHANNEL_PREFIX 常量 + 工具函数 + 收件箱路由 + step_complete/handoff 收件箱派活。37/37 验收通过。合并部署 ws-bridge:r68 |\n||| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |\n|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
+||| v2.36 | 2026-07-05 | 🎯 **R70 启动 ⬜** — 验证轮 + F-9 诊断：R69 跳过 Step 5 测试，需在真实管线中验证收件箱上下文/step_outputs 扩展/!workspace_reset 功能。同时定位 F-9（P0）Web 端空白根因。零代码改动。基线 `bfbdc7e` |
+||| v2.35 | 2026-07-05 | 🎯 **R69 完成 ✅** — 收件箱上下文增强 + TODO 清理：step_outputs 扩展（title/summary/artifact_url）+ !step_complete --summary/-s --artifact-url/-u + _infer_artifact_url 自动推断 + _send_inbox_task 前序 Step 上下文注入 + payload 补齐 agent_id（L-5 ✅）+ !workspace_reset 命令（F-15 ✅）+ pipeline_status 结构展示。~47 行净增。合并部署 ws-bridge:r69 |\n||| v2.34 | 2026-07-05 | 🎯 **R68 完成 ✅** — Bot 私有收件箱通道：INBOX_CHANNEL_PREFIX 常量 + 工具函数 + 收件箱路由 + step_complete/handoff 收件箱派活。37/37 验收通过。合并部署 ws-bridge:r68 |\n||| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |\n|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
 || v2.28 | 2026-07-01 | 🎯 **R62 完成 ✅** — 管线参数化改造：_PIPELINE_CONFIG + frontmatter 解析 + config/state 分离 + 兼容守卫，12/12 验收通过，合并部署 ws-bridge:r62 `0294fdb` |
 || v2.27 | 2026-06-30 | 🎯 **R61 完成 ✅** — 纯验证轮次：F-19（_get_agent_display 角色名）+ F-20（_broadcast_active_channel 自动切活跃频道）在真实管线中实测验证通过。零代码修改。QA 大宏拍板跳过。工作室已关闭 |
 |||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |
