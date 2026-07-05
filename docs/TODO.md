@@ -31,6 +31,7 @@
 | # | 事项 | 严重度 | 轮次 | 状态 |
 |:-:|:----|:-----:|:----:|:----:|
 | L-4 | **Gateway plugin 配置检查** — 确认 `gateway-plugin/plugin.yaml` 无内部信息残留 | 🟡 P3 | 待分配 | ⬜ 待启动 |
+| L-5 | **`_send_inbox_task` payload 补齐 `agent_id`/`from_agent` 字段** — 当前 inbox_payload 缺少发件人 agent_id，与 handle_broadcast inbox intercept 的 payload 不一致。需改函数签名 + 2 调用点传 `pm_agent_id`。R68 代码审查 💡 S-1 | 🟢 P3 | 待分配 | ⬜ 待启动 |
 
 ### D. 文档层清理
 
