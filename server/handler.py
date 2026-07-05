@@ -451,12 +451,23 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
     ws_id = f"{p.WORKSPACE_ID_PREFIX}{sender_id[:8]}-{ws_name[:20]}"
     users = auth.get_users()
     sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
+    
+    # ── R70 Fix: Resolve member names to agent IDs ──
+    def _resolve_member(name_or_id: str) -> str | None:
+        if name_or_id in users:
+            return name_or_id
+        for aid, u in users.items():
+            if u.get("name") == name_or_id:
+                return aid
+        return None
+    
     result = ws_mod.create_workspace(ws_id, ws_name, sender_id, sender_name)
     if not result:
         return f"❌ 创建失败：{ws_name} 可能已存在，或管理员名下活跃工作区过多"
-    for mid in member_ids:
-        if mid in users:
-            ws_mod.add_member(ws_id, mid)
+    for mid_raw in member_ids:
+        resolved = _resolve_member(mid_raw)
+        if resolved:
+            ws_mod.add_member(ws_id, resolved)
 
     # Auto-bind creator's active channel to new workspace
     persistence.set_agent_channel(sender_id, ws_id)
