@@ -2104,15 +2104,26 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             if u.get("role", "member") in all_roles:
                 member_ids.append(aid)
 
-    # 创建工作室（带自动组建）
-    create_params = {
-        "_positional": [f"{round_name}-dev"],
-        "members": ",".join(member_ids),
-    }
-    create_result = await _cmd_create_workspace(sender_id, create_params)
-
-    # 从结果提取 ws_id（调用 persistence 获取最新频道）
-    ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
+    # ── R70 Fix: 先检查是否已有当前 round 的工作室 ──
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    existing_ws = ws_mod.get_workspace(sender_ch) if sender_ch != p.LOBBY else None
+    if existing_ws and round_name in existing_ws.name:
+        # Reuse existing workspace instead of creating a new one
+        ws_id = existing_ws.id
+        create_result = f"✅ 复用现有工作室「{existing_ws.name}」({ws_id[:16]}…)"
+        logger.info(
+            "R70: Reusing existing workspace %s for pipeline %s (sender %s)",
+            ws_id, round_name, sender_id[:12],
+        )
+    else:
+        # 创建工作室（带自动组建）
+        create_params = {
+            "_positional": [f"{round_name}-dev"],
+            "members": ",".join(member_ids),
+        }
+        create_result = await _cmd_create_workspace(sender_id, create_params)
+        # 从结果提取 ws_id（调用 persistence 获取最新频道）
+        ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
 
     # R50+: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
     # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
@@ -2414,8 +2425,9 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # ── R55 E: Mode check ──
     # In manual mode, only the step's role can advance
     pstate = _PIPELINE_STATE.get(round_name, {})
+    # ── R70 Fix: step_config always defined (was inside manual block) ──
+    step_config = _get_step_config(round_name)
     if pstate.get("mode", "auto") == "manual":
-        step_config = _get_step_config(round_name)
         step_role = step_config.get(step_name, {}).get("role", "")
         if step_role:
             users = auth.get_users()
