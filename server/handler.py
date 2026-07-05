@@ -515,9 +515,15 @@ async def _cmd_list_workspaces(sender_id: str, params: dict) -> str:
         lines.append("  📦 Step 产出:")
         for out_step_key, out_info in sorted(step_outputs.items(), key=lambda x: _step_sort_key(x[0])):
             sha = out_info.get("sha", "")[:7]
-            desc = out_info.get("output_desc", "")
-            if sha or desc:
-                lines.append(f"    {out_step_key}: {sha}" + (" — " + desc if desc else ""))
+            title = out_info.get("title", out_step_key)
+            summary = out_info.get("summary", "")
+            url = out_info.get("artifact_url", "")
+            line = f"    {out_step_key} {title} — {sha}"
+            if summary:
+                line += f"\n      └ 💡 {summary[:80]}"
+            if url:
+                line += f"\n      └ 🔗 {url}"
+            lines.append(line)
 
         lines.append(f"  {status_icon} {w.id} \"{w.name}\" ({len(w.members)}人)")
     return "\n".join(lines)
@@ -1162,6 +1168,17 @@ def _step_sort_key(step_name: str) -> tuple:
     import re
     m = re.match(r'step(\d+)', step_name.lower())
     return (int(m.group(1)),) if m else (0, step_name)
+
+
+# ── R69 A1: Auto-infer artifact URL by step type ──
+def _infer_artifact_url(step_name: str, round_name: str) -> str:
+    """Auto-infer artifact URL based on step type. Returns '' if unknown."""
+    step_urls = {
+        "step2": f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-tech-plan.md",
+        "step4": f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-review-report.md",
+        "step5": f"{_R62_REPO_BASE}/docs/{round_name}/test-report.md",
+    }
+    return step_urls.get(step_name, "")
 
 
 from . import config as _r42cfg
@@ -2245,6 +2262,7 @@ async def _send_inbox_task(
     output_ref: str,
     workspace_id: str,
     pm_name: str,
+    pm_agent_id: str = "system",  # ← R69 B1
 ) -> None:
     """Send full task to target agent's inbox + lightweight workspace notification."""
     inbox_ch = persistence.get_inbox_channel(target_agent_id)
@@ -2258,20 +2276,38 @@ async def _send_inbox_task(
         _pstate.get("work_plan_url",
             f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"))
 
+    # ── R69 A3: Build rich context from step_outputs ──
+    _pstate_step_outputs = _pstate.get("step_outputs", {})
+    _prev_step_key = None
+    if _pstate_step_outputs:
+        for _sk in reversed(sorted(_pstate_step_outputs.keys(), key=_step_sort_key)):
+            if _sk != next_step:
+                _prev_step_key = _sk
+                break
+    _prev_section = ""
+    if _prev_step_key:
+        _prev_out = _pstate_step_outputs[_prev_step_key]
+        _prev_sha = _prev_out.get("sha", "")[:7]
+        _prev_title = _prev_out.get("title", _prev_step_key)
+        _prev_summary = _prev_out.get("summary", "")
+        _prev_url = _prev_out.get("artifact_url", "")
+        _prev_section = f"🏗️ 前序 Step {_prev_step_key.replace('step','')}「{_prev_title}」✅ ({_prev_sha})\n"
+        if _prev_summary:
+            _prev_section += f"  └ 💡 {_prev_summary}\n"
+        if _prev_url:
+            _prev_section += f"  └ 🔗 {_prev_url}\n"
+
     _step_title = _pconfig.get("steps", {}).get(next_step, {}).get("title", next_step)
     inbox_msg = (
-        f"📥 任务分配 — {round_name} Step「{_step_title}」\n\n"
-        f"背景上下文：\n"
-        f"  上一 Step 产出：{output_ref}\n\n"
-        f"任务描述：\n"
-        f"  请按技术方案完成 {next_step}\n\n"
-        f"参考文档：\n"
+        f"📥 任务分配 — {round_name} Step「{_step_title}」\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{_prev_section}\n"
+        f"📄 参考资料:\n"
         f"  📄 需求：{req_url}\n"
-        f"  📋 WORK_PLAN：{plan_url}\n"
-        f"  🔗 上一步产出：{output_ref}\n\n"
-        f"完成后：\n"
-        f"  1. git push dev\n"
-        f"  2. 在工作室回复 ✅ Step 完成 + commit SHA"
+        f"  📋 WORK_PLAN：{plan_url}\n\n"
+        f"🎯 你的任务: 请按技术方案完成 {next_step}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"完成后: git push dev → !step_complete {next_step} --output <sha>"
     )
 
     # Persist inbox message
@@ -2287,6 +2323,8 @@ async def _send_inbox_task(
     inbox_payload = json.dumps({
         "type": "broadcast", "channel": inbox_ch,
         "from_name": pm_name, "from": pm_name,
+        "agent_id": pm_agent_id,       # ← R69 B1
+        "from_agent": pm_agent_id,     # ← R69 B1
         "content": inbox_msg, "ts": time.time(),
     })
     conns = _connections.get(target_agent_id, set())
@@ -2421,14 +2459,18 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # ── R57: Clear backup_active marker on step completion ──
     pstate.pop("backup_active", None)
 
-    # ── R66 B1: Record step output ──
+    # ── R66 B1 + R69 A1: Record step output with context ──
     pstate_b1 = _PIPELINE_STATE.get(round_name)
     if pstate_b1:
         step_outputs = pstate_b1.setdefault("step_outputs", {})
         step_outputs[step_name] = {
             "sha": output_ref or "",
-            "timestamp": time.time(),
+            "title": step_config.get(step_name, {}).get("title", step_name),
             "output_desc": step_config.get(step_name, {}).get("output_desc", ""),
+            "summary": params.get("summary", step_config.get(step_name, {}).get("output_desc", "")),
+            "artifact_url": params.get("artifact_url",
+                _infer_artifact_url(step_name, round_name)),
+            "timestamp": time.time(),
         }
 
     # 查 Step 映射表 → 找下一角色
@@ -2579,6 +2621,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 output_ref=output_ref,
                 workspace_id=sender_ch,
                 pm_name=pm_name,
+                pm_agent_id=sender_id,  # ← R69 B1
             )
 
             # Start 30s rollcall timer (keep existing rollcall logic)
@@ -3072,6 +3115,25 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
     return f"🔄 {step_name} 已退回（第 {reject_count} 轮）：{reason}\n{next_task_result}"
 
 
+# ── R69 B2: Workspace reset ──
+async def _cmd_workspace_reset(sender_id: str, params: dict) -> str:
+    """重置工作室：关闭当前工作室 + 清理管线状态 + 成员频道回大厅。"""
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    if not sender_ch:
+        return "❌ 无法确定当前工作区"
+    ws_obj = ws_mod.get_workspace(sender_ch)
+    if not ws_obj:
+        return "❌ 未找到活跃工作室"
+    ws_id = ws_obj.id
+    ws_name = ws_obj.name
+    close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
+    await _broadcast_active_channel(p.LOBBY)
+    for pid, pst in list(_PIPELINE_STATE.items()):
+        if pst.get("ws_id") == ws_id:
+            _PIPELINE_STATE[pid]["active"] = False
+    return f"✅ 工作室「{ws_name}」({ws_id[:12]}) 已重置 — 归档 + 回大厅 + 管线清理完成"
+
+
 # ── R50: Step handoff command ──────────────────────────────────────
 
 
@@ -3201,6 +3263,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
             output_ref=output_ref,
             workspace_id=ws_id,
             pm_name="PM",
+            pm_agent_id=sender_id,  # ← R69 B1
         )
     else:
         _h_fb_users = auth.get_users()
@@ -3877,6 +3940,11 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "pipeline_role_override": {
         "handler": _cmd_pipeline_role_override, "min_role": 3, "workspace_scope": True,
         "usage": "!pipeline_role_override <step> --executor <role>",
+    },
+    # ── R69 B2: Workspace reset ──
+    "workspace_reset": {
+        "handler": _cmd_workspace_reset, "min_role": 3, "workspace_scope": True,
+        "usage": "!workspace_reset — 关闭当前工作室 + 清理管线状态 + 回大厅",
     },
 }
 
