@@ -2718,7 +2718,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     # ── R63 Phase 2: Step-complete → clear old timer, start next step timer ──
     if _ENABLE_R63_TIMEOUT:
         timeout_tracker.clear_timer(round_name)
-        _step_timeout_mins = _pconfig_s.get(next_step, {}).get("timeout_minutes",
+        _step_timeout_mins = step_config.get(next_step, {}).get("timeout_minutes",
             int(step_config.get(next_step, {}).get("timeout_hours", 6) * 60))
         timeout_tracker.start_timer(round_name, next_step, int(_step_timeout_mins))
     # ── R63 Phase 2: End ──
