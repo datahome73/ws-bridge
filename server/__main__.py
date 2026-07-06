@@ -711,6 +711,8 @@ async def _api_status(request: web.Request) -> web.Response:
     from .config import HIDDEN_AGENTS as _hidden
     from .persistence import get_web_sessions as _gws  # noqa: F811
     users = _get_approved_users()
+    from .persistence import get_api_keys as _get_api_keys
+    api_keys = _get_api_keys()
     now = time.time()
     agents_list = []
     seen = set()
@@ -718,13 +720,19 @@ async def _api_status(request: web.Request) -> web.Response:
         if agent_id in _hidden:
             continue
         info = users.get(agent_id, {})
+        # R73: fallback to api_keys.display_name for R72-registered agents
+        if not info:
+            key_info = api_keys.get(agent_id, {})
+            name = key_info.get("display_name", agent_id[:12])
+        else:
+            name = info.get("name", agent_id[:12])
         connected_at = min(
             (getattr(c, "_connected_at", now) for c in list(conns)),
             default=now,
         )
         agents_list.append({
             "id": agent_id[:16],
-            "name": info.get("name", agent_id[:12]),
+            "name": name,
             "online": True,
             "connections": len(list(conns)),
             "uptime_secs": int(now - connected_at),
@@ -738,6 +746,16 @@ async def _api_status(request: web.Request) -> web.Response:
                 "online": False,
                 "connections": 0,
             })
+    # R73: also list R72-registered agents that are offline
+    for agent_id, key_info in api_keys.items():
+        if agent_id not in seen and agent_id not in _hidden:
+            agents_list.append({
+                "id": agent_id[:16],
+                "name": key_info.get("display_name", agent_id[:12]),
+                "online": False,
+                "connections": 0,
+            })
+            seen.add(agent_id)
     return web.json_response({"agents": agents_list})
 
 
