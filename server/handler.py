@@ -4168,7 +4168,9 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         return
 
     users = auth.get_users()
-    sender_name = users.get(sender_id, {}).get("name", sender_id)
+    # R72: R72 agents live in _r72_users, not in users
+    sender_name = users.get(sender_id, {}).get("name") or \
+                  _r72_users.get(sender_id, {}).get("name", sender_id)
     sender_role = users.get(sender_id, {}).get("role", "member")
     admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
 
@@ -5153,7 +5155,8 @@ async def handler(ws):
                     continue
                 ws_id = f"{p.WORKSPACE_ID_PREFIX}{agent_id[:8]}-{ws_name[:20]}"
                 _users = auth.get_users()
-                _sender_name = _users.get(agent_id, {}).get("name", agent_id)
+                _sender_name = _users.get(agent_id, {}).get("name") or \
+                               _r72_users.get(agent_id, {}).get("name", agent_id)
                 _admin_ids = {aid for aid, u in _users.items() if u.get("role") == "admin"}
                 create_payload = json.dumps({
                     "type": "broadcast",
@@ -5404,7 +5407,8 @@ async def handler(ws):
                         await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 已归档，无法重置"})
                         continue
 
-                    sender_name = _users.get(agent_id, {}).get("name", agent_id[:12])
+                    sender_name = _users.get(agent_id, {}).get("name") or \
+                                   _r72_users.get(agent_id, {}).get("name", agent_id[:12])
                     member_ids = ws_info.members
 
                     reset_content = f"⚠️ 工作室 {workspace_id} 已重置，请各成员确认就位 🫡"
@@ -5429,7 +5433,8 @@ async def handler(ws):
                     _online = set(_connections.keys())
 
                     for mid in member_ids:
-                        name = _users.get(mid, {}).get("name", mid[:12])
+                        name = _users.get(mid, {}).get("name") or \
+                               _r72_users.get(mid, {}).get("name", mid[:12])
                         if mid in _online:
                             for conn in list(_connections.get(mid, set())):
                                 try:
@@ -5554,7 +5559,8 @@ async def handler(ws):
 
                 users = auth.get_users()
                 admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                sender_name = users.get(agent_id, {}).get("name", agent_id[:12])
+                sender_name = users.get(agent_id, {}).get("name") or \
+                              _r72_users.get(agent_id, {}).get("name", agent_id[:12])
 
                 if status == "accepted":
                     # ★ R53 B-2: Advance task from submitted → working
