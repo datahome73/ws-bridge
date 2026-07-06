@@ -192,7 +192,7 @@ def create_api_key(agent_id: str) -> str:
 
 def validate_api_key(api_key: str) -> str | None:
     """验证 api_key 并返回对应的 agent_id，无效返回 None"""
-    if not api_key.startswith("sk_ws_") or len(api_key) < 40:
+    if not api_key.startswith("sk_ws_") or len(api_key) < 37:
         return None
     from . import persistence
     keys = persistence.get_api_keys()

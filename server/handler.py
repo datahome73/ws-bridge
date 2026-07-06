@@ -210,7 +210,7 @@ async def handle_register(ws, msg: dict) -> str | None:
 
 async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
     """R72: Bot 自主注册 Agent Card。返回确认消息。"""
-    return await ac_mod.register_from_agent(agent_id, msg)
+    return ac_mod.register_from_agent(agent_id, msg)
 
 
 async def _push_offline(ws, since_ts: float) -> None:
