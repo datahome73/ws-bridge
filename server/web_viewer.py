@@ -221,8 +221,6 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     try:
         db_msgs = ms.get_messages_by_channel(channel, config.DATA_DIR, limit=limit)
         if db_msgs:
-            # DB returns newest first (ORDER BY ts DESC); frontend forward-iterates + appendChild
-            # → newest at top, oldest at bottom
             return web.json_response({"channel": channel, "messages": db_msgs})
     except Exception:
         pass
