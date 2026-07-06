@@ -222,7 +222,8 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     try:
         db_msgs = ms.get_messages_by_channel(channel, config.DATA_DIR, limit=limit)
         if db_msgs:
-            # DB returns newest first (ORDER BY ts DESC); frontend reverse-iterates
+            # DB returns newest first (ORDER BY ts DESC); frontend forward-iterates + appendChild
+            # → newest at top, oldest at bottom
             return web.json_response({"channel": channel, "messages": db_msgs})
     except Exception:
         pass
@@ -230,8 +231,7 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     # Fallback to log file — R36 D-2: multi-day fallback (days=7 for broader history)
     messages = read_channel_logs(channel, days=7)
     if messages:
-        msgs = messages[-limit:]
-        msgs.reverse()
+        msgs = messages[:limit]  # Take newest `limit` — messages is [newest..oldest]
         return web.json_response({"channel": channel, "messages": msgs})
     return web.json_response({"channel": channel, "messages": []})
 
