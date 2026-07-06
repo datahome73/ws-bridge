@@ -221,6 +221,8 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     try:
         db_msgs = ms.get_messages_by_channel(channel, config.DATA_DIR, limit=limit)
         if db_msgs:
+            # ★ 强制倒序：最新在上
+            db_msgs.reverse()
             return web.json_response({"channel": channel, "messages": db_msgs})
     except Exception:
         pass
@@ -239,6 +241,8 @@ async def handle_api_chat(request: web.Request) -> web.Response:
             except (ValueError, IndexError):
                 return 0
         messages.sort(key=_sort_key, reverse=True)
+        # ★ 强制倒序：最新在上
+        messages.reverse()
         return web.json_response({"channel": channel, "messages": messages[:limit]})
     return web.json_response({"channel": channel, "messages": []})
 
