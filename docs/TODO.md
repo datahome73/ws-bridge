@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.39
+> **版本：** v2.38
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -131,7 +131,7 @@
 
 | 版本 | 日期 | 变更 |
 
-||| v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |\n|||| v2.38 | 2026-07-06 | 🎯 **R72 完成 ✅** — Bot 统一认证与 Agent Card 自注册体系：protocol.py 新增 register/register_ok 类型 + FIELD_API_KEY；auth.py 新增 generate_agent_id / create_api_key / validate_api_key / revoke_api_key；handler.py 替换 handle_auth(api_key) + 新增 handle_register + handle_agent_card_register；agent_card.py 新增 register_from_agent()；persistence.py 新增 _api_keys 存储。17/17 验收 ALL GREEN 🟢。合并部署 main `b21e720` |
+|||| v2.38 | 2026-07-06 | 🎯 **R72 完成 ✅** — Bot 统一认证与 Agent Card 自注册体系：protocol.py 新增 register/register_ok 类型 + FIELD_API_KEY；auth.py 新增 generate_agent_id / create_api_key / validate_api_key / revoke_api_key；handler.py 替换 handle_auth(api_key) + 新增 handle_register + handle_agent_card_register；agent_card.py 新增 register_from_agent()；persistence.py 新增 _api_keys 存储。17/17 验收 ALL GREEN 🟢。合并部署 main `b21e720` |
 ||| v2.37 | 2026-07-05 | 🎯 **R71 完成 ✅** — Web 端诊断修复（F-9: WS await + fetch 超时 + 轮询增量；F-22: step_config 后备逻辑）。回归验证 3/3 ✅，治理 3/3 ✅。基线 198674d |
 || v2.36 | 2026-07-05 | 🎯 **R70 完成 ✅** — 验证轮 + 全链路回归：6-Step 管线跑通，R69 功能验证 7/9 ✅。发现 4 bug：`!step_complete` 变量作用域 (🔴)、角色映射缺陷 (🟡)、MSG_SET_ACTIVE_CHANNEL 单播 (🟡)、点名 ACK 超时异常 (🟢)。F-9 诊断排 R71 Web 验证轮。关闭归档。基线 `bfbdc7e→6967545` |
 ||| v2.35 | 2026-07-05 | 🎯 **R69 完成 ✅** — 收件箱上下文增强 + TODO 清理：step_outputs 扩展（title/summary/artifact_url）+ !step_complete --summary/-s --artifact-url/-u + _infer_artifact_url 自动推断 + _send_inbox_task 前序 Step 上下文注入 + payload 补齐 agent_id（L-5 ✅）+ !workspace_reset 命令（F-15 ✅）+ pipeline_status 结构展示。~47 行净增。合并部署 ws-bridge:r69 |\n||| v2.34 | 2026-07-05 | 🎯 **R68 完成 ✅** — Bot 私有收件箱通道：INBOX_CHANNEL_PREFIX 常量 + 工具函数 + 收件箱路由 + step_complete/handoff 收件箱派活。37/37 验收通过。合并部署 ws-bridge:r68 |\n||| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |\n|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
