@@ -1,7 +1,7 @@
 # R73 工作计划 — R72 认证体系修复 & 全员迁移 🛠️
 
-> 版本：v1.0 ✅（项目负责人审核通过）
-> 状态：✅ 已审核
+> 版本：v1.1 ✅（已归档）
+> 状态：✅ 已完成
 > 项目协调人：🧐 PM
 > 基于需求文档：docs/R73/R73-product-requirements.md v1.0 ✅
 
@@ -215,16 +215,16 @@ echo "- R73 完成: 权限打通 + 全员迁移 + 文档清理" >> docs/TODO.md
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | R72 agent 可执行 `!agent_card list` | ⏳ |
-| ✅-2 | R72 agent 可执行 `!agent_role_map` | ⏳ |
-| ✅-3 | R72 agent 可执行 `!pipeline_status` | ⏳ |
-| ✅-4 | 旧 agent 不受影响 | ⏳ |
-| ✅-5 | R72 agent 无法执行 `!agent_card set` | ⏳ |
-| ✅-6 | agent auth 后 card 状态为 online | ⏳ |
-| ✅-7 | auth 后 last_online 刷新 | ⏳ |
-| ✅-8 | 文档中小爱角色为 operations | ⏳ |
-| ✅-9 | 旧 credentials.json 已删除 | ⏳ |
-| ✅-10 | 全员 6 bot 重新注册（正确字段） | ⏳ |
+| ✅-1 | R72 agent 可执行 `!agent_card list` | 🟢 通过 ✅ |
+| ✅-2 | R72 agent 可执行 `!agent_role_map` | 🟢 通过 ✅ |
+| ✅-3 | R72 agent 可执行 `!pipeline_status` | 🟢 通过 ✅ |
+| ✅-4 | 旧 agent 不受影响 | 🟢 通过 ✅ |
+| ✅-5 | R72 agent 无法执行 `!agent_card set` | 🟢 通过 ✅ |
+| ✅-6 | agent auth 后 card 状态为 online | 🟢 通过 ✅ |
+| ✅-7 | auth 后 last_online 刷新 | 🟢 通过 ✅ |
+| ✅-8 | 文档中小爱角色为 operations | 🟢 通过 ✅ |
+| ✅-9 | 旧 credentials.json 已删除 | 🟢 通过 ✅ |
+| ✅-10 | 全员 6 bot 重新注册（正确字段） | 🟢 通过 ✅ |
 
 ---
 
@@ -232,4 +232,5 @@ echo "- R73 完成: 权限打通 + 全员迁移 + 文档清理" >> docs/TODO.md
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
+| v1.1 | 2026-07-06 | ✅ **Step 5+6 完成** — 测试 10/10 🟢 通过，合并部署 main `87ad5d4`，全员 6 bot 重新注册，ws-bridge:r73 |
 | v1.0 | 2026-07-06 | 初稿 — R73 WORK_PLAN 定稿（审核通过后） |
