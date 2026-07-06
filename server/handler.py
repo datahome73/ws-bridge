@@ -130,18 +130,30 @@ async def _send(ws, data: dict) -> None:
 # ── R29: Online member list builder ───────────────────────────────
 def _build_online_list(users: dict) -> str:
     """Build a comma-separated online member list with admin annotation.
-    Uses _connections (global) to determine who is online."""
+    Uses _connections (global) to determine who is online.
+    R72 B: 也包含通过 api_key 注册的 agent（不在 approved_users 中）。"""
+    # Build a name map: approved_users first, then api_keys as fallback
+    api_keys = persistence.get_api_keys() if hasattr(persistence, 'get_api_keys') else {}
     online_ids = set(_connections.keys())
-    online_users = [(aid, users.get(aid, {})) for aid in online_ids if aid in users]
-    admins = [(aid, u) for aid, u in online_users if u.get("role") == "admin"]
-    members = [(aid, u) for aid, u in online_users if u.get("role") != "admin"]
     parts = []
-    for aid, u in admins:
-        name = u.get("name", aid[:12])
-        parts.append(f"{name}(管理员)")
-    for aid, u in members:
-        name = u.get("name", aid[:12])
-        parts.append(name)
+    for aid in sorted(online_ids):
+        u = users.get(aid, {})
+        name = u.get("name", "")
+        role = u.get("role", "")
+        if not name:
+            # R72: fallback to api_key display_name or agent card
+            ak = api_keys.get(aid, {})
+            name = ak.get("display_name", "")
+            from . import agent_card as ac_mod
+            if not name:
+                card = ac_mod.get_all_cards().get(aid, {})
+                name = card.get("display_name", "")
+        if not name:
+            name = aid[:12]
+        prefix = ""
+        if role == "admin":
+            prefix = "管理员 "
+        parts.append(f"{prefix}{name}")
     return "、".join(parts) if parts else "无"
 
 
@@ -165,7 +177,23 @@ async def handle_auth(ws, msg: dict) -> str | None:
         p.FIELD_ACTIVE_CHANNEL: persistence.get_agent_channel(agent_id) or p.LOBBY,
     })
     logger.info("Agent %s authenticated (api_key)", agent_id[:20])
+
+    # ── R72 B: 认证成功后同步更新 Agent Card 的在线状态 ──
+    _update_agent_online_status(agent_id)
+
     return agent_id
+
+
+def _update_agent_online_status(agent_id: str) -> None:
+    """R72 B: 认证/注册后同步更新 Agent Card 状态为 online 并刷新 last_online。
+    确保 card 状态与 WebSocket 连接状态一致，防止 mark_stale_offline 后无法恢复。"""
+    import server.agent_card as ac_mod
+    cards = ac_mod.get_all_cards()
+    card = cards.get(agent_id)
+    if card:
+        card["status"] = "online"
+        card["last_online"] = time.time()
+        ac_mod.update_card(agent_id, card)
 
 
 async def handle_register(ws, msg: dict) -> str | None:
@@ -205,6 +233,10 @@ async def handle_register(ws, msg: dict) -> str | None:
         p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
     })
     logger.info("Agent registered: %s (%s)", agent_id[:20], display_name)
+
+    # ── 同步更新 Agent Card 状态（如存在历史卡片） ──
+    _update_agent_online_status(agent_id)
+
     return agent_id
 
 
@@ -396,6 +428,12 @@ def _check_command_permission(
     # _cmd_step_complete, where we have the round context.
     if cmd_name == "step_complete" and min_role <= 1:
         return True, ""
+
+    # ── R73: Member-level commands (min_role=2) ───────────────
+    if min_role <= 2:
+        if auth.is_approved(agent_id):
+            return True, ""
+        return False, "权限不足：仅已认证成员可执行"
 
     # P3: verify actual workspace admin before allowing ws_scope commands
     if min_role <= 3 and ws_scope:
@@ -3584,6 +3622,10 @@ async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
     positional = params.get("_positional", [])
     if positional and positional[0] in ("get", "set", "unset", "reload", "watch"):
         sub_cmd = positional[0]
+        # ── R73 B: Write subcommands require workspace_admin ──
+        if sub_cmd in ("set", "unset") and not auth.is_global_admin(sender_id):
+            if not _is_any_workspace_admin(sender_id):
+                return "❌ 权限不足：仅工作区管理员可修改 Agent Card"
         sub_params = dict(params)
         sub_params["_positional"] = positional[1:]
         handler_map = {
@@ -3876,15 +3918,15 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
         # ── R49 B: Agent Card commands ──
     "agent_card": {
-        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card [list|get|set|unset|reload] ...",
     },
     "agent_card_list": {
-        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card list",
     },
     "agent_card_get": {
-        "handler": _cmd_agent_card_get, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_get, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card get <agent_id>",
     },
     "agent_card_set": {
