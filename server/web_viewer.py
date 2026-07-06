@@ -130,8 +130,7 @@ def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
         except OSError:
             continue
 
-    # Return newest first (most recent = last appended to result list)
-    result.reverse()
+    # Return messages as collected (oldest-first from buffer + newest-first from file)
     return result
 
 
@@ -230,9 +229,18 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     # Fallback to log file — R36 D-2: multi-day fallback (days=7 for broader history)
     messages = read_channel_logs(channel, days=7)
     if messages:
-        msgs = messages[-limit:]
-        msgs.reverse()
-        return web.json_response({"channel": channel, "messages": msgs})
+        # Sort by ts descending (newest first)
+        def _sort_key(m):
+            ts = m.get("ts", 0)
+            if isinstance(ts, (int, float)):
+                return ts
+            try:
+                parts = ts.split(":")
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            except (ValueError, IndexError):
+                return 0
+        messages.sort(key=_sort_key, reverse=True)
+        return web.json_response({"channel": channel, "messages": messages[:limit]})
     return web.json_response({"channel": channel, "messages": []})
 
 
