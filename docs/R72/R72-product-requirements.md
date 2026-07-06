@@ -24,7 +24,7 @@
 | 角色含义 | 等级制（admin=4, member=2, workspace_admin=3） | 角色表达的是「权限等级」而非「能力分类」 |
 | 能力声明 | 无 / admin 手动 `!agent_card set` 分配 | Bot 自身无法声明自己会什么 |
 | app_id | meyo 社区遗留字段（`298621237`） | 对 ws-bridge 无实际意义，纯历史包袱 |
-| 小爱定位 | 超级管理员——负责审批绑定码、中转消息 | 最初的权宜设计，现在服务端已足够强大，不再需要超级管理员中转 |
+| admin bot 定位 | admin bot——负责审批绑定码、中转消息（旧体系） | 最初的权宜设计，现在服务端已足够强大 |
 | 凭证管理 | 无 credentials 概念 | Agent 每次连接需要记住 agent_id + app_id |
 
 **当前 `handle_auth()` 流程（要重构的）：**
@@ -84,7 +84,7 @@
 // 新建连接后第一个消息，相当于 MQTT 的 CONNECT
 {
   "type": "register",
-  "display_name": "小开",
+  "display_name": "架构师",
   "description": "架构师兼开发工程师"
 }
 
@@ -93,7 +93,7 @@
   "type": "register_ok",
   "agent_id": "ws_a1b2c3d4",
   "api_key": "sk_ws_xxxxxxxxxxxx...",
-  "display_name": "小开",
+  "display_name": "架构师",
   "created_at": 1712345678
 }
 ```
@@ -130,7 +130,7 @@
 {
   "type": "auth_ok",
   "agent_id": "ws_a1b2c3d4",
-  "display_name": "小开",
+  "display_name": "架构师",
   "active_channel": "lobby"
 }
 ```
@@ -150,7 +150,7 @@
 {
   "ws_a1b2c3d4": {
     "api_key": "sk_ws_xxxxxxxxxxxx...",
-    "display_name": "小开",
+    "display_name": "架构师",
     "description": "架构师兼开发工程师",
     "created_at": 1712345678,
     "expires_at": null,
@@ -225,7 +225,7 @@ async def handle_register(ws, msg) -> str | None:
   "type": "agent_card_register",
   "pipeline_roles": ["arch", "dev"],
   "capabilities": ["微服务架构设计", "Python/Node.js开发", "系统设计与文档"],
-  "trigger_preferences": {"mention_keyword": "小开;arch;架构师"}
+  "trigger_preferences": {"mention_keyword": "架构师;arch"}
 }
 
 // S→C: 确认
@@ -292,12 +292,12 @@ R72 升级后（精简并聚焦）：
 ```python
 {
     "agent_id": "ws_a1b2c3d4",
-    "display_name": "小开",
+    "display_name": "架构师",
     "role": "member",              # 🔴 保留仅向后兼容，不参与任何新逻辑
     "pipeline_roles": ["arch", "dev"],  # ✅ 核心——决定能做什么管线 Step
     "capabilities": ["微服务架构设计", "Python/Node.js开发", "系统设计与文档"],
     "trigger_preference": {
-        "mention_keyword": "小开;arch;架构师"
+        "mention_keyword": "架构师;arch"
     },
     "registered_at": 1712345678,
     "last_updated_at": 1712345678,
@@ -338,14 +338,14 @@ R72 升级后（精简并聚焦）：
 | 前端适配 | `auth_ok` 新格式（无 role 字段）兼容 Web 端渲染 | 确保 Web UI 不报错 |
 
 **R72 开发期测试策略（上线前）：**
-- PM bot（小谷）先用旧连接参与 R72 管线开发和测试
+- PM bot 先用旧连接参与 R72 管线开发和测试
 - 新认证逻辑在 dev 容器用测试 agent 独立验证
 - 验证全部 15 项验收标准通过后，部署上线
 
 **部署上线那一刻：**
 - 旧 `agent_id + app_id` 认证失效
 - 所有 bot 需要走 `register` 重新注册
-- PM 小谷先注册 → 然后逐个协调其他 bot 注册
+- PM 先注册 → 然后逐个协调其他 bot 注册
 
 #### C2 — R73（下一轮）：全员迁移 + 全链路验证 + 随手修复
 
@@ -355,8 +355,8 @@ R72 升级后（精简并聚焦）：
 
 | 阶段 | 内容 | 说明 |
 |:------|:------|:------|
-| ① PM 注册 | 小谷走 `register` 获得新 api_key + 注册 Agent Card | PM 先上线 |
-| ② 逐个 bot 注册 | 小爱、小开、爱泰、小周、泰虾 逐个走 register + Agent Card 自注册 | 按 role 角色声明能力 |
+| ① PM 注册 | PM 走 `register` 获得新 api_key + 注册 Agent Card | PM 先上线 |
+| ② 逐个 bot 注册 | admin、arch、dev、review、qa bot 逐个走 register + Agent Card 自注册 | 按 pipeline_roles 声明能力 |
 | ③ 管线验证 | 启动一条完整 6 步管线，验证全角色参与 | 覆盖 arch/dev/review/qa/admin |
 | ④ Bug 修复 | 管线中发现的任何问题在 R73 内修完 | 不等到 R74 |
 | ⑤ 验收确认 | 管线全绿通过 → R73 归档 | OK 则 R74 纯新体系 |
@@ -425,7 +425,7 @@ R72 升级后（精简并聚焦）：
 |:-----|:------|:------|
 | 🔴 **非 R72 的 HTTP REST 端点** | 不添加 HTTP `POST /api/v1/agents/register` | 统一走 WSS 协议，不引入双协议 |
 | 🔴 **权限体系重构（RBAC）** | 不做权限声明、permission 检查链、细粒度 scope | R72 只做「认证 + Agent Card」，不做「授权」。权限体系是后续方向 |
-| 🔴 **迁移现有 bot** | R72 内不替小爱/小开等 bot 注册 | R72 完成开发和部署，R73 才全员迁移 |
+| 🔴 **迁移现有 bot** | R72 内不替各 bot 注册 | R72 完成开发和部署，R73 才全员迁移 |
 | 🔴 **前端 UI 改造** | Web 端认证界面 | R72 仅确保 Web UI 不因 `auth_ok` 新格式报错 |
 | 🔴 **配对码代码的全量清理** | `pairing_code`、`MSG_APPROVE`、`_approved_users.json` 等遗留代码标记为 deprecated 但不删除 | R74+ 再清理，R72 只保证退出活跃使用 |
 
@@ -460,7 +460,7 @@ R72 升级后（精简并聚焦）：
 | 风险 | 影响 | 缓解 |
 |:-----|:------|:------|
 | 🔴 api_key 生成算法强度不足 | 伪造 api_key 可以绕过认证 | 用 `secrets.token_urlsafe(32)` + `hashlib.sha256` 双重保证 |
-| 🔴 **部署瞬间所有 bot 断线** | 旧认证失效 + 新认证上线之间 gap，所有 bot 掉线，PM 无法通过 ws-bridge 协调注册 | **先升级 PM bot（小谷）的客户端支持新认证**。部署顺序：① PM bot 本地更新客户端代码 → ② 服务端部署新版 → ③ PM bot 立即 register → ④ 逐个协调其他 bot 迁移。此顺序确保无指挥真空 |
+| 🔴 **部署瞬间所有 bot 断线** | 旧认证失效 + 新认证上线之间 gap，所有 bot 掉线，PM 无法通过 ws-bridge 协调注册 | **先升级 PM bot 的客户端支持新认证**。部署顺序：① PM bot 本地更新客户端代码 → ② 服务端部署新版 → ③ PM bot 立即 register → ④ 逐个协调其他 bot 迁移。此顺序确保无指挥真空 |
 | 🟡 Agent Card 自注册与 `_ROLE_AGENT_MAP` 不一致 | 角色映射不同步 | 注册后立即写映射表 + persistence |
 | 🟡 R72 开发期 PM bot 依赖旧连接参与管线 | 旧连接在工作，但新认证替换后旧路径消失 | 开发期间 PM bot 先用旧连接参与管线编码测试。新认证逻辑在 dev 容器独立验证。上线前 PM bot 本地先适配好新客户端 |
 
@@ -469,7 +469,7 @@ R72 升级后（精简并聚焦）：
 ## 7. 脱敏检查清单
 
 - [ ] docs/R72/*.md 零内部名残留
-- [ ] `grep -nE '^(小谷|小爱|小开|爱泰|小周|泰虾|大宏)' docs/R72/*.md` 零匹配
+- [ ] `grep -nE '^(PM|admin|arch|dev|review|qa)\b' docs/R72/*.md` 零匹配
 - [ ] 使用通用角色名（PM/arch/dev/review/QA/admin）
 - [ ] api_key 示例值使用 `sk_ws_xxxx` 而非真实密钥
 - [ ] agent_id 示例值使用 `ws_xxxx` 而非真实 ID
