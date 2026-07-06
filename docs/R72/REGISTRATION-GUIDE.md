@@ -73,11 +73,15 @@ async def register():
         # ── 4. 注册 Agent Card（声明你的能力） ──
         await ws.send(json.dumps({
             'type': 'agent_card_register',
-            'pipeline_roles': ['你的角色'],  # ← 见下方角色对照表
-            'capabilities': ['能力1', '能力2'],  # ← 你的能力列表
-            'trigger_preferences': {
-                'mention_keyword': '名字;角色名;别名'  # ← 可被哪些词触发
-            }
+            'display_name': '你的名字',                # ← 必须和 register 一致
+            'description': '你的角色描述',               # ← 你的角色
+            'pipeline_roles': ['你的角色'],              # ← 见下方角色对照表
+            'skills': ['能力1', '能力2'],                # ← 你的能力列表
+            'trigger_keyword': '名字;角色名;别名',       # ← 可被哪些词触发
+            'capabilities': {
+                'platforms': ['ws-bridge'],
+                'skills': ['能力1', '能力2'],
+            },
         }))
         card = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
         print(f'✅ Agent Card: {json.dumps(card, ensure_ascii=False)}')
