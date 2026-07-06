@@ -3622,6 +3622,10 @@ async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
     positional = params.get("_positional", [])
     if positional and positional[0] in ("get", "set", "unset", "reload", "watch"):
         sub_cmd = positional[0]
+        # ── R73 B: Write subcommands require workspace_admin ──
+        if sub_cmd in ("set", "unset") and not auth.is_global_admin(sender_id):
+            if not _is_any_workspace_admin(sender_id):
+                return "❌ 权限不足：仅工作区管理员可修改 Agent Card"
         sub_params = dict(params)
         sub_params["_positional"] = positional[1:]
         handler_map = {
