@@ -66,7 +66,12 @@ def cleanup_expired_codes() -> int:
 
 
 def is_approved(agent_id: str) -> bool:
-    return agent_id in persistence.get_approved_users()
+    # R73: Check approved users first
+    if agent_id in persistence.get_approved_users():
+        return True
+    # R73: Agents registered via R72 api_key are also considered approved
+    api_keys = persistence.get_api_keys()
+    return agent_id in api_keys
 
 
 def get_users() -> dict:
