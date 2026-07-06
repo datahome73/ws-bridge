@@ -140,7 +140,7 @@ rm -f /opt/data/.ws-bridge/credentials.json
 
 **完成后：** `git add server/auth.py server/handler.py docs/R72/REGISTRATION-GUIDE.md` → `git commit -m "fix(R73): R72 注册 agent 权限打通 + 小爱角色 operations"` → `git push origin dev`
 
-### Step 4：审查（Review — 主角：小周，备用：泰虾）
+### Step 4：审查 ✅ cfc7b80（Review — 主角：小周，备用：泰虾）
 
 **审查重点：**
 
