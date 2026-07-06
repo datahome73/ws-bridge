@@ -1,9 +1,15 @@
-"""WS Bridge Gateway plugin — broadcast group chat for bots."""
+"""WS Bridge Gateway plugin — broadcast group chat for bots (R72+).
+
+Uses the new R72 auth: register → api_key → auth(api_key).
+Credentials are stored in ``~/.ws-bridge/{display_name}.json``.
+"""
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 from gateway.config import Platform, PlatformConfig
@@ -14,7 +20,6 @@ from .ws_bridge_protocol import (
     MSG_AUTH,
     MSG_AUTH_OK,
     MSG_AUTH_ERROR,
-    MSG_PAIRING_CODE,
     MSG_BROADCAST,
     MSG_MESSAGE,
     MSG_ACK,
@@ -35,14 +40,36 @@ from .ws_bridge_protocol import (
 
 logger = logging.getLogger(__name__)
 
-# ── Env helpers (backward-compatible with WS_BRIDGE_*) ──────────────────────
+# ── Credential helpers ──────────────────────────────────────────────
+
+CRED_DIR = os.path.expanduser("~/.ws-bridge")
+
+
+def _cred_path(name: str) -> str:
+    return os.path.join(CRED_DIR, f"{name}.json")
+
+
+def _load_creds(name: str) -> Optional[dict]:
+    """Load credentials from ``~/.ws-bridge/{name}.json``."""
+    path = _cred_path(name)
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                return _json.load(f)
+    except Exception as e:
+        logger.warning("[WSBridge] Failed to load creds from %s: %s", path, e)
+    return None
+
+
+# ── Env helpers ─────────────────────────────────────────────────────
 
 def _env(key: str, default: str = "") -> str:
-    """Read WS_IM_* env var with WS_BRIDGE_* fallback (1-week compat)."""
     im_key = f"WS_IM_{key}"
     bridge_key = f"WS_BRIDGE_{key}"
     return os.environ.get(im_key) or os.environ.get(bridge_key) or default
 
+
+# ── Platform callbacks ──────────────────────────────────────────────
 
 def check_requirements() -> bool:
     try:
@@ -54,30 +81,30 @@ def check_requirements() -> bool:
 
 def validate_config(config: PlatformConfig) -> bool:
     extra = config.extra or {}
-    agent_id = extra.get("agent_id") or _env("AGENT_ID")
     url = extra.get("url") or _env("URL")
-    if not agent_id:
-        logger.warning("[WSBridge] AGENT_ID not configured")
-        return False
     if not url:
         logger.warning("[WSBridge] URL not configured")
         return False
+    # api_key can be in env, config, or ~/.ws-bridge/{name}.json
     return True
 
 
 def is_connected(config: PlatformConfig) -> bool:
-    extra = config.extra or {}
-    return bool(extra.get("agent_id") or _env("AGENT_ID"))
+    return True  # connected state managed by adapter instance
 
 
 def interactive_setup() -> None:
-    print("\n--- WS Bridge Setup ---")
-    url = input("WS Bridge URL (e.g. wss://example.com): ").strip()
+    print("\n--- WS Bridge Setup (R72) ---")
+    url = input("WS Bridge URL (e.g. wss://wsim.datahome73.cloud/ws): ").strip()
     if url:
         print(f"Set env var: export WS_IM_URL={url}")
-    agent_id = input("Your Agent ID: ").strip()
-    if agent_id:
-        print(f"Set env var: export WS_IM_AGENT_ID={agent_id}")
+    name = input("Your display name (e.g. 小谷): ").strip()
+    if name:
+        print(f"Set env var: export WS_IM_BOT_NAME={name}")
+        print(f"Or place credentials at ~/.ws-bridge/{name}.json")
+    api_key = input("API key (or leave blank to use cred file): ").strip()
+    if api_key:
+        print("Set env var: export WS_IM_API_KEY=...")
     print("Done.\n")
 
 
@@ -86,34 +113,42 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> Optional[dict]:
     if not isinstance(extra, dict):
         extra = {}
     seeded = {}
-    for key in ("url", "agent_id", "app_id", "bot_name", "role"):
+    for key in ("url", "api_key", "bot_name", "role"):
         val = extra.get(key) or _env(key.upper())
         if val:
             seeded[key] = val
     mention_mode = extra.get("mention_mode")
     if mention_mode is not None:
         seeded["mention_mode"] = bool(mention_mode)
-    mention_keyword = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or "admin-bot"
+    mention_keyword = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or ""
     seeded["mention_keyword"] = mention_keyword
     return seeded if seeded else None
 
 
 def _env_enablement() -> Optional[dict]:
     extra = {}
-    agent_id = _env("AGENT_ID")
-    if agent_id:
-        extra["agent_id"] = agent_id
     url = _env("URL")
     if url:
         extra["url"] = url
+    api_key = _env("API_KEY")
+    if api_key:
+        extra["api_key"] = api_key
+    name = _env("BOT_NAME")
+    if name:
+        extra["bot_name"] = name
     return extra if extra else None
 
 
-# ── Adapter ────────────────────────────────────────────────────────────
-
+# ── Adapter ─────────────────────────────────────────────────────────
 
 class WSBridgeAdapter(BasePlatformAdapter):
-    """WS IM client adapter — connects to a self-hosted WS broadcast hub."""
+    """WS Bridge adapter (R72+ new auth via api_key).
+
+    Connects to a self-hosted WS Bridge hub using the new R72 auth flow.
+    Credentials are loaded from:
+      1. ``api_key`` config field / ``WS_IM_API_KEY`` env var
+      2. ``~/.ws-bridge/{bot_name}.json`` (automatic fallback)
+    """
 
     supports_code_blocks = True
     name = "ws_bridge"
@@ -125,16 +160,34 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._url = normalize_ws_url(
             extra.get("url") or _env("URL") or ""
         )
-        self._agent_id = extra.get("agent_id") or _env("AGENT_ID") or ""
-        self._app_id = extra.get("app_id") or _env("APP_ID") or ""
-        self._bot_name = extra.get("bot_name") or _env("BOT_NAME") or "Hermes"
+        self._bot_name = extra.get("bot_name") or _env("BOT_NAME") or "bot"
         self._role = extra.get("role") or "member"
         self._mention_mode = bool(extra.get("mention_mode", False))
-        raw = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or "admin-bot"
+        raw = extra.get("mention_keyword") or _env("MENTION_KEYWORD") or ""
         self._mention_keywords = sorted(
             (kw.strip() for kw in raw.split(";") if kw.strip()),
             key=len, reverse=True,
         )
+
+        # ── Resolve api_key ──
+        api_key = extra.get("api_key") or _env("API_KEY") or ""
+        agent_id = ""
+
+        # Fallback: load from ~/.ws-bridge/{name}.json
+        if not api_key:
+            creds = _load_creds(self._bot_name)
+            if creds:
+                api_key = creds.get("api_key", "")
+                agent_id = creds.get("agent_id", "")
+                logger.info(
+                    "[WSBridge] Loaded creds from ~/.ws-bridge/%s.json (agent=%s)",
+                    self._bot_name, agent_id[:16],
+                )
+
+        self._api_key = api_key
+        self._agent_id = agent_id
+
+        # If we didn't get api_key yet, fail gracefully at connect time
         self._last_msg_ts: float = 0.0
         self._active_channel: str = "lobby"
 
@@ -145,20 +198,30 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._should_reconnect = True
 
         logger.warning(
-            "[WSBridge] Initialized (agent=%s url=%s role=%s keywords=%s)",
-            self._agent_id[:20], self._url, self._role, self._mention_keywords,
+            "[WSBridge] Initialized (bot=%s url=%s %s%s)",
+            self._bot_name, self._url,
+            "api_key=***" if self._api_key else "NO API KEY",
+            f" agent_id={agent_id[:16]}" if agent_id else "",
         )
 
-    # ── Lifecycle ──────────────────────────────────────────────────────
+    # ── Lifecycle ──────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
-        """Connect with exponential backoff — single retry loop."""
-        if not self._agent_id or not self._url:
-            logger.error("[WSBridge] Missing agent_id or url")
+        """Connect with exponential backoff — single retry loop.
+
+        Uses R72 auth: send ``{"type": "auth", "api_key": ...}``.
+        """
+        if not self._url:
+            logger.error("[WSBridge] URL not configured")
+            return False
+        if not self._api_key:
+            logger.error(
+                "[WSBridge] No api_key for '%s'. Set WS_IM_API_KEY "
+                "or place ~/.ws-bridge/%s.json", self._bot_name, self._bot_name
+            )
             return False
 
         import asyncio
-        import json as _json
 
         self._stop_event.clear()
         self._should_reconnect = True
@@ -177,6 +240,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
                     ping_interval=PING_INTERVAL,
                     ping_timeout=10,
                     close_timeout=5,
+                    max_size=2 ** 20,
                 )
             except asyncio.CancelledError:
                 self._should_reconnect = False
@@ -190,14 +254,11 @@ class WSBridgeAdapter(BasePlatformAdapter):
                     backoff = min(backoff * 2, RECONNECT_MAX_DELAY)
                 continue
 
-            # Connected — send auth
-            logger.warning("[WSBridge] CONNECTED — sending auth...")
+            # Connected — send R72 auth (just api_key)
+            logger.warning("[WSBridge] CONNECTED — sending R72 auth...")
             auth_msg = _json.dumps({
                 "type": MSG_AUTH,
-                "app_id": self._app_id,
-                "agent_id": self._agent_id,
-                "name": self._bot_name,
-                "last_seen_ts": self._last_msg_ts,
+                "api_key": self._api_key,
             })
             try:
                 await self._ws.send(auth_msg)
@@ -217,25 +278,24 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
             resp_type = resp.get("type")
             if resp_type == MSG_AUTH_OK:
-                # R7: record active channel from server (owner only)
+                self._agent_id = resp.get("agent_id", self._agent_id)
                 self._active_channel = resp.get(FIELD_ACTIVE_CHANNEL, "lobby")
                 logger.warning(
-                    "[WSBridge] Auth OK — role=%s agent_id=%s channel=%s",
-                    resp.get("role"), resp.get("agent_id", "")[:20], self._active_channel,
+                    "[WSBridge] Auth OK — agent_id=%s display_name=%s channel=%s",
+                    self._agent_id[:20], resp.get("display_name", "?"),
+                    self._active_channel,
                 )
                 backoff = RECONNECT_BASE_DELAY
-                # Start reader loop
                 asyncio.create_task(self._reader_loop())
                 return True
-            elif resp_type == MSG_PAIRING_CODE:
-                code = resp.get("code", "?")
-                logger.warning(
-                    "[WSBridge] PAIRING CODE — %s (send to admin for approval)", code
+            elif resp_type == MSG_AUTH_ERROR:
+                logger.error(
+                    "[WSBridge] Auth error: %s", resp.get("error", "unknown")
                 )
                 await self._ws.close()
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, RECONNECT_MAX_DELAY)
-                continue
+                # Don't retry on auth error — credentials are wrong
+                self._should_reconnect = False
+                return False
             else:
                 logger.error("[WSBridge] Unexpected auth response: %s", str(resp)[:200])
                 await self._ws.close()
@@ -268,16 +328,16 @@ class WSBridgeAdapter(BasePlatformAdapter):
         if not self._ws:
             return SendResult(success=False, message_id="", error="Not connected")
 
-        import json, time
-
         channel = self._determine_channel(content, chat_id)
+        msg_id = str(time.time())
 
-        payload = json.dumps({
+        payload = _json.dumps({
             "type": MSG_MESSAGE,
             "from_name": self._bot_name,
             "agent_id": self._agent_id,
             "content": content,
             "channel": channel,
+            "id": msg_id,
             "ts": time.time(),
         })
 
@@ -287,7 +347,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
             try:
                 await self._ws.send(payload)
                 logger.warning("[WSBridge] >> %s", content[:120])
-                return SendResult(success=True, message_id=str(time.time()))
+                return SendResult(success=True, message_id=msg_id)
             except Exception as e:
                 logger.error("[WSBridge] send error: %s", e)
                 return SendResult(success=False, message_id="", error=str(e))
@@ -295,11 +355,11 @@ class WSBridgeAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": "WS Bridge", "type": "group"}
 
-    # ── Reader Loop ────────────────────────────────────────────────────
+    # ── Reader Loop ────────────────────────────────────────────────
 
     async def _reader_loop(self) -> None:
         """Read messages and dispatch."""
-        import asyncio, json
+        import asyncio
 
         while not self._stop_event.is_set():
             async with self._ws_lock:
@@ -319,8 +379,8 @@ class WSBridgeAdapter(BasePlatformAdapter):
                 break
 
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
+                msg = _json.loads(raw)
+            except _json.JSONDecodeError:
                 logger.warning("[WSBridge] raw: %s", str(raw)[:100])
                 continue
 
@@ -332,14 +392,13 @@ class WSBridgeAdapter(BasePlatformAdapter):
             await asyncio.sleep(RECONNECT_BASE_DELAY)
             asyncio.create_task(self.connect())
 
-    # ── Message Handling ───────────────────────────────────────────────
+    # ── Message Handling ───────────────────────────────────────────
 
     async def _handle_ws_message(self, msg: dict) -> None:
         """Handle incoming WS message."""
         msg_type = msg.get("type")
 
         if msg_type == MSG_BROADCAST:
-            # Support both new and legacy field names
             content = msg.get("content", "")
             from_name = msg.get("from_name") or msg.get("from", "")
             from_agent = msg.get("agent_id") or msg.get("from_agent", "")
@@ -347,19 +406,20 @@ class WSBridgeAdapter(BasePlatformAdapter):
             if not content or not from_name:
                 return
 
-            # Track last message timestamp for reconnection catchup
             ts = msg.get("ts", 0)
             if ts > self._last_msg_ts:
                 self._last_msg_ts = ts
 
-            logger.warning("[WSBridge] << broadcast from=%s: %s", from_name, content[:200])
+            logger.warning(
+                "[WSBridge] << broadcast from=%s: %s", from_name, content[:200]
+            )
 
             # Filter self-messages
             if from_agent == self._agent_id or from_name == self._bot_name:
                 return
 
             # Mention mode: only respond when keyword present
-            if self._mention_mode:
+            if self._mention_mode and self._mention_keywords:
                 if not any(kw in content for kw in self._mention_keywords):
                     logger.warning(
                         "[WSBridge] Silent: no mention keyword in %s",
@@ -367,7 +427,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
                     )
                     return
 
-            # Strip mention prefix if present — try each keyword (longest first)
+            # Strip mention prefix if present
             text = content
             for kw in sorted(self._mention_keywords, key=len, reverse=True):
                 if text.startswith(kw):
@@ -377,13 +437,11 @@ class WSBridgeAdapter(BasePlatformAdapter):
             await self._process_inbound_message(text, msg)
 
         elif msg_type == MSG_AUTH_OK:
-            logger.warning("[WSBridge] Re-auth OK — role=%s", msg.get("role"))
-            # R7: update active channel on re-auth
+            self._agent_id = msg.get("agent_id", self._agent_id)
             self._active_channel = msg.get(FIELD_ACTIVE_CHANNEL, "lobby")
-
-        elif msg_type == MSG_PAIRING_CODE:
-            code = msg.get("code", "?")
-            logger.warning("[WSBridge] PAIRING CODE — %s (forward to admin)", code)
+            logger.warning(
+                "[WSBridge] Re-auth OK — agent_id=%s", self._agent_id[:20]
+            )
 
         elif msg_type == MSG_ERROR:
             logger.warning("[WSBridge] Server error: %s", msg.get("error", ""))
@@ -404,7 +462,6 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
     async def _handle_workspace_closing(self, msg: dict) -> None:
         """Handle workspace closing notification — clean up and ACK."""
-        import json
         workspace_id = msg.get(FIELD_WORKSPACE_ID, "?")
         deadline_ts = msg.get("deadline_ts", 0)
 
@@ -413,15 +470,13 @@ class WSBridgeAdapter(BasePlatformAdapter):
             workspace_id, deadline_ts,
         )
 
-        # Reset channel state
         self._active_channel = "lobby"
 
-        # Send ACK
-        ack = json.dumps({
+        ack = _json.dumps({
             "type": MSG_WORKSPACE_ACK_CLOSE,
             "workspace_id": workspace_id,
             "agent_id": self._agent_id,
-            "ts": __import__("time").time(),
+            "ts": time.time(),
         })
 
         async with self._ws_lock:
@@ -438,7 +493,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
     def _determine_channel(self, content: str, context_channel: str) -> str:
         """Determine channel: @admin goes to lobby, others use active channel."""
-        if "@admin" in content or any(f"@{kw}" in content for kw in self._mention_keywords):
+        if any(f"@{kw}" in content for kw in self._mention_keywords):
             return "lobby"
         return self._active_channel or "lobby"
 
@@ -447,7 +502,6 @@ class WSBridgeAdapter(BasePlatformAdapter):
         from datetime import datetime
         from gateway.platforms.base import MessageEvent, MessageType
 
-        # R7: record channel from broadcast for reply routing
         broadcast_channel = raw_msg.get(FIELD_CHANNEL, "lobby")
         if broadcast_channel != "lobby":
             self._active_channel = broadcast_channel
@@ -477,7 +531,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
             logger.error("[WSBridge] handle_message error: %s", e, exc_info=True)
 
 
-# ── Register ────────────────────────────────────────────────────────────
+# ── Register ────────────────────────────────────────────────────────
 
 def register(ctx) -> None:
     ctx.register_platform(
@@ -487,7 +541,7 @@ def register(ctx) -> None:
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["WS_IM_URL", "WS_IM_AGENT_ID"],
+        required_env=["WS_IM_URL"],
         install_hint="pip install websockets",
         setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
