@@ -1,4 +1,6 @@
 """Pairing code generation and approval logic."""
+import hashlib
+import os
 import secrets
 import string
 import time
@@ -167,3 +169,45 @@ def approve_web_bind_code(code: str, name: str = "大宏") -> dict:
     persistence.set_web_bind_codes(codes)
 
     return {"type": "approve_ok", "token": token, "name": name}
+
+
+# ── R72: API Key 核心逻辑 ────────────────────────────────────────
+
+# 服务端签名密钥（从环境变量读取，保底用随机值）
+_SIGNING_KEY = os.environ.get("WS_API_SIGNING_KEY", secrets.token_hex(32))
+
+
+def generate_agent_id() -> str:
+    """生成 ws-bridge 自有 agent_id，格式 ws_{12位随机hex}"""
+    return "ws_" + secrets.token_hex(6)
+
+
+def create_api_key(agent_id: str) -> str:
+    """生成 api_key，格式 sk_ws_{sha256(agent_id + signing_key + nonce)[:32]}"""
+    nonce = secrets.token_hex(8)
+    raw = f"{agent_id}:{_SIGNING_KEY}:{nonce}"
+    key_hash = hashlib.sha256(raw.encode()).hexdigest()[:32]
+    return f"sk_ws_{key_hash}"
+
+
+def validate_api_key(api_key: str) -> str | None:
+    """验证 api_key 并返回对应的 agent_id，无效返回 None"""
+    if not api_key.startswith("sk_ws_") or len(api_key) < 37:
+        return None
+    from . import persistence
+    keys = persistence.get_api_keys()
+    for agent_id, record in keys.items():
+        if record.get("api_key") == api_key and record.get("status") != "revoked":
+            return agent_id
+    return None
+
+
+def revoke_api_key(agent_id: str) -> bool:
+    """吊销 agent 的 api_key"""
+    from . import persistence
+    keys = persistence.get_api_keys()
+    if agent_id not in keys:
+        return False
+    keys[agent_id]["status"] = "revoked"
+    persistence.set_api_keys(keys)
+    return True

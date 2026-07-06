@@ -327,3 +327,80 @@ class CardFileWatcher:
                             self._on_change()
             except OSError:
                 pass
+
+
+# ── R72: Bot-initiated Agent Card Registration ────────────────────
+
+
+def register_from_agent(agent_id: str, msg: dict) -> dict:
+    """R72: bot 自主注册/更新自己的 Agent Card。
+
+    由 handle_agent_card_register() 调用，register 认证后 bot 可自主声明能力。
+    返回确认消息 dict。
+
+    Args:
+        agent_id: 已认证的 agent ID。
+        msg: 客户端发送的 agent_card_register 消息。
+            支持字段:
+            - display_name: 展示名称
+            - description: 描述
+            - pipeline_roles: 管线角色列表 (list[str])
+            - skills: 技能列表 (list[str])
+            - trigger_keyword: @触发关键词
+            - capabilities: 能力声明 dict
+    """
+    global _cards
+    now = time.time()
+
+    display_name = msg.get("display_name", "").strip() or agent_id[:12]
+    description = msg.get("description", "").strip()
+    pipeline_roles = msg.get("pipeline_roles", [])
+    skills = msg.get("skills", [])
+    trigger_keyword = msg.get("trigger_keyword", "").strip() or display_name
+    capabilities = msg.get("capabilities", {})
+
+    card = {
+        "display_name": display_name,
+        "description": description,
+        "pipeline_roles": pipeline_roles if isinstance(pipeline_roles, list) else [],
+        "skills": skills if isinstance(skills, list) else [],
+        "status": "online",
+        "registered_at": _cards.get(agent_id, {}).get("registered_at", now),
+        "last_online": now,
+        "trigger_preference": {
+            "mode": "mention",
+            "mention_keyword": trigger_keyword,
+            "ack_timeout_sec": 60,
+        },
+        "capabilities": capabilities or {
+            "platforms": ["ws-bridge"],
+        },
+    }
+
+    _cards[agent_id] = card
+    save_cards()
+
+    # Update _ROLE_AGENT_MAP from handler for role-based routing
+    if pipeline_roles:
+        try:
+            from . import handler as _handler_mod
+            for r in pipeline_roles:
+                if r not in _handler_mod._ROLE_AGENT_MAP:
+                    _handler_mod._ROLE_AGENT_MAP[r] = []
+                if agent_id not in _handler_mod._ROLE_AGENT_MAP[r]:
+                    _handler_mod._ROLE_AGENT_MAP[r].append(agent_id)
+        except Exception:
+            pass
+
+    logger.info(
+        "Agent card registered by bot: %s (%s, roles=%s)",
+        agent_id[:20], display_name, pipeline_roles,
+    )
+
+    return {
+        "type": "agent_card_register_ok",
+        "agent_id": agent_id,
+        "display_name": display_name,
+        "pipeline_roles": pipeline_roles,
+        "status": "online",
+    }
