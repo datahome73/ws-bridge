@@ -146,93 +146,71 @@ def _build_online_list(users: dict) -> str:
 
 
 async def handle_auth(ws, msg: dict) -> str | None:
-    """Authenticate a connecting agent. Returns agent_id on success."""
-    agent_id = msg.get("agent_id", "").strip()
-    app_id = msg.get("app_id", "").strip()
-    code = msg.get("code", "").strip()
-    last_seen_ts = msg.get("last_seen_ts", 0)
-
-    if not agent_id or not app_id:
-        await _send(ws, {"type": "auth_error", "error": "Missing agent_id or app_id"})
+    """R72: api_key 认证。不再支持 agent_id + app_id + pairing_code。"""
+    api_key = msg.get(p.FIELD_API_KEY, "").strip()
+    if not api_key:
+        await _send(ws, {"type": "auth_error", "error": "Missing api_key"})
         return None
 
-    if auth.is_approved(agent_id):
-        role = auth.get_users()[agent_id].get("role", "member")
-        # R22: attach active channel for ALL roles (default lobby)
-        response = {
-            "type": "auth_ok",
-            "agent_id": agent_id,
-            "role": role,
-            p.FIELD_ACTIVE_CHANNEL: persistence.get_agent_channel(agent_id) or p.LOBBY,
-        }
-        await _send(ws, response)
-        active_ch = response[p.FIELD_ACTIVE_CHANNEL]
-        ch_info = f" channel={active_ch}" if role == "admin" else ""
-        logger.info("Agent %s authenticated (role=%s)%s", agent_id[:20], role, ch_info)
-        # Offline catchup
-        if last_seen_ts > 0:
-            await _push_offline(ws, last_seen_ts)
-        # R11 P1.2: After authentication, check offline push queue
-        pending = _offline_push_queue.pop(agent_id, [])
-        if pending:
-            _offline_timers.pop(agent_id, None)  # Cancel timer
-            all_sent = True
-            for item in pending:
-                try:
-                    if hasattr(ws, "send_str"):
-                        await ws.send_str(json.dumps(item))
-                    elif hasattr(ws, "send"):
-                        await ws.send(json.dumps(item))
-                except Exception:
-                    all_sent = False
-            if all_sent:
-                logger.info("Pushed %d offline-queued msgs to %s", len(pending), agent_id[:12])
-        return agent_id
+    agent_id = auth.validate_api_key(api_key)
+    if not agent_id:
+        await _send(ws, {"type": "auth_error", "error": "Invalid api_key"})
+        return None
 
-    if code:
-        result = auth.approve(code)
-        if result["type"] == "approve_ok":
-            await _send(ws, {"type": "auth_ok", "agent_id": agent_id, "role": "member", p.FIELD_ACTIVE_CHANNEL: p.LOBBY})
-            # R36: Welcome on code auto-approval (纯文本, write_chat_log)
-            _agent_name_b4 = auth.get_users().get(agent_id, {}).get("name", agent_id[:12])
-            write_chat_log("系统", f"[核准] 验证码核准 — 欢迎 {_agent_name_b4}")
-            logger.info("Agent %s auto-approved via code", agent_id[:20])
-            if last_seen_ts > 0:
-                await _push_offline(ws, last_seen_ts)
-            return agent_id
-        else:
-            await _send(ws, result)
-            return None
-
-    # R23: unregistered agent → registration channel (not pure pairing_code)
-    new_code = auth.generate_code()
-    auth.create_pairing_code(agent_id, app_id, msg.get("name", agent_id), new_code)
-    persistence.save_pairing_codes(config.DATA_DIR)
-    persistence.set_agent_channel(agent_id, p.REGISTRATION_CHANNEL)
-    persistence.save_agent_channels(config.DATA_DIR)
+    display_name = persistence.get_api_keys().get(agent_id, {}).get("display_name", agent_id)
     await _send(ws, {
         "type": "auth_ok",
         "agent_id": agent_id,
-        "role": p.ROLE_UNREGISTERED,
-        p.FIELD_ACTIVE_CHANNEL: p.REGISTRATION_CHANNEL,
-        "pairing_code": new_code,
+        "display_name": display_name,
+        p.FIELD_ACTIVE_CHANNEL: persistence.get_agent_channel(agent_id) or p.LOBBY,
     })
-    logger.info("Agent %s in registration channel (code=%s)", agent_id[:20], new_code)
-    # R36 B-1: Welcome message to unregistered agent (纯文本, write_chat_log)
-    _reg_name_b1 = msg.get("name", agent_id)
-    write_chat_log("系统", f"[注册] 新代理 {_reg_name_b1}（{_get_agent_display(agent_id)}）已连接，配对码：{new_code}")
-    # R36 B-2: Notify all online admins via _persist_admin_response
-    _users_for_notify = auth.get_users()
-    _admin_ids = {aid for aid, u in _users_for_notify.items() if u.get("role") == "admin"}
-    _reg_name = msg.get("name", agent_id)
-    _notify_content = f"新代理注册请求：{_reg_name}（{_get_agent_display(agent_id)}）配对码：{new_code} 使用 /approve 核准"
-    for _admin_aid in _admin_ids:
-        for _conn in list(_connections.get(_admin_aid, set())):
-            try:
-                await _persist_admin_response(_conn, "system", "系统", _notify_content)
-            except Exception:
-                pass
+    logger.info("Agent %s authenticated (api_key)", agent_id[:20])
     return agent_id
+
+
+async def handle_register(ws, msg: dict) -> str | None:
+    """R72: 新 bot 注册。返回 agent_id + api_key，同一连接立即生效。"""
+    display_name = msg.get("display_name", "").strip()
+    if not display_name:
+        await _send(ws, {"type": "auth_error", "error": "Missing display_name"})
+        return None
+
+    # 1. 生成 ws-bridge 自有 agent_id
+    agent_id = auth.generate_agent_id()
+    # 2. 生成 api_key
+    api_key = auth.create_api_key(agent_id)
+    # 3. 持久化到 _api_keys.json
+    keys = persistence.get_api_keys()
+    keys[agent_id] = {
+        "api_key": api_key,
+        "display_name": display_name,
+        "description": msg.get("description", ""),
+        "created_at": time.time(),
+        "expires_at": None,
+        "status": "active",
+    }
+    persistence.set_api_keys(keys)
+    persistence.save_api_keys(config.DATA_DIR)
+
+    # 4. 注册 inbox channel
+    persistence.set_agent_channel(agent_id, persistence.get_inbox_channel(agent_id))
+
+    # 5. 返回凭证（同一连接继续使用）
+    await _send(ws, {
+        "type": p.MSG_REGISTER_OK,
+        "agent_id": agent_id,
+        "api_key": api_key,
+        "display_name": display_name,
+        "created_at": time.time(),
+        p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
+    })
+    logger.info("Agent registered: %s (%s)", agent_id[:20], display_name)
+    return agent_id
+
+
+async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
+    """R72: Bot 自主注册 Agent Card。返回确认消息。"""
+    return await ac_mod.register_from_agent(agent_id, msg)
 
 
 async def _push_offline(ws, since_ts: float) -> None:
@@ -5088,14 +5066,20 @@ async def handler(ws):
                     _connections.setdefault(agent_id, set()).add(ws)
                     logger.info("Agent %s connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
+            elif msg_type == p.MSG_REGISTER and agent_id is None:  # R72: 新增
+                agent_id = await handle_register(ws, msg)
+                if agent_id:
+                    _connections.setdefault(agent_id, set()).add(ws)
+                    logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
+
             elif msg_type == "message" and agent_id:
                 await handle_broadcast(ws, agent_id, msg)
 
-            elif msg_type == "approve" and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    result = await handle_approve(msg)
-                    await _send(ws, result)
+            elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
+                result = await handle_agent_card_register(ws, agent_id, msg)
+                await _send(ws, result)
+
+            # ★ 删除: elif msg_type == "approve" and agent_id:  — 旧 approve 路径已移除（R72）
 
             elif msg_type == p.MSG_WORKSPACE_CREATE and agent_id:
                 # Bot requests creating a workspace → route to admin(s) for approval
@@ -5744,7 +5728,9 @@ async def handler(ws):
                 logger.info("Agent %s active channel set to '%s'", agent_id[:20], new_channel)
 
             elif msg_type == p.MSG_REGISTER_AGENT and agent_id:
-                # R23: Only P4 (global admin) can register agents
+                # DEPRECATED — R72 新体系使用 register 协议，旧 R23 路径保留不动
+                # 仅 admin 可执行（R23 遗留路径）
+                # 通过 _approved_users 注册
                 users = auth.get_users()
                 role = users.get(agent_id, {}).get("role", "member")
                 if role != "admin":

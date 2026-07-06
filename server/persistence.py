@@ -168,3 +168,28 @@ def resolve_inbox_owner(channel: str) -> str | None:
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
         return channel[len(p.INBOX_CHANNEL_PREFIX):]
     return None
+
+
+# ── R72: API Key storage ──────────────────────────────────────────
+_api_keys: dict = {}  # agent_id → {api_key, display_name, created_at, ...}
+
+
+def load_api_keys(data_dir: Path) -> None:
+    global _api_keys
+    _api_keys = _load_json(data_dir / "_api_keys.json")
+
+
+def save_api_keys(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_api_keys.json", _api_keys)
+
+
+def get_api_keys() -> dict:
+    with _lock:
+        return dict(_api_keys)
+
+
+def set_api_keys(keys: dict) -> None:
+    global _api_keys
+    with _lock:
+        _api_keys = dict(keys)

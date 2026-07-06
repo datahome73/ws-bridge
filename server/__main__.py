@@ -10,14 +10,14 @@ import uuid
 from aiohttp import web
 
 from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS
-from .handler import handle_auth, handle_broadcast, handle_approve, _connections
+from .handler import handle_auth, handle_broadcast, handle_register, _connections
 from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
 from .persistence import (
     load_pairing_codes, load_approved_users,
     load_web_bind_codes, load_web_sessions,
-    load_agent_channels,
+    load_agent_channels, load_api_keys,
     save_pairing_codes, save_approved_users,
     save_web_bind_codes, save_web_sessions,
 )
@@ -95,14 +95,21 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     _connections.setdefault(agent_id, set()).add(ws)
                     logger.info("Agent %s connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
+            elif msg_type == p.MSG_REGISTER and agent_id is None:  # R72: 新增
+                agent_id = await handle_register(ws, data)
+                if agent_id:
+                    _connections.setdefault(agent_id, set()).add(ws)
+                    logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
+
             elif msg_type == "message" and agent_id:
                 await handle_broadcast(ws, agent_id, data)
 
-            elif msg_type == "approve" and agent_id:
-                users = (await _get_users())
-                if users.get(agent_id, {}).get("role") == "admin":
-                    result = await handle_approve(data)
-                    await ws.send_json(result)
+            elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
+                from .handler import handle_agent_card_register
+                result = await handle_agent_card_register(ws, agent_id, data)
+                await ws.send_json(result)
+
+            # ★ 删除: elif msg_type == "approve" and agent_id:  — 旧 approve 路径已移除（R72）
 
             # ── R4: Workspace message types ────────────────────────────
             elif msg_type in (
@@ -803,6 +810,7 @@ def main():
     load_web_bind_codes(DATA_DIR)
     load_web_sessions(DATA_DIR)
     load_agent_channels(DATA_DIR)
+    load_api_keys(DATA_DIR)  # R72: API Key 存储
 
     # Initialise message store
     init_db(DATA_DIR)

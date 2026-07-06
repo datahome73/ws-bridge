@@ -11,10 +11,18 @@ import os
 MSG_AUTH="***"           # Client → Server: authenticate
 MSG_AUTH_OK="***"     # Server → Client: auth success
 MSG_AUTH_ERROR="***"
-MSG_PAIRING_CODE = "pairing_code"
-MSG_APPROVE = "approve"
-MSG_APPROVE_OK = "approve_ok"
-MSG_APPROVE_ERROR = "approve_error"
+# ── R72: 注册/登录新体系 ──
+MSG_REGISTER = "register"              # C→S: 新 bot 注册
+MSG_REGISTER_OK = "register_ok"        # S→C: 注册成功
+MSG_AGENT_CARD_REGISTER = "agent_card_register"        # C→S: bot 自主注册 Agent Card
+MSG_AGENT_CARD_REGISTER_OK = "agent_card_register_ok"  # S→C: 卡片注册确认
+FIELD_API_KEY = "api_key"
+
+# ── 旧体系 deprecate（保留常量值，R74+ 再清理）──
+MSG_PAIRING_CODE = "pairing_code"       # DEPRECATED — 不再使用
+MSG_APPROVE = "approve"                 # DEPRECATED — 不再使用
+MSG_APPROVE_OK = "approve_ok"           # DEPRECATED — 不再使用
+MSG_APPROVE_ERROR = "approve_error"     # DEPRECATED — 不再使用
 MSG_MESSAGE = "message"    # Client → Server: send a message
 MSG_BROADCAST = "broadcast"  # Server → Client: receive a broadcast
 MSG_OFFLINE = "offline_messages"  # Server → Client: offline catchup batch
@@ -159,7 +167,7 @@ WORKSPACE_IDLE_TTL = 48 * 3600  # 48h
 REGISTRATION_CHANNEL = "__registration__"
 MSG_REGISTER_AGENT = "register_agent"
 MSG_REGISTRATION_CONFIRMED = "registration_confirmed"
-ROLE_UNREGISTERED = "unregistered"
+ROLE_UNREGISTERED = "unregistered"  # DEPRECATED — R72 新体系不再使用
 
 # ── R35: Admin Channel ──────────────────────────────────────────
 ADMIN_CHANNEL = "_admin"
