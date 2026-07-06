@@ -429,6 +429,12 @@ def _check_command_permission(
     if cmd_name == "step_complete" and min_role <= 1:
         return True, ""
 
+    # ── R73: Member-level commands (min_role=2) ───────────────
+    if min_role <= 2:
+        if auth.is_approved(agent_id):
+            return True, ""
+        return False, "权限不足：仅已认证成员可执行"
+
     # P3: verify actual workspace admin before allowing ws_scope commands
     if min_role <= 3 and ws_scope:
         if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
@@ -3908,15 +3914,15 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
         # ── R49 B: Agent Card commands ──
     "agent_card": {
-        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card [list|get|set|unset|reload] ...",
     },
     "agent_card_list": {
-        "handler": _cmd_agent_card_list, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card list",
     },
     "agent_card_get": {
-        "handler": _cmd_agent_card_get, "min_role": 3, "workspace_scope": True,
+        "handler": _cmd_agent_card_get, "min_role": 2, "workspace_scope": True,
         "usage": "!agent_card get <agent_id>",
     },
     "agent_card_set": {
