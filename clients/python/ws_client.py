@@ -1,8 +1,9 @@
-"""WS Bridge client — reusable async WebSocket client library.
+"""WS Bridge client — reusable async WebSocket client library (R72+).
 
 Features:
-  - Full auth handshake (auth + auth_ok / pairing_code)
-  - Heartbeat (ping/pong) keep-alive
+  - R72 new auth: register → api_key → agent_card_register → auth(api_key)
+  - Credential management via ``~/.ws-bridge/{name}.json``
+  - WebSocket-level ping/pong keep-alive (ping_interval=20)
   - Automatic reconnection with exponential backoff
   - on_connect / on_disconnect / on_message callbacks
   - send_message returns a unique message ID
@@ -27,58 +28,116 @@ if TYPE_CHECKING:
 logger = logging.getLogger("ws-bridge-client")
 
 # Defaults
-DEFAULT_PING_INTERVAL = 25.0       # seconds between app-level pings
-DEFAULT_READ_TIMEOUT = 35.0        # read timeout (must exceed ping_interval)
+WS_URL = "wss://wsim.datahome73.cloud/ws"
+MAX_SIZE = 2 ** 20          # 1 MB
+MAX_READ_TIMEOUT = 60.0     # read timeout (generous, heartbeat keeps it alive)
 RECONNECT_BASE_DELAY = 3.0
 RECONNECT_MAX_DELAY = 30.0
 ACK_TIMEOUT = 5.0
 MAX_RETRIES = 2
 STATE_FILENAME = "ws_bridge_state.json"
+CRED_DIR = os.path.expanduser("~/.ws-bridge")
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def ensure_cred_dir() -> str:
+    """Create ``~/.ws-bridge/`` if it doesn't exist."""
+    os.makedirs(CRED_DIR, exist_ok=True)
+    return CRED_DIR
+
+
+def cred_path(name: str) -> str:
+    """Path to credential file for a given display name.
+
+    Example: ``~/.ws-bridge/小谷.json``
+    """
+    return os.path.join(CRED_DIR, f"{name}.json")
+
+
+def load_creds(name: str) -> dict:
+    """Load credentials from ``~/.ws-bridge/{name}.json``.
+
+    Returns ``{"agent_id": ..., "api_key": ..., "display_name": ...}``.
+
+    Raises ``FileNotFoundError`` if the file doesn't exist.
+    """
+    path = cred_path(name)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Credentials not found at {path}. "
+            f"Run register() first or place the JSON file manually."
+        )
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_creds(agent_id: str, api_key: str, display_name: str) -> str:
+    """Save credentials to ``~/.ws-bridge/{display_name}.json``.
+
+    Returns the file path.
+    """
+    ensure_cred_dir()
+    path = cred_path(display_name)
+    with open(path, "w") as f:
+        json.dump({
+            "agent_id": agent_id,
+            "api_key": api_key,
+            "display_name": display_name,
+        }, f, indent=2)
+    logger.info("Credentials saved to %s", path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
 
 class WsBridgeClient:
-    """Connect to a Hermes WS Bridge server and handle messages.
+    """Connect to a WS Bridge server (R72+ new auth).
 
     Typical usage::
 
-        client = WsBridgeClient(
-            ws_url="wss://example.com/ws",
-            app_id="myapp",
-            agent_id="my-bot",
-            name="BotName",
-            on_message=lambda msg: print(msg),
-        )
+        # First-time registration
+        client = WsBridgeClient(name="小谷")
+        await client.register()
+        # → credentials saved to ~/.ws-bridge/小谷.json
+        # → Agent Card registered
+        # → connection stays open
+
+        # Subsequent runs (load existing credentials)
+        client = WsBridgeClient(name="小谷")
         await client.connect()
-        await client.send_message("Hello everyone!")
+        await client.send_message("Hello!")
         # ...
         await client.disconnect()
     """
 
     def __init__(
         self,
-        ws_url: str,
-        app_id: str,
-        agent_id: str,
+        ws_url: str = WS_URL,
         name: str = "bot",
         *,
+        api_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
         on_message: Optional[Callable[[dict], None]] = None,
         on_connect: Optional[Callable[[], None]] = None,
         on_disconnect: Optional[Callable[[], None]] = None,
         on_offline: Optional[Callable[[list[dict]], None]] = None,
-        ping_interval: float = DEFAULT_PING_INTERVAL,
-        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        read_timeout: float = MAX_READ_TIMEOUT,
         auto_reconnect: bool = True,
         state_file: Optional[str] = None,
     ):
         self.ws_url = ws_url
-        self.app_id = app_id
-        self.agent_id = agent_id
         self.name = name
+        self.api_key = api_key
+        self._agent_id = agent_id
         self.on_message = on_message or (lambda msg: None)
         self.on_connect = on_connect or (lambda: None)
         self.on_disconnect = on_disconnect or (lambda: None)
         self.on_offline = on_offline or (lambda msgs: None)
-        self.ping_interval = ping_interval
         self.read_timeout = read_timeout
         self.auto_reconnect = auto_reconnect
         self.state_file = state_file
@@ -104,14 +163,119 @@ class WsBridgeClient:
 
         # Background tasks
         self._reader_task: Optional[asyncio.Task] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def agent_id(self) -> Optional[str]:
+        return self._agent_id
+
+    @property
+    def is_connected(self) -> bool:
+        """``True`` if the client is currently connected."""
+        return self._connected
+
+    @property
+    def is_authed(self) -> bool:
+        """``True`` if the client has successfully authenticated."""
+        return self._authed
+
+    # ------------------------------------------------------------------
+    # Register (first time)
+    # ------------------------------------------------------------------
+
+    async def register(
+        self,
+        description: str = "",
+        pipeline_roles: Optional[list[str]] = None,
+        skills: Optional[list[str]] = None,
+        trigger_keyword: Optional[str] = None,
+        capabilities: Optional[dict] = None,
+    ) -> dict:
+        """R72 first-time registration.
+
+        Steps:
+          1. ``register`` → get ``agent_id`` + ``api_key``
+          2. Save credentials to ``~/.ws-bridge/{name}.json``
+          3. ``agent_card_register`` → declare capabilities
+
+        Returns the server's registration response dict.
+
+        After calling this, use ``connect()`` on subsequent runs.
+        """
+        import websockets
+
+        logger.info("Registering bot '%s' ...", self.name)
+
+        async with websockets.connect(
+            self.ws_url, max_size=MAX_SIZE,
+            ping_interval=20, ping_timeout=10,
+        ) as ws:
+            # ── 1. register ──
+            await ws.send(json.dumps({
+                "type": "register",
+                "display_name": self.name,
+                "description": description or f"{self.name} bot",
+            }))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if resp.get("type") != "register_ok":
+                raise RuntimeError(f"Register failed: {resp}")
+
+            agent_id = resp["agent_id"]
+            api_key = resp["api_key"]
+            self._agent_id = agent_id
+            self.api_key = api_key
+
+            logger.info("Registered: agent_id=%s display_name=%s",
+                        agent_id, resp.get("display_name"))
+
+            # Save credentials
+            save_creds(agent_id, api_key, self.name)
+
+            # Drain residual messages
+            await asyncio.sleep(0.5)
+            for _ in range(3):
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+                except (asyncio.TimeoutError, Exception):
+                    break
+
+            # ── 2. agent_card_register ──
+            card_payload: dict[str, Any] = {
+                "type": "agent_card_register",
+                "display_name": self.name,
+                "description": description or f"{self.name} bot",
+                "pipeline_roles": pipeline_roles or [],
+                "skills": skills or [],
+                "trigger_keyword": trigger_keyword or self.name,
+                "capabilities": capabilities or {
+                    "platforms": ["ws-bridge"],
+                    "skills": skills or [],
+                },
+            }
+            await ws.send(json.dumps(card_payload))
+            card = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+
+            got_name = card.get("display_name", "")
+            assert got_name == self.name, (
+                f"display_name mismatch: got '{got_name}' != expected '{self.name}'"
+            )
+            logger.info("Agent Card registered: status=%s agent_id=%s",
+                        card.get("status"), card.get("agent_id"))
+
+            return card
+
+    # ------------------------------------------------------------------
+    # Connect (subsequent runs)
     # ------------------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Open WebSocket connection and authenticate with the server.
+        """Open WebSocket connection and authenticate via R72 api_key.
+
+        Loads credentials from ``~/.ws-bridge/{name}.json`` if ``api_key``
+        was not passed to the constructor.
 
         Returns ``True`` on success, ``False`` on failure.
         On success, fires ``on_connect()``.
@@ -121,11 +285,26 @@ class WsBridgeClient:
         self._stop.clear()
         self._authed = False
 
+        # Load credentials from file if not provided
+        if not self.api_key:
+            try:
+                creds = load_creds(self.name)
+                self.api_key = creds["api_key"]
+                self._agent_id = creds.get("agent_id", self._agent_id)
+            except FileNotFoundError as exc:
+                logger.error("No credentials for '%s': %s", self.name, exc)
+                return False
+
+        if not self.api_key:
+            logger.error("No api_key available for '%s'", self.name)
+            return False
+
         try:
             self._ws = await websockets.connect(
                 self.ws_url,
-                ping_interval=None,       # We send app-level pings
-                ping_timeout=None,
+                max_size=MAX_SIZE,
+                ping_interval=20,
+                ping_timeout=10,
                 close_timeout=5,
             )
         except Exception as exc:
@@ -136,14 +315,11 @@ class WsBridgeClient:
         self._connected = True
         logger.info("Connected to %s", self.ws_url)
 
-        # Send auth (with last_seen_ts for offline catchup)
+        # Send auth with api_key (R72)
         try:
             await self._ws.send(json.dumps({
                 "type": "auth",
-                "app_id": self.app_id,
-                "agent_id": self.agent_id,
-                "name": self.name,
-                "last_seen_ts": self._last_msg_ts,
+                "api_key": self.api_key,
             }))
             raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
             resp = json.loads(raw)
@@ -151,20 +327,17 @@ class WsBridgeClient:
 
             if msg_type == "auth_ok":
                 self._authed = True
-                logger.info("Auth OK (role=%s, last_seen_ts=%s)", resp.get("role"), self._last_msg_ts)
-            elif msg_type == "pairing_code":
-                code = resp.get("code", "???")
-                logger.warning(
-                    "Pairing code: %s — forward to admin for approval", code
-                )
-                # Return True but stay connected; admin may approve while
-                # we are online. Individual adapters can decide to disconnect.
+                self._agent_id = resp.get("agent_id", self._agent_id)
+                logger.info("Auth OK: agent_id=%s display_name=%s",
+                            self._agent_id, resp.get("display_name"))
             elif msg_type == "auth_error":
                 logger.error("Auth error: %s", resp.get("error", "unknown"))
                 await self._close_ws()
                 return False
             else:
                 logger.warning("Unexpected auth response: %s", raw[:200])
+                await self._close_ws()
+                return False
         except asyncio.TimeoutError:
             logger.error("Auth timed out (no response within 10s)")
             await self._close_ws()
@@ -174,8 +347,7 @@ class WsBridgeClient:
             await self._close_ws()
             return False
 
-        # Start background loops
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        # Start reader loop
         self._reader_task = asyncio.create_task(self._reader_loop())
 
         # Fire callback
@@ -195,15 +367,13 @@ class WsBridgeClient:
         self._connected = False
         self._authed = False
 
-        # Cancel background tasks
-        for task in (self._heartbeat_task, self._reader_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        self._heartbeat_task = None
+        # Cancel background task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
         self._reader_task = None
 
         await self._close_ws()
@@ -238,7 +408,7 @@ class WsBridgeClient:
             "type": "message",
             "content": content,
             "from_name": self.name,
-            "agent_id": self.agent_id,
+            "agent_id": self._agent_id or "",
             "id": msg_id,
             "ts": time.time(),
         }
@@ -271,7 +441,8 @@ class WsBridgeClient:
                 self._pending_acks.pop(msg_id, None)
                 return msg_id  # ACK received
             except asyncio.TimeoutError:
-                logger.warning("No ACK for msg %s (attempt %d/%d)", msg_id[:8], attempt + 1, 1 + MAX_RETRIES)
+                logger.warning("No ACK for msg %s (attempt %d/%d)",
+                               msg_id[:8], attempt + 1, 1 + MAX_RETRIES)
                 if attempt < MAX_RETRIES:
                     # Re-send
                     event.clear()
@@ -285,27 +456,10 @@ class WsBridgeClient:
                                 pass
                 else:
                     self._pending_acks.pop(msg_id, None)
-                    logger.error("Msg %s failed after %d retries", msg_id[:8], MAX_RETRIES)
+                    logger.error("Msg %s failed after %d retries",
+                                 msg_id[:8], MAX_RETRIES)
 
         return ""  # All retries exhausted
-
-    # ------------------------------------------------------------------
-    # Internal — Heartbeat
-    # ------------------------------------------------------------------
-
-    async def _heartbeat_loop(self) -> None:
-        """Send application-level ``{"type": "ping"}`` every *ping_interval*."""
-        while not self._stop.is_set():
-            await asyncio.sleep(self.ping_interval)
-            async with self._ws_lock:
-                ws = self._ws
-            if ws is None:
-                break
-            try:
-                await ws.send(json.dumps({"type": "ping"}))
-            except Exception:
-                # Will be caught by reader loop and trigger reconnect
-                break
 
     # ------------------------------------------------------------------
     # Internal — Reader / Reconnect
@@ -363,23 +517,16 @@ class WsBridgeClient:
     # ------------------------------------------------------------------
 
     async def _handle_message(self, msg: dict) -> None:
-        """Route incoming WS messages: auth_ok, ping/pong, broadcast, ack, offline, etc."""
+        """Route incoming WS messages: auth_ok, pong, broadcast, ack, offline, etc."""
         msg_type = msg.get("type", "")
 
         if msg_type == "auth_ok":
             self._authed = True
-            role = msg.get("role", "member")
-            logger.info("Re-auth OK (role=%s)", role)
+            self._agent_id = msg.get("agent_id", self._agent_id)
+            logger.info("Re-auth OK: agent_id=%s", self._agent_id)
             return
 
         if msg_type == "pong":
-            return
-
-        if msg_type == "pairing_code":
-            code = msg.get("code", "???")
-            logger.warning(
-                "Pairing code received: %s — forward to admin", code
-            )
             return
 
         if msg_type == "ack":
@@ -423,7 +570,8 @@ class WsBridgeClient:
                     self._seen_ids.clear()
 
             # Filter self-messages
-            if msg.get("from") == self.agent_id or msg.get("agent_id") == self.agent_id:
+            sender = msg.get("from") or msg.get("agent_id") or ""
+            if sender == self._agent_id:
                 return
 
             # Dispatch
@@ -440,7 +588,7 @@ class WsBridgeClient:
         logger.debug("Unhandled message type: %s", msg_type)
 
     # ------------------------------------------------------------------
-    # Internal — P0: last_msg_ts persistence
+    # Internal — last_msg_ts persistence
     # ------------------------------------------------------------------
 
     def _state_file_path(self) -> str:
@@ -486,13 +634,3 @@ class WsBridgeClient:
                 except Exception:
                     pass
                 self._ws = None
-
-    @property
-    def is_connected(self) -> bool:
-        """``True`` if the client is currently connected."""
-        return self._connected
-
-    @property
-    def is_authed(self) -> bool:
-        """``True`` if the client has successfully authenticated."""
-        return self._authed
