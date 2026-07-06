@@ -76,6 +76,9 @@ _watchdog_alerts: dict[str, float] = {}  # "{round}/{step}" → last_alert_ts
 
 _offline_timers: dict[str, asyncio.Task] = {}
 
+# ── R72 C: R72 认证 agent 的用户名映射（auth.get_users 不包含 R72 agent）──
+_r72_users: dict[str, dict] = {}
+
 # R11 P1.3: Expose connections for web status API
 def get_connections() -> dict[str, set]:
     return _connections
@@ -181,6 +184,9 @@ async def handle_auth(ws, msg: dict) -> str | None:
     # ── R72 B: 认证成功后同步更新 Agent Card 的在线状态 ──
     _update_agent_online_status(agent_id)
 
+    # ── R72 C: 将 R72 agent 注册到 users 字典，确保大厅路由可查 ──
+    _r72_users[agent_id] = {"name": display_name}
+
     return agent_id
 
 
@@ -236,6 +242,9 @@ async def handle_register(ws, msg: dict) -> str | None:
 
     # ── 同步更新 Agent Card 状态（如存在历史卡片） ──
     _update_agent_online_status(agent_id)
+
+    # ── R72 C: 注册后写入 _r72_users，确保大厅路由可查 ──
+    _r72_users[agent_id] = {"name": display_name}
 
     return agent_id
 
@@ -4488,7 +4497,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             targets = []
             for name in target_names:
                 for aid, conns in _connections.items():
-                    if users.get(aid, {}).get("name") == name and aid != sender_id:
+                    u = users.get(aid, {}) or _r72_users.get(aid, {})
+                    if u.get("name") == name and aid != sender_id:
                         targets.append((aid, conns))
                         break
             if not targets:
@@ -4500,7 +4510,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             targets = []
             for name in target_names:
                 for aid, conns in _connections.items():
-                    if users.get(aid, {}).get("name") == name and aid != sender_id:
+                    u = users.get(aid, {}) or _r72_users.get(aid, {})
+                    if u.get("name") == name and aid != sender_id:
                         targets.append((aid, conns))
                         break
             # Always include admins
