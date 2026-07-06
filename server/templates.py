@@ -296,6 +296,13 @@ async function loadMessages(channel) {
       msgContainers[channel] = [];
       return;
     }
+    // 🔧 Explicit sort: newest first (insurance against any ordering issue)
+    msgs.sort(function(a, b) {
+      var ta = a.ts || 0, tb = b.ts || 0;
+      if (typeof ta === 'string') ta = ta.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
+      if (typeof tb === 'string') tb = tb.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
+      return tb - ta;
+    });
     msgContainers[channel] = msgs;
     for (let i = 0; i < msgs.length; i++) {
       // 🔧 F-8: Dedup by content hash (shared _seenMsgHashes with appendMessage)
