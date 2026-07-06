@@ -130,8 +130,6 @@
 ## 四、变更记录
 
 | 版本 | 日期 | 变更 |
-
-| 版本 | 日期 | 变更 |
 |:---:|:----:|:----|
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 || v2.38 | 2026-07-06 | 🎯 **R72 完成 ✅** — Bot 统一认证与 Agent Card 自注册体系：protocol.py 新增 register/register_ok 类型 + FIELD_API_KEY；auth.py 新增 generate_agent_id / create_api_key / validate_api_key / revoke_api_key；handler.py 替换 handle_auth(api_key) + 新增 handle_register + handle_agent_card_register；agent_card.py 新增 register_from_agent()；persistence.py 新增 _api_keys 存储。17/17 验收 ALL GREEN 🟢。合并部署 main `b21e720` |
