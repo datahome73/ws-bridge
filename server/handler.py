@@ -4317,9 +4317,10 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             await _send(ws, {"type": "error", "error": "❌ 无效的收件箱通道"})
             return
 
-        # 权限：admin 或 workspace admin 可向收件箱发消息（R74 D1: 允许 PM 等角色）
-        if sender_role != "admin" and not _is_any_workspace_admin(sender_id):
-            await _send(ws, {"type": "error", "error": "❌ 权限不足：仅管理员可向收件箱发消息"})
+        # 权限：不允许向自己的收件箱发消息（防自刷）
+        # 其他人均可写收件箱（回复路由）
+        if sender_id == owner_id:
+            await _send(ws, {"type": "error", "error": "❌ 不允许向自己的收件箱发消息"})
             return
 
         # 仅投递给目标 agent（单播，不广播给其他人）
