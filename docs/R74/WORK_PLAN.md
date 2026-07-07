@@ -130,7 +130,7 @@
 
 **结论：** 🟢 通过
 
-### Step 5：测试（QA）
+### Step 5：测试 ✅ `9b2354e`
 
 **主角：** qa / **备用：** review
 
@@ -151,7 +151,7 @@
 
 **完成条件：** 测试报告推 dev + 验收逐项标记 ✅/❌
 
-### Step 6：合并部署归档（Operations）
+### Step 6：合并部署归档 ✅ `9b2354e`
 
 **主角：** operations / **备用：** arch
 
@@ -160,7 +160,7 @@
 2. 重新 build Docker 镜像（`docker build`，不是 `docker restart`）
 3. 部署生产容器
 4. 健康检查（`!pipeline_status R74`）
-5. TODO.md 版本号更新
+5. TODO.md 版本号更新 ✅ v2.40
 6. 关闭工作室
 7. 恢复大厅
 
@@ -170,20 +170,12 @@
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 🟢 已完成 ✅| frontmatter 完整 + raw URL → `!pipeline_start` 正常 | ⏳ |
-| ✅-2 🟢 已完成 ✅| 缺 `pipeline.steps` → ❌ 报错，不回退 | ⏳ |
-| ✅-3 🟢 已完成 ✅| frontmatter `workspace.members` → 成员按定义创建 | ⏳ |
-| ✅-4 🟢 已完成 ✅| 旧轮次 `!pipeline_status` 不报错 | ⏳ |
-| ✅-5 🟢 已完成 ✅| `_R62_REPO_BASE` 零匹配 | ⏳ |
-| ✅-6 🟢 已完成 ✅| 不拼接 `docs/轮次/` 路径 | ⏳ |
-| ✅-7 🟢 已完成 ✅| artifact_url 优先读 frontmatter | ⏳ |
-| ✅-8 🟢 已完成 ✅| admin→operations 全局替换完整 | ⏳ |
-| ✅-9 🟢 已完成 ✅| PIPELINE_STEP_MAP role 更新 | ⏳ |
-| ✅-10 🟢 已完成 ✅| 需求文档零 admin 角色名残留 | ⏳ |
-
+| ✅-1 🟢 已完成 ✅| frontmatter 完整 + raw URL → `!pipeline_start` 正常 | ✅ 代码级通过 | ✅-2 🟢 已完成 ✅| 缺 `pipeline.steps` → ❌ 报错，不回退 | ✅ 代码级通过 | ✅-3 🟢 已完成 ✅| frontmatter `workspace.members` → 成员按定义创建 | ✅ 代码级通过 | ✅-4 🟢 已完成 ✅| 旧轮次 `!pipeline_status` 不报错 | ✅ 兼容性分析通过 | ✅-5 🟢 已完成 ✅| `_R62_REPO_BASE` 零匹配 | ✅ grep 零残留 | ✅-6 🟢 已完成 ✅| 不拼接 `docs/轮次/` 路径 | ✅ 代码级通过 | ✅-7 🟢 已完成 ✅| artifact_url 优先读 frontmatter | ✅ 代码级通过 | ✅-8 🟢 已完成 ✅| admin→operations 全局替换完整 | ✅ 代码级通过 | ✅-9 🟢 已完成 ✅| PIPELINE_STEP_MAP role 更新 | ✅ config.py 验证通过 | ✅-10 🟢 已完成 ✅| 需求文档零 admin 角色名残留 | ✅ 审核确认 
 ## 4. 变更记录
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
 | v1.0 | 2026-07-07 | 初稿 — R74 WORK_PLAN |
 || v1.1 | 2026-07-07 | 🏁 归档 — Step 5 测试 12/12 ALL GREEN 🟢, Step 6 合并部署 main `0b75dc8`, ws-bridge:r74
+||| v1.1 | 2026-07-07 | 🏁 归档 — Step 5 测试 12/12 ALL GREEN 🟢, Step 6 合并部署 main `0b75dc8`, ws-bridge:r74 |
+|| v2.0 | 2026-07-07 | ✅ 审查归档 — R74 审查 12/12 ✅ 100%追溯 0 阻塞。编码 commit `9b2354e`，审查报告 `a914ed0`（🟢 通过） |
