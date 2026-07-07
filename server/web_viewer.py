@@ -58,10 +58,13 @@ def _load_archive_state() -> dict:
 def _save_archive_state(state: dict) -> None:
     """Persist archive state to disk."""
     path = config.DATA_DIR / _ARCHIVE_STATE_FILE
-    path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    try:
+        path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("R76: Failed to save archive state: %s", exc)
 
 
 def set_archive_state(ws_id: str, ws_name: str, start_ts: float) -> None:
@@ -444,7 +447,11 @@ async def handle_api_inbox(request: web.Request) -> web.Response:
 
     limit = int(request.query.get("limit", "50"))
     since = request.query.get("since", None)
-    since = float(since) if since else None
+    if since:
+        try:
+            since = float(since)
+        except (ValueError, TypeError):
+            since = None
 
     try:
         db_msgs = ms.get_messages_by_channel_pattern(
