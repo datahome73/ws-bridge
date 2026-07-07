@@ -1,9 +1,9 @@
 # R74 工作计划 — 管线通用化：WORK_PLAN 单入口 + Raw URL 解耦
 
-> **版本：** v1.0（初稿，待审核）
-> **状态：** 📝 草稿
+> **版本：** v1.0 ✅（项目负责人审核通过）
+> **状态：** ✅ 定稿
 > **项目协调人：** 🧐 PM
-> **基于需求文档：** docs/R74/R74-product-requirements.md v1.0
+> **基于需求文档：** docs/R74/R74-product-requirements.md v1.0 ✅
 
 ---
 
