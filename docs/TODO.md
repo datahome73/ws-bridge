@@ -131,6 +131,7 @@
 
 | 版本 | 日期 | 变更 |
 |:---:|:----:|:----|
+|| v2.40 | 2026-07-07 | 🎯 **R74 完成 ✅** — 管线通用化：WORK_PLAN frontmatter 全量配置 + Raw URL 解耦 + 不拼接覆盖 + _R62_REPO_BASE 删除 + _infer_artifact_url 优先读 frontmatter + admin→operations 角色名 + inbox 权限开放 + display_name 匹配。审查 12/12 ✅ 100% 追溯，0 阻塞。编码 commit 9b2354e |
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 
 || v2.40 | 2026-07-07 | 🎯 **R74 完成 ✅** — 管线通用化：WORK_PLAN frontmatter 单入口 + Raw URL 解耦。A1 frontmatter steps/workpace.members 校验 + A2 _build_pipeline_config context URL 不拼接覆盖 + B1 删除 _R62_REPO_BASE 常量 + B2 _infer_artifact_url step_config 参数。12/12 验收 ALL GREEN 🟢。合并部署 main `0b75dc8`，ws-bridge:r74 镜像 |
