@@ -90,7 +90,7 @@ PIPELINE_PM_NAME: str = os.environ.get("WS_PM_NAME", "PM")
 # ── R42: Pipeline step map ────────────────────────────────────────
 PIPELINE_STEP_MAP: dict[str, dict] = {
     # step1 is auto-step, no primary/backup needed
-    "step1": {"role": "admin",   "name": "管线启动",       "timeout_hours": 2.0,  "escalation": "notify_pm"},
+    "step1": {"role": "operations",   "name": "管线启动",       "timeout_hours": 2.0,  "escalation": "notify_pm"},
     "step2": {"role": "arch",    "name": "技术方案",       "timeout_hours": 6.0,  "escalation": "notify_pm",
               "primary": "arch", "backup": "dev"},
     "step3": {"role": "dev",     "name": "编码",          "timeout_hours": 12.0, "escalation": "notify_pm",
@@ -99,8 +99,8 @@ PIPELINE_STEP_MAP: dict[str, dict] = {
               "primary": "review", "backup": "qa"},
     "step5": {"role": "qa",      "name": "测试验证",       "timeout_hours": 6.0,  "escalation": "notify_pm",
               "primary": "qa",   "backup": "review"},
-    "step6": {"role": "admin",   "name": "合并部署归档",    "timeout_hours": 2.0,  "escalation": "notify_pm",
-              "primary": "admin", "backup": "arch"},
+    "step6": {"role": "operations",   "name": "合并部署归档",    "timeout_hours": 2.0,  "escalation": "notify_pm",
+              "primary": "operations", "backup": "arch"},
 }
 _override_raw = os.environ.get("PIPELINE_STEP_MAP_OVERRIDE", "")
 if _override_raw.strip():

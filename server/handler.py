@@ -1080,7 +1080,6 @@ class NoFrontmatterError(ValueError):
 
 
 # ── R62 A2: Lightweight YAML frontmatter parser ──
-_R62_REPO_BASE = "https://raw.githubusercontent.com/datahome73/ws-bridge/dev"
 
 
 def _parse_scalar(value: str):
@@ -1148,14 +1147,22 @@ def _parse_frontmatter(content: str) -> dict:
 
 
 def _build_pipeline_config(frontmatter: dict, round_name: str, base_urls: dict) -> dict:
-    """Build _PIPELINE_CONFIG from frontmatter dict."""
+    """Build _PIPELINE_CONFIG from frontmatter dict.
+
+    R74 A2: frontmatter 中的 URL 字段优先，base_urls 仅作为无定义时的补充。
+    不再拼接 docs/轮次/ 路径。
+    """
     config = frontmatter.get("pipeline", {})
     if not config:
         raise ValueError("Frontmatter missing 'pipeline' key")
     config["round"] = round_name
-    config["work_plan_url"] = base_urls.get("work_plan_url", "")
-    config["requirements_url"] = base_urls.get("requirements_url",
-        f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-product-requirements.md")
+
+    # R74 A2: 仅当 frontmatter 无定义时才从 base_urls 获取
+    if not config.get("work_plan_url"):
+        config["work_plan_url"] = base_urls.get("work_plan_url", "")
+    if not config.get("requirements_url"):
+        config["requirements_url"] = base_urls.get("requirements_url", "")
+
     config["steps"] = config.get("steps", {})
     for step_key, step_cfg in config["steps"].items():
         context = step_cfg.get("context", {})
@@ -1172,7 +1179,7 @@ def _build_fallback_config(round_name: str, base_urls: dict) -> dict:
     step_map = _r42cfg.PIPELINE_STEP_MAP
     work_plan_url = base_urls.get("work_plan_url", "")
     requirements_url = base_urls.get("requirements_url",
-        f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-product-requirements.md")
+        f"{_r42cfg.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md")
     steps = {}
     for step_key, step_cfg in step_map.items():
         if step_key == "step1":
@@ -1206,13 +1213,23 @@ def _step_sort_key(step_name: str) -> tuple:
     return (int(m.group(1)),) if m else (0, step_name)
 
 
-# ── R69 A1: Auto-infer artifact URL by step type ──
-def _infer_artifact_url(step_name: str, round_name: str) -> str:
-    """Auto-infer artifact URL based on step type. Returns '' if unknown."""
+# ── R69 A1 + R74 B2: Auto-infer artifact URL by step type ──
+def _infer_artifact_url(step_name: str, round_name: str, step_config: dict | None = None) -> str:
+    """Auto-infer artifact URL based on step type. Returns '' if unknown.
+
+    R74 B2: 优先从 frontmatter step_config 读取 artifact_url，无配置时走硬编码回退（main 分支）。
+    """
+    # R74 B2: 优先读 frontmatter 的 artifact_url
+    if step_config and step_name in step_config:
+        art = step_config.get(step_name, {}).get("artifact_url", "")
+        if art:
+            return art
+
+    # Fallback: hardcoded paths (main branch — R72/R73 already merged)
     step_urls = {
-        "step2": f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-tech-plan.md",
-        "step4": f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-review-report.md",
-        "step5": f"{_R62_REPO_BASE}/docs/{round_name}/test-report.md",
+        "step2": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/{round_name}-tech-plan.md",
+        "step4": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/{round_name}-review-report.md",
+        "step5": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/test-report.md",
     }
     return step_urls.get(step_name, "")
 
@@ -2028,9 +2045,11 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     """
     positional = params.get("_positional", [])
     if not positional:
-        return "❌ 用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>]"
+        return "❌ 用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>] [--work_plan_url <url>] [--force]"
     round_name = positional[0].upper()
     from_step = params.get("from", "")
+    # ── R74 A1: --force 参数，跳过 frontmatter steps 校验 ──
+    force_flag = "--force" in params.get("_raw", "")
     # ── R71: Optional --workspace-id to attach to existing workspace ──
     # Note: _parse_command stores --workspace-id as params["workspace-id"] (hyphen, not underscore)
     explicit_ws_id = params.get("workspace-id", params.get("ws", params.get("workspace_id", "")))
@@ -2088,20 +2107,29 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
                 frontmatter = _parse_frontmatter(wp_content)
                 config_data = _build_pipeline_config(frontmatter, round_name, {
                     "work_plan_url": work_plan_url or _remote_url,
-                    "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+                    "requirements_url": "",
                 })
+                # ── R74 A1: 校验 frontmatter 是否包含 steps 定义 ──
+                psteps = config_data.get("steps", {})
+                if not psteps and not force_flag:
+                    return (
+                        f"❌ {round_name} WORK_PLAN 缺少 pipeline.steps 定义。\n\n"
+                        f"请在 frontmatter 中补充 steps 配置，每 step 含 role/title/context。\n"
+                        f"参考格式：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R74/WORK_PLAN.md\n\n"
+                        f"提示：可使用 --force 强制以默认 Step 映射启动（PIPELINE_STEP_MAP 回退）"
+                    )
                 _PIPELINE_CONFIG[round_name] = config_data
             except (NoFrontmatterError, ValueError):
                 config_data = _build_fallback_config(round_name, {
                     "work_plan_url": work_plan_url or _remote_url,
-                    "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+                    "requirements_url": "",
                 })
                 _PIPELINE_CONFIG[round_name] = config_data
                 write_chat_log("系统", f"📋 {round_name}：使用旧格式配置（无 machine-frontmatter）")
         else:
             config_data = _build_fallback_config(round_name, {
                 "work_plan_url": work_plan_url or "",
-                "requirements_url": f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md"
+                "requirements_url": "",
             })
             _PIPELINE_CONFIG[round_name] = config_data
     # ── R62 A3: End ──
@@ -2115,33 +2143,64 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
 
     # ── R44 F-13: Auto-collect workspace members ──────────
     # ── R49 B: Use agent cards if available ──────────
+    # ── R74 A1: Try frontmatter workspace.members first ──
     cards = ac_mod.get_all_cards()
-    step_config = _get_step_config(round_name)
-    all_roles = set()
-    for step_key, step_cfg in step_config.items():
-        role = step_cfg.get("role", "")
-        if role and step_key != "step1":
-            all_roles.add(role)
+    pconfig = _PIPELINE_CONFIG.get(round_name, {})
+    workspace_members_fm = pconfig.get("workspace", {}).get("members", {})
 
-    users = auth.get_users()
-    member_ids = []
-    if cards:
-        # Agent cards exist: collect agents whose pipeline_roles intersect all_roles
-        seen = set()
+    if workspace_members_fm:
+        # ── R74 A1: 使用 frontmatter workspace.members 定义的角色 ──
+        all_roles = set(workspace_members_fm.keys())
+        logger.info("R74: Using frontmatter workspace.members roles: %s", all_roles)
+
+        # ── R74 D2: 用 display_name 匹配 mention_keyword ──
+        role_to_keywords = {}
+        for role_name, role_cfg in workspace_members_fm.items():
+            kw = role_cfg.get("mention_keyword", "")
+            role_to_keywords[role_name] = set(kw.split(";")) if kw else set()
+
+        users = auth.get_users()
+        member_ids = []
         for aid, card in cards.items():
-            p_roles = set(card.get("pipeline_roles", []))
-            if p_roles & all_roles:
-                member_ids.append(aid)
-                seen.add(aid)
-        # Also include any auth users who have matching role but no card
+            card_name = card.get("display_name", "")
+            for role_name, keywords in role_to_keywords.items():
+                if card_name in keywords:
+                    member_ids.append(aid)
+                    break
+        # Include auth users without cards by role
+        seen = set(member_ids)
         for aid, u in users.items():
             if aid not in seen and u.get("role", "member") in all_roles:
                 member_ids.append(aid)
     else:
-        # No cards: fallback to auth.get_users() role field
-        for aid, u in users.items():
-            if u.get("role", "member") in all_roles:
-                member_ids.append(aid)
+        # ── 无 frontmatter members → 回退原有 step_config 推断 ──
+        step_config = _get_step_config(round_name)
+        all_roles = set()
+        for step_key, step_cfg in step_config.items():
+            role = step_cfg.get("role", "")
+            if role and step_key != "step1":
+                all_roles.add(role)
+        logger.info("R74: No workspace.members in frontmatter, inferred roles: %s", all_roles)
+
+        users = auth.get_users()
+        member_ids = []
+        if cards:
+            # Agent cards exist: collect agents whose pipeline_roles intersect all_roles
+            seen = set()
+            for aid, card in cards.items():
+                p_roles = set(card.get("pipeline_roles", []))
+                if p_roles & all_roles:
+                    member_ids.append(aid)
+                    seen.add(aid)
+            # Also include any auth users who have matching role but no card
+            for aid, u in users.items():
+                if aid not in seen and u.get("role", "member") in all_roles:
+                    member_ids.append(aid)
+        else:
+            # No cards: fallback to auth.get_users() role field
+            for aid, u in users.items():
+                if u.get("role", "member") in all_roles:
+                    member_ids.append(aid)
 
     # ── R71: Optional --workspace-id to attach to existing workspace ──
     if explicit_ws_id:
@@ -2534,7 +2593,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
             "output_desc": step_config.get(step_name, {}).get("output_desc", ""),
             "summary": params.get("summary", step_config.get(step_name, {}).get("output_desc", "")),
             "artifact_url": params.get("artifact_url",
-                _infer_artifact_url(step_name, round_name)),
+                _infer_artifact_url(step_name, round_name, step_config)),
             "timestamp": time.time(),
         }
 
@@ -4258,8 +4317,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             await _send(ws, {"type": "error", "error": "❌ 无效的收件箱通道"})
             return
 
-        # 权限：仅 admin 可向收件箱发消息
-        if sender_role != "admin":
+        # 权限：admin 或 workspace admin 可向收件箱发消息（R74 D1: 允许 PM 等角色）
+        if sender_role != "admin" and not _is_any_workspace_admin(sender_id):
             await _send(ws, {"type": "error", "error": "❌ 权限不足：仅管理员可向收件箱发消息"})
             return
 
