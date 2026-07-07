@@ -79,7 +79,8 @@ class PipelineContext:
     # ── 工作空间（创建时确定）──
     workspace_dir: Path              # /opt/data/ws-bridge
     task_dir: Path                   # workspace_dir / "pipeline_tasks" / "R77"
-    inbox_id_prefix: str             # 本管线使用的 inbox ID 前缀
+    workspace_id: str                # 工作室ID（每轮 !create_workspace 创建的工作室）
+    pm_inbox_id: str                 # PM（小谷）inbox ID，各bot通过此通道回复协调者
 
     # ── 管线运行时状态（随管线推进变化）──
     status: PipelineStatus           # "init" | "planning" | "running" | "blocked" | "completed" | "cancelled"
