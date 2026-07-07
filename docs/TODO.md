@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.42
+> **版本：** v2.43
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -134,6 +134,7 @@
 || v2.40 | 2026-07-07 | 🎯 **R74 完成 ✅** — 管线通用化：WORK_PLAN frontmatter 全量配置 + Raw URL 解耦 + 不拼接覆盖 + _R62_REPO_BASE 删除 + _infer_artifact_url 优先读 frontmatter + admin→operations 角色名 + inbox 权限开放 + display_name 匹配。审查 12/12 ✅ 100% 追溯，0 阻塞。编码 commit 9b2354e |
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 
+||| v2.43 | 2026-07-07 | 🎯 **R76 完成 ✅** — Inbox Tab + 时间切片归档：Web Inbox Tab 可视化 + message_store 时间切片查询 + 归档 IO 保护。10/10 验收 ALL GREEN 🟢。合并部署 main `7bfbcfe`，ws-bridge:latest（r76）镜像 |
 ||| v2.42 | 2026-07-07 | 🎯 **R75 完成 ✅** — 文档治理与归档：43 轮 WORK_PLAN.md 脱敏 + 归档标记 + 检查脚本。89 处内部名清理。README.md R74 更新。11/11 验收 ALL GREEN 🟢。合并部署 main `93264e3`，ws-bridge:latest（r75）镜像 |
 ||| v2.40 | 2026-07-07 | 🎯 **R74 完成 ✅** — 管线通用化：WORK_PLAN frontmatter 单入口 + Raw URL 解耦。A1 frontmatter steps/workpace.members 校验 + A2 _build_pipeline_config context URL 不拼接覆盖 + B1 删除 _R62_REPO_BASE 常量 + B2 _infer_artifact_url step_config 参数。12/12 验收 ALL GREEN 🟢。合并部署 main `0b75dc8`，ws-bridge:r74 镜像 |
 || v2.38 | 2026-07-06 | 🎯 **R72 完成 ✅** — Bot 统一认证与 Agent Card 自注册体系：protocol.py 新增 register/register_ok 类型 + FIELD_API_KEY；auth.py 新增 generate_agent_id / create_api_key / validate_api_key / revoke_api_key；handler.py 替换 handle_auth(api_key) + 新增 handle_register + handle_agent_card_register；agent_card.py 新增 register_from_agent()；persistence.py 新增 _api_keys 存储。17/17 验收 ALL GREEN 🟢。合并部署 main `b21e720` |
