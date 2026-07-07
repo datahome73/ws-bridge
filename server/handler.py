@@ -16,6 +16,7 @@ from .web_viewer import write_chat_log
 from . import task_store as ts
 from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
+from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
@@ -48,6 +49,17 @@ _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws
 
 # ── R62: Pipeline config (read-only, separate from runtime state) ──
 _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
+
+# ── R77: PipelineContextManager — 统一管线上下文管理 ──────────────
+_pipeline_manager: PipelineContextManager | None = None
+
+
+def _ensure_pipeline_manager() -> PipelineContextManager:
+    """惰性初始化 PipelineContextManager。"""
+    global _pipeline_manager
+    if _pipeline_manager is None:
+        _pipeline_manager = PipelineContextManager(data_dir=config.DATA_DIR)
+    return _pipeline_manager
 
 # ── R63 Phase 2-4: Feature toggle switches (env overridable) ─────
 _ENABLE_R63_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
@@ -2053,6 +2065,140 @@ async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
         return True, f"⚠️ git 验证不可达（{str(e)[:40]}），已跳过验证，继续推进"
 
 
+# ── R77: !pipeline command — unified pipeline context management ─────
+
+
+def _format_pipeline_context(ctx: PipelineContext) -> str:
+    """格式化 PipelineContext 为人类可读文本。"""
+    from datetime import datetime
+    lines = [
+        f"📋 {ctx.round_name} [{ctx.task_kind.value}]",
+        f"  状态: {ctx.status.value}",
+        f"  Step: {ctx.current_step}/{ctx.total_steps}",
+        f"  阶段: {ctx.current_phase}",
+        f"  活跃: {'✅' if ctx.is_active() else '❌'}",
+        f"  创建: {datetime.fromtimestamp(ctx.created_at).strftime('%m/%d %H:%M')}" if ctx.created_at else "  创建: -",
+    ]
+    if ctx.blocked_reason:
+        lines.append(f"  阻塞原因: {ctx.blocked_reason}")
+    if ctx.role_agent_map:
+        roles = ", ".join(f"{r}={a[:12]}" for r, a in ctx.role_agent_map.items())
+        lines.append(f"  成员: {roles}")
+    if ctx.workspace_id:
+        lines.append(f"  工作室: {ctx.workspace_id[:24]}")
+    return "\n".join(lines)
+
+
+async def _handle_pipeline_command(sender_id: str, params: str) -> str:
+    """处理 !pipeline 子命令。
+
+    用法: !pipeline <create|status|list|advance|block|archive|cancel> [args]
+    """
+    from pathlib import Path
+    parts = params.strip().split(maxsplit=2)
+    subcmd = parts[0] if len(parts) >= 1 else ""
+    mgr = _ensure_pipeline_manager()
+
+    if subcmd == "create":
+        # !pipeline create R77 dev [--steps 6]
+        round_name = parts[1] if len(parts) >= 2 else ""
+        task_kind = parts[2] if len(parts) >= 3 else "dev"
+        extra_args = parts[3] if len(parts) >= 4 else ""
+        total_steps = 6
+        if "--steps" in extra_args:
+            try:
+                total_steps = int(extra_args.split("--steps")[1].strip().split()[0])
+            except (IndexError, ValueError):
+                pass
+        if not round_name:
+            return "❌ 用法: !pipeline create <round> <kind> [--steps N]"
+        try:
+            ctx = await mgr.create(
+                round_name=round_name,
+                task_kind=PipelineTaskKind(task_kind),
+                workspace_dir=Path(config.REPO_PATH) if hasattr(config, 'REPO_PATH') else Path("/opt/data/ws-bridge"),
+                workspace_id="",
+                pm_inbox_id="",
+                total_steps=total_steps,
+                created_by=sender_id,
+            )
+            return f"✅ Pipeline {round_name} created (kind={task_kind}, status={ctx.status.value}, steps={total_steps})"
+        except ValueError as e:
+            return f"❌ {e}"
+        except Exception as e:
+            return f"❌ 创建失败: {e}"
+
+    elif subcmd == "status":
+        # !pipeline status [R77]
+        round_name = parts[1] if len(parts) >= 2 else ""
+        if round_name:
+            ctx = mgr.get(round_name)
+            if not ctx:
+                return f"❌ Pipeline {round_name} not found"
+            return _format_pipeline_context(ctx)
+        active = mgr.get_all_active()
+        if not active:
+            return "📋 当前无活跃管线"
+        out = ["📋 活跃管线:"]
+        for ctx in sorted(active, key=lambda c: c.round_name, reverse=True):
+            out.append(f"  • {ctx.round_name} [{ctx.task_kind.value}] status={ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
+        return "\n".join(out)
+
+    elif subcmd == "list":
+        active = mgr.get_all_active()
+        if not active:
+            return "📋 当前无活跃管线"
+        lines = ["📋 活跃管线:"]
+        for ctx in sorted(active, key=lambda c: c.round_name):
+            lines.append(f"  • {ctx.round_name} [{ctx.task_kind.value}] status={ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
+        return "\n".join(lines)
+
+    elif subcmd == "advance":
+        # !pipeline advance [R77]
+        round_name = parts[1] if len(parts) >= 2 else ""
+        if not round_name:
+            return "❌ 用法: !pipeline advance <round>"
+        ok = await mgr.advance_step(round_name)
+        if not ok:
+            return f"❌ 推进失败: {round_name} 不存在或已结束"
+        ctx = mgr.get(round_name)
+        return f"✅ {round_name} advanced to step {ctx.current_step}/{ctx.total_steps}"
+
+    elif subcmd == "block":
+        # !pipeline block R77 等素材
+        round_name = parts[1] if len(parts) >= 2 else ""
+        reason = parts[2] if len(parts) >= 3 else "阻塞（无原因）"
+        ok = await mgr.transition_to(round_name, PipelineStatus.BLOCKED, blocked_reason=reason)
+        if not ok:
+            return f"❌ 阻塞失败: {round_name} 不存在或状态转换非法"
+        return f"⏸️ {round_name} blocked: {reason}"
+
+    elif subcmd == "archive":
+        round_name = parts[1] if len(parts) >= 2 else ""
+        if not round_name:
+            return "❌ 用法: !pipeline archive <round>"
+        ok = await mgr.archive(round_name)
+        return f"📦 {round_name} archived {'✅' if ok else '❌ not found'}"
+
+    elif subcmd == "cancel":
+        round_name = parts[1] if len(parts) >= 2 else ""
+        if not round_name:
+            return "❌ 用法: !pipeline cancel <round>"
+        ok = await mgr.cancel(round_name)
+        return f"🚫 {round_name} cancelled {'✅' if ok else '❌ not found'}"
+
+    elif subcmd == "history":
+        entries = mgr.get_history(limit=10)
+        if not entries:
+            return "📋 暂无历史记录"
+        lines = ["📋 最近归档:"]
+        for e in reversed(entries):
+            lines.append(f"  • {e.get('round_name', '?')} [{e.get('task_kind', '?')}] status={e.get('status', '?')}")
+        return "\n".join(lines)
+
+    return "❌ 未知子命令。支持: create, status, list, advance, block, archive, cancel, history"
+
+
 # ── R42: Pipeline commands ─────────────────────────────────────────
 
 async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
@@ -4000,6 +4146,11 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "task_list": {
         "handler": _cmd_task_list, "min_role": 3, "workspace_scope": True,
         "usage": "!task_list [--limit <n>]",
+    },
+    # ── R77: Pipeline context management ──
+    "pipeline": {
+        "handler": _handle_pipeline_command, "min_role": 2, "workspace_scope": True,
+        "usage": "!pipeline <create|status|list|advance|block|archive|cancel> [args]",
     },
         # ── R49 B: Agent Card commands ──
     "agent_card": {

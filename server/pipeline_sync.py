@@ -40,21 +40,17 @@ async def _run_git(args: list[str], repo_path: str, timeout: float = 10.0) -> tu
 class PipelineGitSync:
     """管线 git 同步检测器。周期性检查 pipeline 工作分支的新提交，自动推进状态机。"""
 
-    def __init__(self, pipeline_id: str, config: dict):
-        """
+    def __init__(self, context: "PipelineContext"):  # noqa: F821 — forward ref
+        """从统一上下文读取配置，替代零散 dict。
+
         Args:
-            pipeline_id: 管线标识（如 "R65"）
-            config: 配置字典，包含以下键：
-                - branch: str (默认 "dev")
-                - repo_path: str (默认 "/opt/data/ws-bridge")
-                - last_sha: str (上次处理的 commit SHA, 空字符串表示首次)
-                - fallback_enabled: bool (默认 True, 兜底规则开关)
+            context: PipelineContext 实例（R77 统一管线上下文）。
         """
-        self.pipeline_id = pipeline_id
-        self.branch = config.get("branch", "dev")
-        self.repo_path = config.get("repo_path", "/opt/data/ws-bridge")
-        self.last_sha = config.get("last_sha", "")
-        self.fallback_enabled = config.get("fallback_enabled", True)
+        self.pipeline_id = context.round_name
+        self.branch = context.git_sync_branch
+        self.repo_path = str(context.workspace_dir)
+        self.last_sha = context.last_output_sha
+        self.fallback_enabled = True
         # 并发锁 — 同一管线同时只一个 fetch
         self._lock = asyncio.Lock()
 
