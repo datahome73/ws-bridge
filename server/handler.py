@@ -527,6 +527,23 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
     reason = params.get("reason", "管理操作")
     ws_mod.force_close(ws_id)
     timeout_tracker.reset()
+
+    # R76 B2: check if no active workspace remains → trigger archive state
+    try:
+        active_ws = [w for w in ws_mod.get_all_workspaces()
+                     if w.state == ws_mod.WorkspaceState.ACTIVE]
+        if not active_ws:
+            from . import web_viewer as wv
+            start_ts = ws.created_at if isinstance(ws.created_at, (int, float)) else _time.time()
+            wv.set_archive_state(
+                ws_id=ws.id,
+                ws_name=ws.name,
+                start_ts=start_ts,
+            )
+            logger.info("R76: Archive triggered — last workspace '%s' closed", ws.name)
+    except Exception as e:
+        logger.warning("R76: Archive state write failed (non-fatal): %s", e)
+
     return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
 
 

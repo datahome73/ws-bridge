@@ -216,3 +216,26 @@ def revoke_api_key(agent_id: str) -> bool:
     keys[agent_id]["status"] = "revoked"
     persistence.set_api_keys(keys)
     return True
+
+
+# ── R76: Agent ID → display name resolver ──────────────────────────
+
+
+def get_agent_name(agent_id: str, default: str | None = None) -> str:
+    """Return display name for an agent_id.
+
+    Priority:
+    1. Traditional users (pre-R72)
+    2. R72 users (registered via api_key, stored in handler._r72_users)
+    3. Truncated agent_id as fallback (e.g. 'ws_xxxxxxxxxxxx')
+    """
+    users = get_users()
+    name = users.get(agent_id, {}).get("name")
+    if name:
+        return name
+    try:
+        from . import handler as _handler
+        r72 = getattr(_handler, "_r72_users", {})
+        return r72.get(agent_id, {}).get("name", default or agent_id[:12])
+    except ImportError:
+        return default or agent_id[:12]

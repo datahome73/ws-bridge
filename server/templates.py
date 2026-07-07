@@ -130,12 +130,14 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 <script>
 const TOKEN='__TOKEN__';
 
-// ── R20: Tab state model — fixed 5-slot architecture (R35 + R38) ──
+// ── R20: Tab state model — fixed 5-slot architecture (R35 + R38 + R76) ──
 const TAB_STATE = {
   tab1: { id: 'tab1', channel: 'lobby',       label: '🌐 大厅',     permanent: true,  visible: true },
   tab2: { id: 'tab2', channel: null,           label: '📋 活跃',     permanent: false, visible: false },
   // R35: admin tab (read-only, no input box)
   tab4: { id: 'tab4', channel: '_admin',       label: '🔧 管理员',   permanent: true,  visible: true },
+  // R76: inbox tab (read-only, no input box, always visible)
+  tab5: { id: 'tab5', channel: '__inbox__',    label: '📬 收件箱',   permanent: true,  visible: true },
   tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史查看器', permanent: true,  visible: true },
 };
 let activeTabId = 'tab1';
@@ -144,6 +146,11 @@ const msgContainers = { lobby: [] };
 let searchMode = false;
 // R38 / 🔧 F-8: Deduplicate messages from WS push + poll double-delivery
 const _seenMsgHashes = {};
+// R76: archive state
+let archiveMode = false;
+let lastArchiveTs = 0;
+// R76: inbox client-side cache for WS push
+let _inboxCache = [];
 
 // ── Panel cache ──
 let wsPanelCache = null;
@@ -220,6 +227,10 @@ function renderTabBar() {
   html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\'tab4\')">' +
     '🔧 管理员</div>';
 
+  // R76: Tab 5: 收件箱 (always) — fourth, with unread badge
+  const inboxUnread = unreadCounts['__inbox__'] || 0;
+  html += '<div class="tab' + (activeTabId === 'tab5' ? ' active' : '') + '" data-tab="tab5" onclick="selectTab(\'tab5\')">📬 收件箱' +
+    (inboxUnread > 0 ? '<span class="badge">' + inboxUnread + '</span>' : '') + '</div>';
 
   // Tab 3: 历史查看器 (always, pending style when no content loaded) — W-6: last
   const tab3Class = 'tab' + (activeTabId === 'tab3' ? ' active' : '') + (!TAB_STATE.tab3.channel ? ' pending' : '');
@@ -240,9 +251,19 @@ function selectTab(tabId) {
   if (tabEl) tabEl.classList.add('active');
 
   activeTabId = tabId;
+
+  // R76: inbox tab — no input box, clear unread, load inbox messages
+  if (tabId === 'tab5') {
+    unreadCounts['__inbox__'] = 0;
+    renderTabBar();
+    document.getElementById('inputArea').style.display = 'none';
+    loadInboxMessages(archiveMode ? lastArchiveTs : null);
+    return;
+  }
+
   const tab = TAB_STATE[tabId];
   if (tab && tab.channel) {
-    loadMessages(tab.channel);
+    loadMessages(tab.channel, archiveMode ? lastArchiveTs : null);
   } else if (tabId === 'tab3') {
     document.getElementById('msgList').innerHTML = '<div class="empty">👈 点击右侧「历史工作室」选择一个查看</div>';
   }
@@ -255,6 +276,8 @@ function switchHistoryTab(wsId, wsName) {
   if (!(wsId in msgContainers)) msgContainers[wsId] = [];
   renderTabBar();
   selectTab('tab3');
+  // R76: load archive full-channel history if workspace is archived
+  loadArchiveMessages(wsId);
 }
 
 function switchToActiveTab(wsId, wsName) {
@@ -272,13 +295,15 @@ function switchToActiveTab(wsId, wsName) {
 
 // ── Message loading ──
 
-async function loadMessages(channel) {
+async function loadMessages(channel, since) {
   const list = document.getElementById('msgList');
   list.innerHTML = '<div class="empty">加载中...</div>';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN), {signal: controller.signal});
+    let url = '/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN);
+    if (since) url += '&since=' + since;
+    const resp = await fetch(url, {signal: controller.signal});
     clearTimeout(timeout);
     if (!resp.ok) {
       // R33: token expired → clear and redirect to bind page
@@ -357,6 +382,87 @@ function appendMessage(channel, msg) {
   } else {
     list.appendChild(el);
   }
+}
+
+// ── R76: Inbox message loading ────────────────────────────────────────
+
+async function loadInboxMessages(since) {
+  const list = document.getElementById('msgList');
+  list.innerHTML = '<div class="empty">加载中...</div>';
+  let url = '/api/chat/inbox?limit=50&token=' + encodeURIComponent(TOKEN);
+  if (since) url += '&since=' + since;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('fetch failed');
+    const data = await resp.json();
+    const msgs = data.messages || [];
+    list.innerHTML = '';
+    if (msgs.length === 0) {
+      list.innerHTML = '<div class="empty">暂无收件箱消息</div>';
+      return;
+    }
+    for (const m of msgs) {
+      list.appendChild(createInboxMessageEl(m));
+    }
+  } catch(e) {
+    list.innerHTML = '<div class="empty">加载失败</div>';
+  }
+}
+
+function createInboxMessageEl(m) {
+  const div = document.createElement('div');
+  div.className = 'msg bot';
+  const sender = m.from_name || '';
+  const receiver = m.to_name || '';
+  const cls = colorMap[sender] || 'unknown';
+  div.innerHTML =
+    '<div class="meta">' +
+      '<span class="ts">' + formatTime(m.ts) + '</span>' +
+      '<span class="sender s-' + cls + '">' + escapeHtml(sender) + '</span>' +
+      '<span style="color:#8b949e;margin:0 4px;">→</span>' +
+      '<span style="color:#8b949e;font-size:0.85rem;">' + escapeHtml(receiver) + '</span>' +
+    '</div>' +
+    '<div class="content">' + escapeHtml(m.content || '') + '</div>';
+  return div;
+}
+
+// ── R76: Archive message loading (full channel history) ───────────────
+
+async function loadArchiveMessages(wsId) {
+  const list = document.getElementById('msgList');
+  list.innerHTML = '<div class="empty">加载中...</div>';
+  const resp = await fetch('/api/chat/archive?workspace_id=' + encodeURIComponent(wsId) + '&token=' + encodeURIComponent(TOKEN));
+  if (!resp.ok) { list.innerHTML = '<div class="empty">加载失败</div>'; return; }
+  const data = await resp.json();
+  const msgs = data.messages || [];
+  list.innerHTML = '';
+  // Header showing workspace info
+  const header = document.createElement('div');
+  header.style.cssText = 'padding:8px 12px;margin-bottom:8px;border-radius:8px;background:#161b22;border:1px solid #30363d;font-size:0.8rem;color:#8b949e;';
+  header.textContent = '📦 ' + data.workspace + ' · ' + msgs.length + ' 条消息 · ' + new Date(data.period.start * 1000).toLocaleString() + ' → ' + new Date(data.period.end * 1000).toLocaleString();
+  list.appendChild(header);
+  for (const m of msgs) {
+    const el = createArchiveMessageEl(m);
+    list.appendChild(el);
+  }
+}
+
+function createArchiveMessageEl(m) {
+  const div = document.createElement('div');
+  div.className = 'msg bot';
+  const sender = m.from_name || '';
+  const label = m._channel_label || m.channel || '';
+  const cls = colorMap[sender] || 'unknown';
+  let inner = '<div class="meta"><span class="ts">' + formatTime(m.ts) + '</span>' +
+    '<span class="sender s-' + cls + '">' + escapeHtml(sender) + '</span>';
+  if (m.to_name) {
+    inner += '<span style="color:#8b949e;margin:0 4px;">→</span>' +
+      '<span style="color:#8b949e;font-size:0.85rem;">' + escapeHtml(m.to_name) + '</span>';
+  }
+  inner += '<span style="margin-left:auto;font-size:0.7rem;color:#8b949e;border:1px solid #30363d;border-radius:3px;padding:1px 4px;">' + escapeHtml(label) + '</span>';
+  inner += '</div><div class="content">' + escapeHtml(m.content || '') + '</div>';
+  div.innerHTML = inner;
+  return div;
 }
 
 // ── R20: Workspace panel — partitioned + closed_at + desc sorted ──
@@ -458,7 +564,19 @@ async function init() {
     // API failed → keep whatever localStorage restored (graceful degradation)
   }
 
-  // 1. Render tab bar (fixed 3-slot, no fetch needed)
+  // R76: load archive state from /api/channels
+  try {
+    const chResp = await fetch('/api/channels?token=' + encodeURIComponent(TOKEN));
+    if (chResp.ok) {
+      const chData = await chResp.json();
+      if (chData.archive_state) {
+        archiveMode = !chData.archive_state.active;
+        lastArchiveTs = chData.archive_state.last_archive_ts || 0;
+      }
+    }
+  } catch(e) {}
+
+  // 1. Render tab bar (fixed slots, no fetch needed)
   renderTabBar();
 
   // W-7: Pull-to-refresh → always go to first tab
@@ -480,11 +598,29 @@ async function init() {
         const data = JSON.parse(e.data);
         if (data.type === 'chat_message') {
           const ch = data.channel || 'lobby';
-          appendMessage(ch, data.message || data);
+          // R76: inbox messages → separate handling with unread badge
+          if (ch.startsWith('_inbox:')) {
+            const msg = data.message || data;
+            _inboxCache.push(msg);
+            if (activeTabId === 'tab5') {
+              const list = document.getElementById('msgList');
+              list.insertBefore(createInboxMessageEl(msg), list.firstChild);
+            } else {
+              unreadCounts['__inbox__'] = (unreadCounts['__inbox__'] || 0) + 1;
+              renderTabBar();
+            }
+          } else {
+            appendMessage(ch, data.message || data);
+          }
         }
         // R6: workspace archived event → refresh panel cache
         if (data._workspace_event === 'archived') {
           wsPanelCache = null; // invalidate cache
+        }
+        // R76: workspace created → reset archive mode
+        if (data.type === 'workspace_created') {
+          archiveMode = false;
+          renderTabBar();
         }
       } catch(_) {}
     };
