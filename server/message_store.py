@@ -198,8 +198,6 @@ def get_messages_by_channel_pattern(
         return [dict(r) for r in rows]
     except Exception:
         return []
-    finally:
-        conn.close()
 
 
 # ── R76: Time range query ────────────────────────────────────────────
@@ -222,8 +220,8 @@ def get_messages_by_time_range(
         return [dict(r) for r in rows]
     except Exception:
         return []
-    finally:
-        conn.close()
+
+
 
 
 def clean_old_messages(
