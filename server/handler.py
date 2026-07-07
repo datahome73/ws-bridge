@@ -2989,6 +2989,46 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     except Exception:
         pass
 
+    # ── Notify PM inbox of step progress (同步通知小谷收件箱) ──
+    try:
+        pm_users = auth.get_users()
+        pm_agent_id = None
+        for aid_u, u in pm_users.items():
+            if u.get("name") == config.PIPELINE_PM_NAME:
+                pm_agent_id = aid_u
+                break
+        if pm_agent_id:
+            pm_inbox_ch = persistence.get_inbox_channel(pm_agent_id)
+            _out_short = output_ref[:7] if output_ref else "(未提供)"
+            pm_notify = (
+                f"📋 {round_name} 进度：{step_name} ✅ → "
+                f"下一棒 {next_role_display}（{next_step}）\n"
+                f"  🎯 产出: {_out_short}"
+            )
+            write_chat_log("系统", pm_notify, channel=pm_inbox_ch)
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent="系统", from_name="系统",
+                content=pm_notify, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=pm_inbox_ch,
+            )
+            pm_payload = json.dumps({
+                "type": "broadcast", "channel": pm_inbox_ch,
+                "from_name": "系统", "from": "系统",
+                "content": pm_notify, "ts": time.time(),
+            })
+            for conn in list(_connections.get(pm_agent_id, set())):
+                try:
+                    if hasattr(conn, "send_str"):
+                        await conn.send_str(pm_payload)
+                    elif hasattr(conn, "send"):
+                        await conn.send(pm_payload)
+                except Exception:
+                    pass
+            logger.info("PM inbox notified: %s %s ✅ → %s", round_name, step_name, next_step)
+    except Exception:
+        pass
+
     # ── R43 C: Send clear alert if watchdog was active ──
     if _clear_watchdog_alert(round_name, step_name):
         await _send_clear_alert(round_name, step_name, output_ref)
