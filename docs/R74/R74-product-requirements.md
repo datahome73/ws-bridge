@@ -348,6 +348,38 @@ grep -n 'role.*admin' server/handler.py
 
 ---
 
+---
+
+### 方向 D（顺手修复）：R74 管线运行中发现的两个 bug 🟡 P1
+
+#### D1 — PM 收件箱写权限放开
+
+**发现场景：** 向小开的 inbox 发 Step 2 任务时被拒绝：`❌ 权限不足：仅管理员可向收件箱发消息`
+
+**根因：** `handler.py` 中 inbox 消息的权限检查仅在 admin 角色下放行，PM（小谷）的 role 不是 admin 所以被拦截。
+
+**修复：** inbox 写权限检查中增加 PM 角色放行，或增加 `can_send_inbox` 权限声明。改动量 ≤5 行。
+
+**验收：**
+| # | 检查项 | 预期结果 | 测试方法 |
+|:-:|:-------|:---------|:---------|
+| ✅-11 | PM 通过 inbox 发送任务给任意 bot | 成功发送，不报权限错误 | PM 发消息到 `_inbox:<agent_id>` → 检查响应无权限错误 |
+
+#### D2 — Agent Card 角色名不匹配导致工作室缺人
+
+**发现场景：** 小开的 Agent Card 中 `pipeline_roles: ["architect"]`，但 pipeline 中 Step 2 的角色是 `arch`。成员发现逻辑做 `pipeline_roles & all_roles` 交集匹配 → 小开未被加入工作室
+
+**当前缓解：** workspace.members 显式定义（方向 A1）将直接根据 display_name 或 mention_keyword 查找成员，绕过 pipeline_roles 匹配。
+
+**根因修复：** 当 frontmatter 定义 `workspace.members` 时，成员发现逻辑优先使用 display_name 模糊匹配而非 pipeline_roles 交集。
+
+**验收：**
+| # | 检查项 | 预期结果 | 测试方法 |
+|:-:|:-------|:---------|:---------|
+| ✅-12 | 小开 card 角色 architect ≠ arch，但通过 display_name 被加入工作室 | 工作室成员列表含小开 | workspace.members 定义 arch → `!pipeline_start` → `!pipeline_status` 成员含小开 |
+
+---
+
 ## 4. 不纳入范围
 
 | 事项 | 说明 | 原因 |

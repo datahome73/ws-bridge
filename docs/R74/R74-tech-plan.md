@@ -418,6 +418,63 @@ PIPELINE_STEP_MAP: dict[str, dict] = {
 
 ---
 
+---
+
+## 3.5 方向 D — 顺手修复（管线运行中发现的两个 bug）
+
+### D1 — PM 收件箱写权限放开
+
+**根因分析：** inbox 写权限检查位置在 `_on_agent_message()`（L4580-4600 附近），当消息的 `channel` 以 `_inbox:` 前缀开头时，代码检查发送者角色是否为 `admin`。PM（小谷）role 为 `member`，不匹配。
+
+**改动方案：**
+
+```python
+# 当前（L4588 附近）：
+if sender_role != "admin":
+    return {"type": "error", "error": "❌ 权限不足：仅管理员可向收件箱发消息"}
+
+# 改造后：
+# 允许 pipeline PM 角色（pipeline_coordinator）也发送 inbox 消息
+allowed_inbox_roles = {"admin", "pipeline_coordinator"}
+if sender_role not in allowed_inbox_roles:
+    return {"type": "error", "error": "❌ 权限不足：仅管理员可向收件箱发消息"}
+```
+
+> **注意：** 具体角色名需根据实际 `role_level()` 或 `auth.role_definition` 确定。PM 的 role 可能是 `pipeline_coordinator` 或 `pm` 或 `member`（但 pipeline_coordinator 有特殊权限标记）。建议用一个集合 `INBOX_WRITE_ROLES` 统一管理可写 inbox 的角色。
+
+**行号：** 需在部署版本中 grep 确认 `仅管理员可向收件箱发消息` 的精确位置。
+
+### D2 — Agent Card 角色名不匹配
+
+**根因分析：** 成员发现逻辑（L2128-2144）中仅通过 `pipeline_roles & all_roles` 交集匹配。小开的卡上写的是 `pipeline_roles: ["architect"]`，而 pipeline 配置中角色名为 `arch`，交集为空。
+
+**与 A1（workspace.members）的关系：** 当 workspace.members 在前端定义后，成员发现函数将获得 `all_roles`。但 agent card 匹配仍依赖字符串精确匹配。修复方向：当 workspace.members 存在时，通过 display_name 查找而非 pipeline_roles 交集。
+
+**改动方案（在 L2128-2144 区域的 workspace.members 分支内新增）：**
+
+```python
+if workspace_members:
+    # ── D2: 当 frontmatter 有 workspace.members 时，用 display_name 匹配 ──
+    role_to_keywords = {}
+    for role_name, role_cfg in workspace_members.items():
+        kw = role_cfg.get("mention_keyword", "")
+        role_to_keywords[role_name] = set(kw.split(";")) if kw else set()
+    
+    member_ids = []
+    for aid, card in cards.items():
+        card_name = card.get("display_name", "")
+        # 检查 card 的 display_name 是否匹配某角色的 mention_keyword
+        for role_name, keywords in role_to_keywords.items():
+            if card_name in keywords:
+                member_ids.append(aid)
+                break
+else:
+    # 原有 pipeline_roles 交集匹配逻辑...
+```
+
+> **简化方案：** 若交互流程可接受，让各 bot 在 Agent Card 的 `pipeline_roles` 中使用与 frontmatter 一致的角色名即可。当前修复通过 A1 + D2 的 name-matching fallback 解决，无需强制统一角色名。
+
+
 ## 4. 兼容性分析
 
 ### 4.1 旧轮次管线（R72/R73 等已有 `_PIPELINE_CONFIG`）
