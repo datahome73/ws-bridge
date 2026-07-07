@@ -1,10 +1,6 @@
 # 项目文档目录
 
-按开发轮次归档，每轮独立文件夹。最新轮次：**R73**。
-
-> ⚠️ 脱敏提醒：所有 WORK_PLAN.md 已使用通用角色名
-> （需求分析师 / 项目管理 / 架构师 / 开发工程师 / 审查工程师 / 测试工程师 / 项目负责人）。
-> 新建轮次请参考 `docs/templates/` 模板，继续使用通用角色名。
+按开发轮次归档，每轮独立文件夹。最新轮次：**R74**。
 
 ## 目录结构
 
@@ -16,9 +12,17 @@ docs/
 ├── product-requirements.md  全局产品需求
 ├── chat-rules-test-items.md 规则测试项
 ├── README.md                本文件
-├── templates/               开发文档模板（新建轮次时参考，使用通用角色名）
-│   └── ...
-├── R32/ ... R74/            历史轮次（已归档，详见各轮次文件夹）
+├── templates/               开发文档模板（新建轮次时参考）
+│   ├── R-work-plan.md
+│   ├── R-product-requirements.md
+│   ├── R-tech-plan.md
+│   ├── R-direction-review.md
+│   ├── R-code-review.md
+│   ├── R-test-report.md
+│   └── R-release-verification.md
+├── R32/                     第32轮开发（最新）
+│   └── WORK_PLAN.md
+└── R{NN}/                   历史轮次（保留参考）
 ```
 
 ## 开发文档模板
