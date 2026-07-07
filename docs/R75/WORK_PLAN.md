@@ -1,3 +1,76 @@
+---
+pipeline:
+  name: "R75 文档治理与归档"
+  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R75/WORK_PLAN.md"
+  workspace:
+    name: "R75-dev"
+    members:
+      arch:
+        mention_keyword: "小开;arch;架构师"
+        rules: "输出技术方案"
+      dev:
+        mention_keyword: "爱泰;dev;开发工程师"
+        rules: "执行替换"
+      review:
+        mention_keyword: "小周;review;审查工程师"
+        rules: "审查替换完整性"
+      qa:
+        mention_keyword: "泰虾;qa;测试工程师"
+        rules: "运行检查脚本+抽检"
+      operations:
+        mention_keyword: "小爱;operations;项目管理"
+        rules: "合并部署归档"
+      pm:
+        mention_keyword: "小谷;pm;需求分析师"
+        rules: "协调管线"
+  steps:
+    step2:
+      role: arch
+      title: "技术方案"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R75/R75-product-requirements.md"
+      feedback_channel: "_admin"
+      output_desc: "技术方案文档 URL"
+      timeout_minutes: 120
+    step3:
+      role: dev
+      title: "编码实现 — 执行脱敏替换"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R75/R75-product-requirements.md"
+      feedback_channel: "_admin"
+      output_desc: "替换完成的 commit SHA"
+      timeout_minutes: 180
+    step4:
+      role: review
+      title: "代码审查"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R75/R75-product-requirements.md"
+      feedback_channel: "_admin"
+      output_desc: "审查报告 URL"
+      timeout_minutes: 120
+    step5:
+      role: qa
+      title: "测试验证"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R75/R75-product-requirements.md"
+      feedback_channel: "_admin"
+      output_desc: "测试报告 URL"
+      timeout_minutes: 120
+    step6:
+      role: operations
+      title: "合并部署归档"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        merge_branch: "main"
+      feedback_channel: "_admin"
+      output_desc: "合并 commit SHA"
+      timeout_minutes: 60
+---
+
 # R75 工作计划 — 文档治理与归档 📚
 
 > **版本：** v1.0
