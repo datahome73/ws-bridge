@@ -111,6 +111,9 @@ pipeline:
   name: "R74 管线通用化"            # 轮次/任务名称
   description: "管线配置通用化，移除目录依赖"  # 可选描述
 
+  # ── WORK_PLAN 自身 raw URL（最重要参数：所有 bot 通过此 URL 读完整上下文） ──
+  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R74/WORK_PLAN.md"
+
   # ── 工作室定义 ──
   workspace:
     name: "R74-dev"                # 工作室名（可选，默认用 pipeline.name）
@@ -134,12 +137,13 @@ pipeline:
         mention_keyword: "PMBot;pm;需求分析师"
         rules: "编排管线，协调各角色"
 
-  # ── Step 定义（全部使用 raw URL） ──
+  # ── Step 定义（全部使用 raw URL，每 step 均含 work_plan_url 引用） ──
   steps:
     step2:
       role: arch
       title: 技术方案
       context:
+        work_plan_url: "${pipeline.work_plan_url}"
         requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/R74/R74-product-requirements.md"
       feedback_channel: "_admin"
       output_desc: "技术方案文档 URL 或 commit SHA"
@@ -149,6 +153,7 @@ pipeline:
       role: dev
       title: 编码实现
       context:
+        work_plan_url: "${pipeline.work_plan_url}"
         requirements_url: "同上 URL"
         tech_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R74/R74-tech-plan.md"
       feedback_channel: "_admin"
@@ -159,6 +164,7 @@ pipeline:
       role: review
       title: 代码审查
       context:
+        work_plan_url: "${pipeline.work_plan_url}"
         requirements_url: "同上"
         tech_plan_url: "同上"
         commit_sha: "${steps.step3.sha}"       # 引用上一步产出
@@ -170,6 +176,7 @@ pipeline:
       role: qa
       title: 测试验证
       context:
+        work_plan_url: "${pipeline.work_plan_url}"
         requirements_url: "同上"
         tech_plan_url: "同上"
         commit_sha: "${steps.step3.sha}"
@@ -182,6 +189,7 @@ pipeline:
       role: operations
       title: 合并部署归档
       context:
+        work_plan_url: "${pipeline.work_plan_url}"
         merge_branch: "main"
       feedback_channel: "_admin"
       output_desc: "合并 commit SHA"
@@ -192,6 +200,7 @@ pipeline:
 
 | 字段 | 当前 | 改造后 | 说明 |
 |:-----|:-----|:-------|:------|
+| `pipeline.work_plan_url` | ❌ 无 | ✅ **新增（必填）** | WORK_PLAN 自身的 raw URL，**最重要参数**——所有 bot 通过它读完整上下文。`\${pipeline.work_plan_url}` 可在各 step context 中引用 |
 | `pipeline.workspace` | ❌ 无 | ✅ 有 | 定义工作室名称和成员角色规则 |
 | `pipeline.steps.*.context.*` | `requirements_url` 等被拼接覆盖 | ✅ 完全由 frontmatter 控制，不覆盖 | 所有 URL 是显式 raw URL |
 | `pipeline.branch` | `branch: dev`（已存在） | ✅ 保留 | git 分支名，用于产出推断（可选） |
