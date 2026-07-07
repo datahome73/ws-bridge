@@ -115,9 +115,9 @@ pipeline:
 ### 1.3 关键设计决策
 
 1. **保留 `_mention_keyword` 兼容** — `_mention_keyword = self._mention_keywords[0]`，供日志/调试引用
-2. **长词优先剥离** — `sorted(self._mention_keywords, key=len, reverse=True)`，避免 `"小"` 覆盖 `"小开"`
+2. **长词优先剥离** — `sorted(self._mention_keywords, key=len, reverse=True)`，避免 `"小"` 覆盖 `"架构师"`
 3. **分号分隔** — 与 `;` 作为分隔符，兼容 `MENTION_KEYWORD` 环境变量
-4. **完整向下兼容** — 单值 `"小开"` → `split(";")` → `["小开"]` → 行为零变化
+4. **完整向下兼容** — 单值 `"架构师"` → `split(";")` → `["架构师"]` → 行为零变化
 
 ---
 
@@ -160,8 +160,8 @@ pipeline:
 | 顺序 | 改动 | 文件位置 | 验证 |
 |:----|:-----|:---------|:-----|
 | 1️⃣ | `__init__` 初始化 — `_raw.split(";")` → `_mention_keywords` | L133 | 单值/多值 parse |
-| 2️⃣ | 触发检查 — `if not any(kw in content for kw in list)` | L359 | `@arch` 触发小开 |
-| 3️⃣ | 前缀剥离 — `for kw in sorted(list, key=len, reverse=True)` | L367 | `小开 收到` → `收到` |
+| 2️⃣ | 触发检查 — `if not any(kw in content for kw in list)` | L359 | `@arch` 触发架构师 |
+| 3️⃣ | 前缀剥离 — `for kw in sorted(list, key=len, reverse=True)` | L367 | `架构师 收到` → `收到` |
 | 4️⃣ | 频道路由 — `for kw in list: if f"@{kw}" in content` | L434 | `@arch` 路由到 lobby |
 
 **完成条件：** 代码推 dev，服务端重启验证 ✅-1~✅-13 方向 A 逐项通过。
@@ -188,9 +188,9 @@ pipeline:
 
 | # | 场景 | 方法 | 预期 |
 |:-:|:-----|:-----|:------|
-| 1 | 单值 parse | `"小开"` → `["小开"]` | `_mention_keywords[0] == "小开"` |
-| 2 | 双值 parse | `"小开;arch"` → `["小开", "arch"]` | 两个词均在列表 |
-| 3 | 空格 trim | `" 小开 ; arch "` → `["小开", "arch"]` | 无空格残留 |
+| 1 | 单值 parse | `"架构师"` → `["架构师"]` | `_mention_keywords[0] == "架构师"` |
+| 2 | 双值 parse | `"架构师;arch"` → `["架构师", "arch"]` | 两个词均在列表 |
+| 3 | 空格 trim | `" 架构师 ; arch "` → `["架构师", "arch"]` | 无空格残留 |
 | 4 | `@bot名` 触发 | 发 `@bot名 收到` | bot 回复 |
 | 5 | `@角色英文名` 触发 | 发 `@角色英文名 内容` | bot 回复 |
 | 6 | `@dev` 触发 | 发 `@dev 编码` | dev bot 回复 |
@@ -223,8 +223,8 @@ pipeline:
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | 单值 `"小开"` → `["小开"]` | ✅ |
-| ✅-2 | 多值 `"小开;arch"` → `["小开", "arch"]` | ✅ |
+| ✅-1 | 单值 `"架构师"` → `["架构师"]` | ✅ |
+| ✅-2 | 多值 `"架构师;arch"` → `["架构师", "arch"]` | ✅ |
 | ✅-3 | 空格 trim | ✅ |
 | ✅-4 | `@bot名 收到` → 触发 | ✅ |
 | ✅-5 | `@角色英文名 收到` → 触发 | ✅ |

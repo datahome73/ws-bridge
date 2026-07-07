@@ -37,7 +37,7 @@
 | # | 验收标准 | 结果 | 说明 |
 |:-:|:--------|:----:|:-----|
 | A1 | `register` → `register_ok` 含 `agent_id` + `api_key` | ✅ | 返回 `type=register_ok`，agent_id 和 api_key 都存在 |
-| A2 | `agent_id` 格式 `ws_` 开头 | ✅ | 格式如 `ws_de431995abbd`（ws_ + 12位hex）|
+| A2 | `agent_id` 格式 `ws_` 开头 | ✅ | 格式如 `<agent_id>`（ws_ + 12位hex）|
 | A3 | `api_key` 格式 `sk_ws_` 开头 | ✅ | 格式如 `sk_ws_` + 32位sha256 hex |
 | A4 | `auth(api_key)` → `auth_ok` 无 `role` 字段 | ✅ | `role` 字段已移除，替代为 `display_name` |
 | A5 | `register` 后同一连接发消息（无需断连） | ✅ | 注册后直接发 `message` 到 lobby 无报错 |
