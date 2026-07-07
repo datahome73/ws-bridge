@@ -1,3 +1,36 @@
+---
+pipeline:
+  steps:
+    - step: 2
+      role: architect
+      task: 技术方案
+    - step: 3
+      role: developer
+      task: 编码实现
+    - step: 4
+      role: reviewer
+      task: 代码审查
+    - step: 5
+      role: qa
+      task: 测试验证
+    - step: 6
+      role: admin
+      task: 合并部署
+  timeout_minutes: 30
+workspace:
+  name: R76-dev
+  members:
+    - name: 架构师
+      role: architect
+    - name: 开发工程师
+      role: developer
+    - name: 审查工程师
+      role: reviewer
+    - name: 测试工程师
+      role: qa
+    - name: 项目管理
+      role: admin
+---
 # R76 工作计划 — Inbox 可视化 + 时间切片归档 📬
 
 > **版本：** v1.0（初稿）
