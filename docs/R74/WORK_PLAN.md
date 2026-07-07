@@ -1,7 +1,7 @@
 # R74 工作计划 — 管线通用化：WORK_PLAN 单入口 + Raw URL 解耦
 
-> **版本：** v1.0 ✅（项目负责人审核通过）
-> **状态：** ✅ 定稿
+> **版本：** v1.0 ✅（已归档）
+> **状态：** 🏁 已归档
 > **项目协调人：** 🧐 PM
 > **基于需求文档：** docs/R74/R74-product-requirements.md v1.0 ✅
 
@@ -138,16 +138,16 @@
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-1 | 完整 frontmatter + raw URL → `!pipeline_start` | 管线使用 frontmatter 中的 raw URL，不拼接 | 检查 `_PIPELINE_CONFIG[R74]` 中的 URL 字段 = frontmatter 的 raw URL，非拼接值 |
-| ✅-2 | 缺 `pipeline.steps` 的 frontmatter → `!pipeline_start` | ❌ 返回错误 "缺少 pipeline.steps" | 创建无 steps 的 WORK_PLAN → 启动 → 检查错误消息 |
-| ✅-3 | frontmatter 定义 `workspace.members` → 成员按定义创建 | 工作室包含相应角色 | frontmatter 定义 arch/dev 两个成员 → 启动后 `!pipeline_status` 成员列表匹配 |
-| ✅-4 | 有 `_PIPELINE_CONFIG` 的旧轮次 → `!pipeline_status` | 正常，不报错 | `!pipeline_status R72` → 正常显示 |
-| ✅-5 | `_R62_REPO_BASE` 已从 handler.py 删除 | 零匹配 | `grep -n '_R62_REPO_BASE' server/handler.py` → exit=1 |
-| ✅-6 | `!pipeline_start` 不拼接 `docs/轮次/` 路径 | 新轮次无 raw URL 的 context 字段为空串而非拼接值 | frontmatter 不配 `requirements_url` → 启动后检查 context 为空 |
-| ✅-7 | `_infer_artifact_url` 优先读 frontmatter artifact_url | 自定义 artifact_url 生效 | frontmatter step2 配 `artifact_url: "https://..."` → `!step_complete step2 --summary x` 自动推断为该 URL |
-| ✅-8 | 代码中 `role: admin` 全改为 `role: operations` | 零残留 `"admin"` 角色引用 | `grep -n '"admin"' server/handler.py` → 仅排除正常命令名称 |
-| ✅-9 | `PIPELINE_STEP_MAP` 中 role 已更新 | step1/step6 role = operations | 检查 `_build_legacy_steps()` 的 role 值 |
-| ✅-10 | R74 需求文档不出现 admin 角色名 | 使用 operations/运维 | `grep -n 'admin' docs/R74/R74-product-requirements.md` → 零匹配 |
+| ✅-1 🟢 已完成 ✅| 完整 frontmatter + raw URL → `!pipeline_start` | 管线使用 frontmatter 中的 raw URL，不拼接 | 检查 `_PIPELINE_CONFIG[R74]` 中的 URL 字段 = frontmatter 的 raw URL，非拼接值 |
+| ✅-2 🟢 已完成 ✅| 缺 `pipeline.steps` 的 frontmatter → `!pipeline_start` | ❌ 返回错误 "缺少 pipeline.steps" | 创建无 steps 的 WORK_PLAN → 启动 → 检查错误消息 |
+| ✅-3 🟢 已完成 ✅| frontmatter 定义 `workspace.members` → 成员按定义创建 | 工作室包含相应角色 | frontmatter 定义 arch/dev 两个成员 → 启动后 `!pipeline_status` 成员列表匹配 |
+| ✅-4 🟢 已完成 ✅| 有 `_PIPELINE_CONFIG` 的旧轮次 → `!pipeline_status` | 正常，不报错 | `!pipeline_status R72` → 正常显示 |
+| ✅-5 🟢 已完成 ✅| `_R62_REPO_BASE` 已从 handler.py 删除 | 零匹配 | `grep -n '_R62_REPO_BASE' server/handler.py` → exit=1 |
+| ✅-6 🟢 已完成 ✅| `!pipeline_start` 不拼接 `docs/轮次/` 路径 | 新轮次无 raw URL 的 context 字段为空串而非拼接值 | frontmatter 不配 `requirements_url` → 启动后检查 context 为空 |
+| ✅-7 🟢 已完成 ✅| `_infer_artifact_url` 优先读 frontmatter artifact_url | 自定义 artifact_url 生效 | frontmatter step2 配 `artifact_url: "https://..."` → `!step_complete step2 --summary x` 自动推断为该 URL |
+| ✅-8 🟢 已完成 ✅| 代码中 `role: admin` 全改为 `role: operations` | 零残留 `"admin"` 角色引用 | `grep -n '"admin"' server/handler.py` → 仅排除正常命令名称 |
+| ✅-9 🟢 已完成 ✅| `PIPELINE_STEP_MAP` 中 role 已更新 | step1/step6 role = operations | 检查 `_build_legacy_steps()` 的 role 值 |
+| ✅-10 🟢 已完成 ✅| R74 需求文档不出现 admin 角色名 | 使用 operations/运维 | `grep -n 'admin' docs/R74/R74-product-requirements.md` → 零匹配 |
 
 **完成条件：** 测试报告推 dev + 验收逐项标记 ✅/❌
 
@@ -170,19 +170,20 @@
 
 | # | 验收标准 | 状态 |
 |:-:|:---------|:----:|
-| ✅-1 | frontmatter 完整 + raw URL → `!pipeline_start` 正常 | ⏳ |
-| ✅-2 | 缺 `pipeline.steps` → ❌ 报错，不回退 | ⏳ |
-| ✅-3 | frontmatter `workspace.members` → 成员按定义创建 | ⏳ |
-| ✅-4 | 旧轮次 `!pipeline_status` 不报错 | ⏳ |
-| ✅-5 | `_R62_REPO_BASE` 零匹配 | ⏳ |
-| ✅-6 | 不拼接 `docs/轮次/` 路径 | ⏳ |
-| ✅-7 | artifact_url 优先读 frontmatter | ⏳ |
-| ✅-8 | admin→operations 全局替换完整 | ⏳ |
-| ✅-9 | PIPELINE_STEP_MAP role 更新 | ⏳ |
-| ✅-10 | 需求文档零 admin 角色名残留 | ⏳ |
+| ✅-1 🟢 已完成 ✅| frontmatter 完整 + raw URL → `!pipeline_start` 正常 | ⏳ |
+| ✅-2 🟢 已完成 ✅| 缺 `pipeline.steps` → ❌ 报错，不回退 | ⏳ |
+| ✅-3 🟢 已完成 ✅| frontmatter `workspace.members` → 成员按定义创建 | ⏳ |
+| ✅-4 🟢 已完成 ✅| 旧轮次 `!pipeline_status` 不报错 | ⏳ |
+| ✅-5 🟢 已完成 ✅| `_R62_REPO_BASE` 零匹配 | ⏳ |
+| ✅-6 🟢 已完成 ✅| 不拼接 `docs/轮次/` 路径 | ⏳ |
+| ✅-7 🟢 已完成 ✅| artifact_url 优先读 frontmatter | ⏳ |
+| ✅-8 🟢 已完成 ✅| admin→operations 全局替换完整 | ⏳ |
+| ✅-9 🟢 已完成 ✅| PIPELINE_STEP_MAP role 更新 | ⏳ |
+| ✅-10 🟢 已完成 ✅| 需求文档零 admin 角色名残留 | ⏳ |
 
 ## 4. 变更记录
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
 | v1.0 | 2026-07-07 | 初稿 — R74 WORK_PLAN |
+|| v1.1 | 2026-07-07 | 🏁 归档 — Step 5 测试 12/12 ALL GREEN 🟢, Step 6 合并部署 main `0b75dc8`, ws-bridge:r74
