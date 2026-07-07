@@ -534,7 +534,7 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
                      if w.state == ws_mod.WorkspaceState.ACTIVE]
         if not active_ws:
             from . import web_viewer as wv
-            start_ts = ws.created_at if isinstance(ws.created_at, (int, float)) else _time.time()
+            start_ts = ws.created_at if isinstance(ws.created_at, (int, float)) else time.time()
             wv.set_archive_state(
                 ws_id=ws.id,
                 ws_name=ws.name,
