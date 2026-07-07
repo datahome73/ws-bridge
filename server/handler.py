@@ -2089,13 +2089,16 @@ def _format_pipeline_context(ctx: PipelineContext) -> str:
     return "\n".join(lines)
 
 
-async def _handle_pipeline_command(sender_id: str, params: str) -> str:
+async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
     """处理 !pipeline 子命令。
 
     用法: !pipeline <create|status|list|advance|block|archive|cancel> [args]
     """
     from pathlib import Path
-    parts = params.strip().split(maxsplit=2)
+    raw = params.get("_raw", "")
+    # Strip the leading "!pipeline "
+    rest = raw[len("!pipeline "):] if raw.startswith("!pipeline ") else raw
+    parts = rest.strip().split(maxsplit=2)
     subcmd = parts[0] if len(parts) >= 1 else ""
     mgr = _ensure_pipeline_manager()
 
@@ -4149,7 +4152,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
     # ── R77: Pipeline context management ──
     "pipeline": {
-        "handler": _handle_pipeline_command, "min_role": 2, "workspace_scope": True,
+        "handler": _handle_pipeline_command, "min_role": 2, "workspace_scope": False,
         "usage": "!pipeline <create|status|list|advance|block|archive|cancel> [args]",
     },
         # ── R49 B: Agent Card commands ──

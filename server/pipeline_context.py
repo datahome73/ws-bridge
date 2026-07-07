@@ -297,6 +297,8 @@ class PipelineContextManager:
                 return False
             old = ctx.current_step
             ctx.advance()
+            if ctx.status == PipelineStatus.INIT:
+                ctx.status = PipelineStatus.RUNNING
             if ctx.status == PipelineStatus.BLOCKED:
                 ctx.status = PipelineStatus.RUNNING
                 ctx.blocked_reason = None
