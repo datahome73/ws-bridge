@@ -1,4 +1,4 @@
-# R74 产品需求 — 管线参数化完善：frontmatter 唯一配置源 🎯
+# R74 产品需求 — 管线通用化：WORK_PLAN 单入口 + Raw URL 解耦 🌐
 
 > **版本：** v1.0（初稿，待审核）
 > **状态：** 📝 草稿
@@ -10,55 +10,65 @@
 
 ---
 
-## 0. 先验验证：R62-R69 管线基础设施
+## 0. 先验验证：已就绪的基础设施
 
 | 验证项 | 结果 | 确认方式 |
 |:-------|:----:|:---------|
-| `_parse_frontmatter()` 函数 | ✅ | `handler.py` L1107 — 解析 WORK_PLAN YAML frontmatter |
-| `_build_pipeline_config()` 函数 | ✅ | `handler.py` L1150 — 从 frontmatter 构建 `_PIPELINE_CONFIG` |
-| `_get_step_config()` 统一读取 | ✅ | `handler.py` L1229 — 优先 frontmatter，回退硬编码 |
-| `_build_fallback_steps()` 回退 | ✅ | `handler.py` L1238 — 从 `PIPELINE_STEP_MAP` 构建 fallback |
-| `_PIPELINE_CONFIG[round_name]` 持久化 | ✅ | 管线启动时创建，运行时内存保持 |
-| `PIPELINE_STEP_MAP` 硬编码 | ✅ 仍存在 | `config.py` L91 — 6 步硬编码作为全局默认值 |
-| **总结** | ✅ | 管线基础设施就绪，但 frontmatter 仍为可选 |
+| R72 新认证体系（register → api_key → auth） | ✅ | 全员 6 bot 已迁移，`handler.py` handle_auth/handle_register |
+| R72 Agent Card 自注册 | ✅ | `agent_card.py` register_from_agent()，pipeline_roles 能力声明 |
+| R68 inbox 私有通道 | ✅ | `_inbox:<agent_id>` 通道，PM 单向派活，37/37 测试 ✅ |
+| R69 inbox 上下文增强 | ✅ | step_outputs 结构化 + summary/artifact_url 注入 |
+| R73 权限打通 | ✅ | L2 member 分支 + min_role 降级 + 运维 operations 角色名 |
+| **总结** | ✅ | **基础设施已就绪，可以开始做通用化能力** |
 
 ---
 
 ## 1. 问题背景
 
-### 1.1 现状：frontmatter 是可选配置，PIPELINE_STEP_MAP 是静默后门
+### 1.1 现状：管线紧耦合在 ws-bridge 项目的目录约定上
 
-当前管线启动逻辑（`handler.py` L2076-2106）的工作流：
+当前管线从 WORK_PLAN URL 到各 Step 上下文 URL 全是硬编码拼接：
 
-```
-!pipeline_start R{N}
-  ├─ 有 WORK_PLAN.md + 有 frontmatter ✅ → 用 frontmatter 驱动
-  ├─ 有 WORK_PLAN.md + 无 frontmatter → 静默回退到 PIPELINE_STEP_MAP
-  └─ 无 WORK_PLAN.md → 静默回退到 PIPELINE_STEP_MAP（打印一条日志）
+```python
+# handler.py L1083 — 硬编码的 repo base
+_R62_REPO_BASE = "https://raw.githubusercontent.com/datahome73/ws-bridge/dev"
+
+# config.py L77-80 — 环境变量，但默认值还是写死
+WORK_PLAN_REPO_URL = os.environ.get("WORK_PLAN_REPO_URL",
+    "https://raw.githubusercontent.com/datahome73/ws-bridge/dev")
+
+# 6 处拼接代码（handler.py L1158, 1175, 1213-1215, 2061, 2091-2104）
+f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-product-requirements.md"
+f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-tech-plan.md"
+f"{_R62_REPO_BASE}/docs/{round_name}/{round_name}-review-report.md"
+f"{_R62_REPO_BASE}/docs/{round_name}/test-report.md"
+f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/WORK_PLAN.md"
 ```
 
 这意味着：
 
-1. **无 frontmatter 也能启动管线** — 依赖 6 步硬编码，轮次只能做「6 步软件开发管线」
-2. **新轮次无法定义自定义 Step 链** — 不能创建 3 步或 8 步管线，不能换角色名
-3. **PIPELINE_STEP_MAP 是副作用代码** — `config.py` 定义了 `primary`/`backup` 等字段，但这些仅被 `_build_fallback_*` 使用，生产管线（有 frontmatter 的轮次）从不碰它
-4. **新轮次启动时零反馈** — 如果 WORK_PLAN.md 忘记写 frontmatter，管线静静回退，不报错不提醒
+| 问题 | 具体表现 |
+|:-----|:---------|
+| **必须要有 `docs/轮次/` 目录** | 没有这层目录结构，管线无法自动找到需求/方案/测试报告 URL |
+| **不能跨项目** | 换一个仓库（如公开的 `my-community/project`）所有路径拼接都断裂 |
+| **不能跨协议** | 假设了 `raw.githubusercontent.com` 域名——换成 GitLab / Gitee / 自托管 Git 服务全线断裂 |
+| **bot 无法独立工作** | 新 bot 加入后，不知道从哪里读需求文档——因为没有显式 URL |
 
 ### 1.2 根因分析
 
 | # | 根因 | 说明 |
 |:-:|:-----|:------|
-| 1 | R62 设计为渐进迁移 | 当时将 frontmatter 设计为「可选增强」而非「唯一源」，保留向后兼容 |
-| 2 | 至今无轮次尝试自定义 Step 链 | 所有轮次停留 6 步管线，未暴露 frontmatter-only 约束的缺失 |
-| 3 | PIPELINE_STEP_MAP 无清理触发条件 | 一直有人引用（fallback 函数），无人 clean up |
+| 1 | R45/62 设计时假设了单项目 | ws-bridge 和它的文档在同一仓库内，所以用「轮次名 + 固定路径」拼接省事 |
+| 2 | 渐进式构建导致路径耦合散布 | 需求 URL、方案 URL、产出推断 URL 在不同轮次分别加入，各造各的拼接方式 |
+| 3 | 运维角色名 `admin` 未全局修正 | R72 设计文档就已扁平角色、R73 已经部署了 operations，但需求文档和部分代码仍沿用 admin |
 
 ### 1.3 为什么本轮修？
 
 | 原因 | 说明 |
 |:-----|:------|
-| 🔴 **P0 方向** | ARCHITECTURE-REQUIREMENTS.md §6 标记「管线参数化完善」为 P0，「R62 已建骨架，需持续迭代使新轮次可完全定义自己的 Step 数/角色/超时」 |
-| 🟡 **遗留代码债** | PIPELINE_STEP_MAP + `_build_fallback_*` 共 ~80 行仅用于旧格式退化，新轮次永不触及。清理后可减少 ~50 行死代码 |
-| 🟢 **改动小且局域** | 仅改 `handler.py` 中 `!pipeline_start` 的 frontmatter 处理逻辑 + `_get_step_config` 回退控制。单函数主逻辑，不影响管线运行时 |
+| 🔴 **P0 方向** | ARCHITECTURE-REQUIREMENTS.md §6 P0 最后一块未完成——「管线参数化完善：新轮次可完全定义自己的 Step 数/角色/超时」。你的期望更进一层——整个管线定义都放进 WORK_PLAN，不仅是 step 定义 |
+| 🟡 **基础设施已就绪** | R72 认证 + R68 inbox + R73 权限已全部上线且稳定。做通用化的条件成熟 |
+| 🟢 **一条改动解 N 个问题** | 换成 raw URL 显式配置后，同时解决目录依赖、跨项目、跨协议、bot 可读性问题 |
 
 ---
 
@@ -66,104 +76,237 @@
 
 ### 设计原则
 
-> **Frontmatter 成为管线配置的唯一来源。** 新轮次必须在 WORK_PLAN.md 中包含 `pipeline:` frontmatter 定义 Step 链，否则 `!pipeline_start` 返回明确错误。旧已归档轮次通过已有的 _PIPELINE_CONFIG 内存数据继续运行——不破坏已完成管线的状态查询。
+> **WORK_PLAN.md 是自动化管线的唯一入口参数。**
+>
+> 它包含：工作室定义、参与角色、各角色规则、任务列表、预期产出、回复对象、上下文链接（全部为 raw URL）。
+>
+> 管线启动器不再拼接 URL、不再假设目录结构、不再硬编码 6 步或角色名。WORK_PLAN 去哪，管线就去哪。
 
 ---
 
-### 方向 A（核心）：`!pipeline_start` 要求 frontmatter 🔴 P0
+### 方向 A（核心）：WORK_PLAN frontmatter 承载全量配置 🔴 P0
 
-#### A1 — 无 frontmatter 时返回明确错误，不再静默回退
+#### A1 — frontmatter schema 扩展
 
-**位置：** `handler.py` L2076-2106（`_cmd_pipeline_start` 中 frontmatter 解析块）
+当前 frontmatter 结构（只定义了 `pipeline.steps`）：
 
-```python
-# 当前逻辑：
-#   ① 尝试解析 frontmatter → 成功就用
-#   ② 失败或不存在 → 静默回退到 PIPELINE_STEP_MAP（写一条日志）
+```yaml
+pipeline:
+  goal: "R74 管线通用化"
+  branch: dev
+  steps:
+    step2:
+      role: arch
+      title: 技术方案
+      context:
+        requirements_url: "..."   # ⚠️ 虽支持 URL，但被拼接覆盖
+      timeout_minutes: 360
+```
 
-# 改造后逻辑：
-#   ① 尝试解析 frontmatter → 成功就用 → 继续
-#   ② 失败 → 检查该轮次是否有已有 _PIPELINE_CONFIG（已归档/恢复场景）
-#      ├─ 有已有配置 → 复用（不报错，兼容已有管线状态查询）
-#      └─ 无已有配置 → 返回 ❌ "{round_name} 的 WORK_PLAN.md 缺少 pipeline: frontmatter 配置"
+**改造后的 frontmatter schema：**
+
+```yaml
+pipeline:
+  # ── 基本信息 ──
+  name: "R74 管线通用化"            # 轮次/任务名称
+  description: "管线配置通用化，移除目录依赖"  # 可选描述
+
+  # ── 工作室定义 ──
+  workspace:
+    name: "R74-dev"                # 工作室名（可选，默认用 pipeline.name）
+    members:                       # 参与角色及规则
+      arch:
+        mention_keyword: "ArchBot;arch;架构师"
+        rules: "输出技术方案文档，含代码对比和流程图"
+      dev:
+        mention_keyword: "DevBot;dev;开发"
+        rules: "按技术方案编码，必须 git push"
+      review:
+        mention_keyword: "ReviewBot;review;审查"
+        rules: "审查代码合规性，scope 不越界"
+      qa:
+        mention_keyword: "QABot;qa;测试"
+        rules: "按验收标准逐项测试，输出测试报告"
+      operations:
+        mention_keyword: "OpsBot;operations;运维"
+        rules: "合并部署归档"
+      pm:
+        mention_keyword: "PMBot;pm;需求分析师"
+        rules: "编排管线，协调各角色"
+
+  # ── Step 定义（全部使用 raw URL） ──
+  steps:
+    step2:
+      role: arch
+      title: 技术方案
+      context:
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/R74/R74-product-requirements.md"
+      feedback_channel: "_admin"
+      output_desc: "技术方案文档 URL 或 commit SHA"
+      timeout_minutes: 360
+
+    step3:
+      role: dev
+      title: 编码实现
+      context:
+        requirements_url: "同上 URL"
+        tech_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R74/R74-tech-plan.md"
+      feedback_channel: "_admin"
+      output_desc: "编码 commit SHA"
+      timeout_minutes: 720
+
+    step4:
+      role: review
+      title: 代码审查
+      context:
+        requirements_url: "同上"
+        tech_plan_url: "同上"
+        commit_sha: "${steps.step3.sha}"       # 引用上一步产出
+      feedback_channel: "_admin"
+      output_desc: "审查报告 URL"
+      timeout_minutes: 240
+
+    step5:
+      role: qa
+      title: 测试验证
+      context:
+        requirements_url: "同上"
+        tech_plan_url: "同上"
+        commit_sha: "${steps.step3.sha}"
+        review_report_url: "${steps.step4.artifact_url}"
+      feedback_channel: "_admin"
+      output_desc: "测试报告 URL"
+      timeout_minutes: 360
+
+    step6:
+      role: operations
+      title: 合并部署归档
+      context:
+        merge_branch: "main"
+      feedback_channel: "_admin"
+      output_desc: "合并 commit SHA"
+      timeout_minutes: 120
+```
+
+**schema 扩展点对比：**
+
+| 字段 | 当前 | 改造后 | 说明 |
+|:-----|:-----|:-------|:------|
+| `pipeline.workspace` | ❌ 无 | ✅ 有 | 定义工作室名称和成员角色规则 |
+| `pipeline.steps.*.context.*` | `requirements_url` 等被拼接覆盖 | ✅ 完全由 frontmatter 控制，不覆盖 | 所有 URL 是显式 raw URL |
+| `pipeline.branch` | `branch: dev`（已存在） | ✅ 保留 | git 分支名，用于产出推断（可选） |
+| `pipeline.workspace.members` | ❌ 无 | ✅ 新增 | 角色映射 + 触发词 + 行为规则 |
+
+> 🎯 **核心设计决策：** `!pipeline_start` 不再拼接任何一个 URL。所有 URL 来自 frontmatter 或显式参数。`_R62_REPO_BASE` 和 `WORK_PLAN_REPO_URL` 的路径拼接逻辑全部删除。
+
+#### A2 — `!pipeline_start` 行为变更
+
+```yaml
+# 当前：
+!pipeline_start R74 --work_plan_url <url或空>
+#   → 无 URL 时：拼接 f"{WORK_PLAN_REPO_URL}/docs/R74/WORK_PLAN.md"
+#   → 无 frontmatter 时：静默回退 PIPELINE_STEP_MAP
+
+# 改造后：
+!pipeline_start R74
+#   → 第一步：检查该轮次是否有已有 _PIPELINE_CONFIG
+#     ├─ 有 → 复用（兼容已启动管线恢复）
+#     └─ 无 → 需要 WORK_PLAN URL 来源（见下）
+
+# URL 来源优先级（R45 兼容）：
+# 1. --work_plan_url <raw_url> 显式传入
+# 2. 环境变量 WORK_PLAN_REPO_URL + 轮次名拼接（退化，保留兼容）
+# 3. ❌ 不再尝试本地路径读取
+
+# frontmatter 解析后：
+# 1. 检查是否有 pipeline.steps
+#   ├─ 无 → ❌ 返回错误：“WORK_PLAN 缺少 pipeline.steps 定义”
+#   └─ 有 → 直接用 frontmatter 的 steps（含所有 raw URL）
+# 2. 检查是否有 pipeline.workspace
+#   ├─ 有 → 用 workspace 定义创建/校验工作室
+#   └─ 无 → 用默认行为（创建轮次名工作室，从 steps 推断角色）
+# 3. ❌ 不再回退 PIPELINE_STEP_MAP
 ```
 
 **关键行为对比：**
 
 | 场景 | 当前 | 改造后 |
 |:-----|:-----|:-------|
-| 新轮次 ✅ 有 frontmatter | 用 frontmatter | 用 frontmatter ✅ 不变 |
-| 新轮次 ❌ 无 frontmatter | 静默回退到 6 步 | ❌ 返回明确错误 |
-| 旧轮次（已有 _PIPELINE_CONFIG） | 复用已有配置 | ✅ 复用已有配置（不影响已完成的管线） |
-| `!pipeline_status` 查询旧轮次 | 正常 | ✅ 正常（不走 frontmatter 解析，直接从已有 config 读） |
-
-#### A2 — 新增 `--force` 参数绕过 frontmatter 检查（管理员调试用）
-
-对于已知没有 frontmatter 但需要启动管线做临时调试的场合：
-
-```
-!pipeline_start R{N} --force
-```
-
-`--force` 触发 `_build_fallback_config()` 生成 6 步默认配置。这不是生产路径，仅供调试/演示。
+| 新轮次 + 完整 frontmatter | 拼接 URL，回退 | ✅ 直接使用 raw URL，无拼接 |
+| 新轮次 + 缺 steps | 静默回退 6 步 | ❌ 明确错误 |
+| 有 `_PIPELINE_CONFIG` 的旧轮次 | 复用 | ✅ 复用（兼容） |
+| 跨项目（如 `my-org/other-project`） | URL 拼接路径断裂 | ✅ frontmatter 里配 raw URL 就行 |
+| 非 GitHub repo（GitLab/Gitee/自托管） | URL 拼接域名不对 | ✅ raw URL 指向任何 Git 平台 |
 
 ---
 
-### 方向 B（辅助）：支持自定义 Step 数量与角色 🟡 P1
+### 方向 B（清理）：移除所有硬编码路径拼接 🔴 P1
 
-#### B1 — 确认 `_get_step_config()` 和 `_step_sort_key()` 已支持任意 step 数量
+#### B1 — 删除 `_R62_REPO_BASE`
 
-当前 `_step_sort_key()` 支持 `step1..stepN` 的自然排序，`_get_step_config()` 直接从 `_PIPELINE_CONFIG` 返回 frontmatter steps。读取端已具备多 Step 能力。
+**位置：** `handler.py` L1083
 
-需要确认的消费点（均通用，无需改造）：
+```python
+# ❌ 删除
+_R62_REPO_BASE = "https://raw.githubusercontent.com/datahome73/ws-bridge/dev"
+```
 
-| 消费点 | 位置 | 通用性 |
-|:-------|:-----|:-------|
-| `step_keys = sorted(step_config.keys(), key=_step_sort_key)` | L1427 | ✅ 通用 |
-| `next_role = step_config[next_step].get("role", "")` | L1497 | ✅ 通用 |
-| `timeout_min = step_config.get(next_step, {}).get("timeout_minutes", 20)` | L1523 | ✅ 通用 |
-| `_build_pipeline_config(frontmatter, ...)` | L2089 | ✅ 通用（frontmatter 自己定义步数） |
+影响：以下拼接代码必须修改：
 
-**结论：** B1 为确认性验证，成立即通过。
+| 位置 | 当前代码 | 改造后 |
+|:-----|:---------|:-------|
+| `_build_pipeline_config` L1158 | `f"{_R62_REPO_BASE}/docs/..."` | 从 `base_urls` 参数读取（由 frontmatter 提供） |
+| `_build_fallback_config` L1175 | 同上 | 改为 `base_urls.get("requirements_url", "")` |
+| `_infer_artifact_url` L1213-1215 | 硬编码 step2/4/5 URL | 改为从 `step_config` 参数读取 `artifact_url` |
 
-#### B2 — `_infer_artifact_url()` 不再假设固定 step 映射
+#### B2 — `_infer_artifact_url()` 从 frontmatter 读 artifact_url
 
 **位置：** `handler.py` L1210-1216
 
 ```python
-# 当前：step_urls 硬编码 step2/step4/step5
-step_urls = {
-    "step2": f"...tech-plan.md",
-    "step4": f"...review-report.md",
-    "step5": f"...test-report.md",
-}
+# 当前：硬编码 step2/4/5 映射
+# 改造后：优先从 step_config 读 artifact_url，无定义才回退（兼容旧轮次）
 
-# 改造后：优先从 frontmatter 的 step_cfg 中读取 artifact_url_template
-# 如果 step_cfg 没有 artifact_url 配置，才尝试硬编码推断
+def _infer_artifact_url(step_name: str, round_name: str,
+                        step_config: dict | None = None) -> str:
+    # 优先：从 frontmatter step 配置读
+    if step_config and step_name in step_config:
+        art = step_config[step_name].get("artifact_url", "")
+        if art:
+            return art
+    # 回退：硬编码 URL（兼容旧轮次）
+    step_urls = {
+        "step2": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/{round_name}-tech-plan.md",
+        ...
+    }
+    return step_urls.get(step_name, "")
 ```
 
-**改动：** `_infer_artifact_url()` 增加参数 `step_config: dict`，优先从 frontmatter 的 step 配置中读 `artifact_url` 字段（若有定义）。无定义时维持当前硬编码回退。
+> **注：** 回退 URL 用 `raw.githubusercontent.com` 的 `main` 分支（因为 R72/R73 已合并到 main），不再用 dev 分支。
+
+#### B3 — 整理 `config.py` 中的默认值
+
+`WORK_PLAN_REPO_URL` 环境变量保留（用于退化兼容），但 `!pipeline_start` 不再默认依赖它。新轮次必须通过 frontmatter 或 `--work_plan_url` 提供原始 URL。
 
 ---
 
-### 方向 C（辅助）：清理死代码 🟢 P2
+### 方向 C（顺手）：运维角色名 `admin` → `operations` 🟡 P1
 
-#### C1 — 移除 `PIPELINE_STEP_MAP` 公共常量
-
-**位置：** `config.py` L91-103
-
-移除 `PIPELINE_STEP_MAP` 字典定义（~12 行）。将 `_override_raw` + `PIPELINE_STEP_MAP.update(override)` 保留为 `_LEGACY_STEP_MAP_OVERRIDE`（仅 `--force` 路径使用）。
-
-**前置检查：**
+`handler.py` 中所有角色匹配 `admin` 的地方改为 `operations`：
 
 ```bash
-grep -rn 'PIPELINE_STEP_MAP' server/ --include='*.py'
-# 应只剩 handler.py 中的 _build_fallback_steps/_build_fallback_config 引用
+grep -n '"admin"' server/handler.py
+grep -n "'admin'" server/handler.py
+grep -n 'role.*admin' server/handler.py
 ```
 
-#### C2 — `_build_fallback_config()` / `_build_fallback_steps()` 仅 `--force` 路径可调用
+| 位置 | 当前值 | 改为 |
+|:-----|:-------|:-----|
+| `PIPELINE_STEP_MAP` step1/step6 role | `admin` | `operations` |
+| `config.py` 中角色定义 | `admin` | `operations` |
+| 各命令权限派发 | `admin` | `operations` |
 
-保留函数，但改名 `_build_legacy_config()` / `_build_legacy_steps()`。所有非 `--force` 调用点改为错误返回。
+> **注意：** R73 已部署了运维 operations 角色名，但代码里 `PIPELINE_STEP_MAP` 等位置可能还有 `admin` 残留。本轮做一次全面清理。
 
 ---
 
@@ -173,27 +316,26 @@ grep -rn 'PIPELINE_STEP_MAP' server/ --include='*.py'
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-1 | 有 frontmatter 的 WORK_PLAN.md → `!pipeline_start` | 正常启动，从 frontmatter 读取 Step 配置 | 发 `!pipeline_start R74` → 检查 `_PIPELINE_CONFIG[R74]` 含 frontmatter 定义的 steps |
-| ✅-2 | 无 frontmatter 的 WORK_PLAN.md → `!pipeline_start` | 返回 ❌ 缺少 frontmatter 错误 | 发 `!pipeline_start R{N}`（无 frontmatter）→ 检查返回错误消息 |
-| ✅-3 | 已有 `_PIPELINE_CONFIG` 的旧轮次 → `!pipeline_status` | 正常显示，不报错 | `!pipeline_status R72` → 显示正常状态 |
-| ✅-4 | `--force` 参数 → 无 frontmatter 也能启动 | 成功启动，用 legacy 6 步配置 | `!pipeline_start R{N} --force` → 管线正常启动 |
+| ✅-1 | 完整 frontmatter + raw URL → `!pipeline_start` | 管线使用 frontmatter 中的 raw URL，不拼接 | 发 `!pipeline_start R74` → 检查 `_PIPELINE_CONFIG[R74]` 中的 URL 字段 = frontmatter 的 raw URL，非拼接值 |
+| ✅-2 | 缺 `pipeline.steps` 的 frontmatter → `!pipeline_start` | ❌ 返回错误 "缺少 pipeline.steps" | 创建无 steps 的 WORK_PLAN → 启动 → 检查错误消息 |
+| ✅-3 | frontmatter 定义 `workspace.members` → 工作室成员按定义创建 | 工作室包含相应角色 | frontmatter 定义 `arch/dev` 两个成员 → 启动后 `!pipeline_status` 成员列表匹配 |
+| ✅-4 | 有 `_PIPELINE_CONFIG` 的旧轮次 → `!pipeline_status` | 正常，不报错 | `!pipeline_status R72` → 正常显示 |
 
 ### 🎯 3.2 方向 B
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-5 | frontmatter 定义 3 个 Step → 管线只运行 3 步 | `!pipeline_status` 显示 3 步，无 step4/5/6 | 定义 frontmatter 含 step1/step2/step3 → 启动 → 查看状态 |
-| ✅-6 | frontmatter 定义自定义角色名 → 点名匹配自定义角色 | `!pipeline_status` 显示角色名（非传统 5 角色） | 定义 `step2: {role: "researcher"}` → 检查状态显示 |
-| ✅-7 | `_infer_artifact_url()` 优先读 step_config.artifact_url | 自定义 step 配了 `artifact_url` 后自动推断正确 | frontmatter 定义 step2 含 `artifact_url` 字段 → `!step_complete step2` 自动推断 |
-| ✅-8 | `_infer_artifact_url()` 无自定义配置时维持旧推断 | 未定义 artifact_url 的 step2/4/5 仍用现有硬编码 URL | 旧格式 frontmatter → `!step_complete step2 --summary "done"` → artifact_url 为默认 tech-plan URL |
+| ✅-5 | `_R62_REPO_BASE` 已从 handler.py 删除 | 零匹配 | `grep -n '_R62_REPO_BASE' server/handler.py` → exit=1 |
+| ✅-6 | `!pipeline_start` 不拼接 `docs/轮次/` 路径 | 新轮次无 raw URL 的 context 字段为空串而非拼接值 | frontmatter 不配 `requirements_url` → 启动后检查 context 为空 |
+| ✅-7 | `_infer_artifact_url` 优先读 frontmatter artifact_url | 自定义 artifact_url 生效 | frontmatter step2 配 `artifact_url: "https://..."` → `!step_complete step2 --summary x` 自动推断为该 URL |
 
 ### 🎯 3.3 方向 C
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-9 | `config.py` 中移除 `PIPELINE_STEP_MAP` | 文件不再有该常量 | `grep -n 'PIPELINE_STEP_MAP' server/config.py` → 零匹配 |
-| ✅-10 | `handler.py` 全局不再引用 `config.PIPELINE_STEP_MAP` | 仅 legacy 函数内有引用 | `grep -n 'PIPELINE_STEP_MAP' server/handler.py` → 仅 2 处 |
-| ✅-11 | `--force` 路径使用 legacy 配置正常 | force 启动后管线状态正常 | `!pipeline_start R{N} --force` → `!pipeline_status` 显示 6 步 |
+| ✅-8 | 代码中 `role: admin` 全改为 `role: operations` | 零残留 `"admin"` 角色引用 | `grep -n '"admin"' server/handler.py` → 仅排除正常 admin 命令名称 |
+| ✅-9 | `PIPELINE_STEP_MAP` 中 role 已更新 | step1/step6 role = operations | 检查 `_build_legacy_steps()` 的 role 值 |
+| ✅-10 | R74 需求文档不出现 admin 角色名 | 使用 operations/运维 | `grep -n 'admin' docs/R74/R74-product-requirements.md` → 零匹配 |
 
 ---
 
@@ -201,10 +343,10 @@ grep -rn 'PIPELINE_STEP_MAP' server/ --include='*.py'
 
 | 事项 | 说明 | 原因 |
 |:-----|:------|:------|
-| 并行 Step 支持 | 多个 Step 同时执行 | 架构 P2 方向，非本轮范围 |
-| 自定义 Step 状态机 | 非线性流转（step1→step2→step3） | 涉及状态机核心改造，范围过大 |
-| Web 管线仪表盘 | 前端 Step 进度可视化 | 架构 P1 方向，需独立轮次 |
-| 验证钩子系统 | Step 完成后的自动脚本验证 | 架构 P1 方向，需独立轮次 |
+| 完整重写 frontmatter 解析器 | 当前 `_parse_frontmatter` 是轻量 YAML 解析，功能够用 | 功能完整性够用，不引入第三方库 |
+| inbox 消息格式改造 | inbox 双向回复通道改进 | inbox 已充分测试通过，本轮不动 |
+| Web 前端改造 | 管线仪表盘等 | 架构 P1，独立轮次 |
+| 多项目/多仓库自动发现 | 自动跨 repo 拉取 WORK_PLAN | 本轮先做「显式 URL 配置」，未来可加发现机制 |
 
 ---
 
@@ -218,35 +360,36 @@ grep -rn 'PIPELINE_STEP_MAP' server/ --include='*.py'
 | **3** | 👨‍💻 Dev | 编码实现 | 20min |
 | **4** | 👀 Review | 代码审查 | 15min |
 | **5** | 🦐 QA | 测试报告 | 15min |
-| **6** | 🛠️ Admin | 合并部署归档 | 10min |
+| **6** | 🛠️ Operations（运维） | 合并部署归档 | 10min |
 
 ### 5.1 改动估算
 
 | 文件 | 改动类型 | 估算 |
 |:-----|:---------|:-----|
-| `server/handler.py` | **修改** `_cmd_pipeline_start` frontmatter 解析逻辑（L2076-2106） | ~10 行 |
-| `server/handler.py` | **修改** `_infer_artifact_url()` 增加 step_config 参数（L1210-1216） | ~8 行 |
-| `server/handler.py` | **重构** fallback 函数 → legacy-only | ~5 行 |
-| `server/handler.py` | **新增** `--force` 参数解析 | ~5 行 |
-| `server/handler.py` | **修改** `_get_step_config()` 新轮次无 frontmatter 报错 | ~5 行 |
-| `server/config.py` | **删除** `PIPELINE_STEP_MAP` 常量（L91-103） | -12 行 |
-| `server/config.py` | **保留** override 逻辑为 `_LEGACY_STEP_MAP_OVERRIDE` | ~3 行 |
-| **合计** | | **~36 行净增 / -12 行删除 ≈ 24 行净增** |
+| `server/handler.py` | **删除** `_R62_REPO_BASE` 常量 | -1 行 |
+| `server/handler.py` | **修改** `_build_pipeline_config()` L1157-1158 — 不再用拼接覆盖 context URL | ~5 行 |
+| `server/handler.py` | **修改** `_build_fallback_config()` L1174-1175 — 同理 | ~3 行 |
+| `server/handler.py` | **修改** `_infer_artifact_url()` L1210-1216 — 增加 step_config 参数 | ~10 行 |
+| `server/handler.py` | **修改** `_cmd_pipeline_start()` L2076-2106 — frontmatter 缺失 steps 报错 + 新增 workspace.members 读取 | ~20 行 |
+| `server/handler.py` | **修改** `_get_step_config()` L1229-1235 — 不再回退 `_build_fallback_steps`（仅 `--force`） | ~5 行 |
+| `server/handler.py` | **修改** 角色匹配 admin→operations | ~5 处 |
+| `server/config.py` | **修改** PIPELINE_STEP_MAP 角色名 operations | ~2 行 |
+| **合计** | | **~50 行净增 / -1 行删除 ≈ 49 行净增** |
 
 ### 5.2 关键风险
 
 | 风险 | 影响 | 缓解 |
 |:-----|:------|:------|
-| 正在运行的管线引用了 fallback 函数 | 代码改后运行时崩溃 | ① 旧已运行管线通过 `_PIPELINE_CONFIG` 不再走 fallback ② `--force` 保留 legacy 路径 |
-| 其他文件引用了 `config.PIPELINE_STEP_MAP` | import 报错 | 推前 `grep -rn 'PIPELINE_STEP_MAP' server/` 全景确认 |
+| 旧轮次无 raw URL context，`!pipeline_status` 显示空 | 旧轮次信息不完整 | `_build_fallback_config` 保留对旧轮次的拼接回退（仅 `_PIPELINE_CONFIG` 为空时） |
+| `WORK_PLAN_REPO_URL` 依赖者断联 | `--work_plan_url` 不传时找不到 WORK_PLAN | 保留环境变量拼接作为退化路径，打印 deprecation warning |
 
 ---
 
 ## 6. 脱敏检查清单
 
 - [ ] docs/R74/*.md 零内部名残留
-- [ ] `grep -nE '内部名模式' docs/R74/*.md` 零匹配
-- [ ] 使用通用角色名（PM / arch / dev / review / QA / admin）
+- [ ] `grep -nE '^(小|@)\w+' docs/R74/*.md` 零匹配
+- [ ] 使用通用角色名（PM / arch / dev / review / QA / operations）
 - [ ] 不包含真实 agent_id / token / URL
 
 ---
@@ -255,4 +398,4 @@ grep -rn 'PIPELINE_STEP_MAP' server/ --include='*.py'
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
-| v1.0 | 2026-07-07 | 初稿 — R74 管线参数化完善：frontmatter 唯一配置源 |
+| v1.0 | 2026-07-07 | 初稿 — R74 管线通用化：WORK_PLAN 单入口 + Raw URL 解耦。方向说明：项目负责人纠正——解决 `docs/轮次/` 目录依赖问题，WORK_PLAN 作为唯一入口参数，全量 raw URL 配置，跨项目通用化 |
