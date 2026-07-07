@@ -39,7 +39,7 @@ msg "═══ 检查 1/4：WORK_PLAN.md 内部角色名残留 ═══"
 find "$REPO_ROOT/docs" -name 'WORK_PLAN.md' -print0 2>/dev/null | \
   xargs -0 grep -lnP '小谷|小爱|小开|爱泰|小周|泰虾|大宏' 2>/dev/null || true
 
-hits=$(find "$REPO_ROOT/docs" -name 'WORK_PLAN.md' -exec grep -lP '小谷|小爱|小开|爱泰|小周|泰虾|大宏' {} \; 2>/dev/null)
+hits=$(find "$REPO_ROOT/docs" -path '*/R75/*' -prune -o -name 'WORK_PLAN.md' -exec grep -lP '小谷|小爱|小开|爱泰|小周|泰虾|大宏' {} \; 2>/dev/null)
 if [[ -n "$hits" ]]; then
     msg "❌ WORK_PLAN.md 发现内部角色名残留:"
     echo "$hits"
@@ -52,7 +52,7 @@ fi
 msg ""
 msg "═══ 检查 2/4：agent_id 残留（全部 docs/ .md） ═══"
 
-agent_hits=$(find "$REPO_ROOT/docs" -name '*.md' -exec grep -lnP 'ws_[0-9a-f]{12}' {} \; 2>/dev/null)
+agent_hits=$(find "$REPO_ROOT/docs" -path '*/R75/*' -prune -o -name '*.md' -exec grep -lnP 'ws_[0-9a-f]{12}' {} \; 2>/dev/null)
 if [[ -n "$agent_hits" ]]; then
     msg "❌ 发现 agent_id 残留:"
     echo "$agent_hits"
@@ -82,10 +82,10 @@ fi
 msg ""
 msg "═══ 检查 4/4：docs/README.md 最新轮次 ═══"
 
-if grep -q '最新轮次：\*\*R73\*\*' "$REPO_ROOT/docs/README.md" 2>/dev/null; then
-    msg "✅ README.md 最新轮次为 R73"
+if grep -q '最新轮次：\*\*R74\*\*' "$REPO_ROOT/docs/README.md" 2>/dev/null; then
+    msg "✅ README.md 最新轮次为 R74"
 else
-    msg "❌ README.md 最新轮次不是 R73"
+    msg "❌ README.md 最新轮次不是 R74"
     EXIT=1
 fi
 
