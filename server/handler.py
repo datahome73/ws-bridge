@@ -2925,6 +2925,69 @@ async def _send_inbox_task(
                     pass
 
 
+# ── R80: Validation hook helpers ─────────────────────────────────────
+
+
+def _check_pm_or_admin(sender_id: str) -> bool:
+    """检查发送者是否有「强制推进」权限。
+
+    满足任一条件即可：
+    1. 全局管理员（auth.is_global_admin）
+    2. PM Agent（sender_id == config.PIPELINE_PM_AGENT_ID，如有配置）
+    """
+    if auth.is_global_admin(sender_id):
+        return True
+    pm_agent = getattr(config, "PIPELINE_PM_AGENT_ID", None)
+    if pm_agent and sender_id == pm_agent:
+        return True
+    return False
+
+
+async def _run_validation_hook(
+    round_name: str, step_name: str, output_ref: str, step_config: dict,
+) -> tuple[bool, str]:
+    """执行验证钩子。从 step_config 读取 validation 配置，执行子进程验证脚本。"""
+    val_config = step_config.get(step_name, {}).get("validation", {})
+    if not val_config:
+        return (True, "⏭️ 无验证脚本，跳过")
+
+    script_template = val_config.get("script", config.VALIDATION_DEFAULT_SCRIPT)
+    if not script_template:
+        return (True, "⏭️ 验证脚本为空，跳过")
+    timeout = val_config.get("timeout", config.VALIDATION_DEFAULT_TIMEOUT)
+    required = val_config.get("required", True)
+
+    # 模板渲染
+    script = script_template.replace("{output_ref}", output_ref or "")
+    script = script.replace("{step_name}", step_name)
+    script = script.replace("{round_name}", round_name)
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+        if proc.returncode == 0:
+            return (True, "✅ 验证通过（exit=0）")
+        err_msg = (stderr.decode().strip()[:300]
+                   or stdout.decode().strip()[:300])
+        if required:
+            return (False, f"❌ 验证失败（exit={proc.returncode}）: {err_msg}")
+        return (True, f"⚠️ 验证警告（exit={proc.returncode}，非必需）: {err_msg}")
+    except asyncio.TimeoutError:
+        if required:
+            return (False, f"❌ 验证超时（>{timeout}s）")
+        return (True, f"⚠️ 验证超时（非必需）")
+    except Exception as e:
+        if required:
+            return (False, f"❌ 验证异常: {e}")
+        return (True, f"⚠️ 验证异常（非必需）: {e}")
+
+
 async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     """标记 Step 完成，自动点名下一人。
     用法：!step_complete <step_name> [--output <commit/file>]
@@ -3036,6 +3099,48 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 _infer_artifact_url(step_name, round_name, step_config)),
             "timestamp": time.time(),
         }
+
+    # ── R80 A: Validation hook gate ──────────────────────────────
+    force_bypass = (
+        params.get("_force_mode", False)
+        and _check_pm_or_admin(sender_id)
+    )
+    if config.ENABLE_VALIDATION_HOOK and not force_bypass:
+        val_passed, val_msg = await _run_validation_hook(
+            round_name, step_name, output_ref, step_config
+        )
+        if not val_passed:
+            # Block the pipeline
+            mgr = _ensure_pipeline_manager()
+            try:
+                await mgr.transition_to(
+                    round_name, PipelineStatus.BLOCKED,
+                    blocked_reason=val_msg,
+                )
+            except Exception:
+                pass
+            # Notify PM
+            pm_agent_id = getattr(config, "PIPELINE_PM_AGENT_ID", "")
+            if pm_agent_id:
+                pm_inbox = f"_inbox:{pm_agent_id}"
+                try:
+                    await _broadcast_to_channel(pm_inbox, {
+                        "type": "broadcast",
+                        "channel": pm_inbox,
+                        "from_name": "系统",
+                        "from_agent": SYSTEM_AGENT_ID,
+                        "content": (
+                            f"🔴 {round_name} {step_name} 验证失败\n\n"
+                            f"{val_msg}\n\n"
+                            f"操作：`!step_force {step_name} --output {output_ref}` 强制推进\n"
+                            f"或修复后 `!step_verify {step_name}` 重新验证"
+                        ),
+                        "ts": time.time(),
+                    })
+                except Exception:
+                    pass
+            return f"🔴 **{round_name} {step_name} 验证失败** ❌\n\n{val_msg}\n\n管线已进入 BLOCKED 状态。"
+    # ── R80 A: End ──
 
     # 查 Step 映射表 → 找下一角色
     step_config = _get_step_config(round_name)
@@ -3336,6 +3441,99 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         f"  {task_result}\n"
         f"  {next_task_result}"
     )
+
+
+# ── R80 B: Step force command ────────────────────────────────
+
+
+async def _cmd_step_force(sender_id: str, params: dict) -> str:
+    """强制推进 Step（跳过验证钩子）。
+
+    用法：!step_force <step_name> --output <sha> [--reason "原因"]
+    权限：仅 PM 或全局管理员可执行。
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!step_force <step_name> --output <sha> [--reason \"原因\"]"
+
+    step_name = positional[0].lower()
+    output_ref = params.get("output", "")
+    reason = params.get("reason", "无说明")
+
+    if not output_ref:
+        return "❌ 缺少 --output <sha>"
+
+    if not _check_pm_or_admin(sender_id):
+        return "❌ 权限不足：仅 PM 或管理员可强制推进"
+
+    # 审计日志
+    _audit_logger.log(
+        sender_id, "step_force",
+        {"step": step_name, "output": output_ref, "reason": reason},
+        "forced",
+    )
+
+    # 传给 _cmd_step_complete，携带 _force_mode 标志
+    params["_force_mode"] = True
+    return await _cmd_step_complete(sender_id, params)
+
+
+# ── R80 C: Step verify command ───────────────────────────────
+
+
+async def _cmd_step_verify(sender_id: str, params: dict) -> str:
+    """BLOCKED 状态下重新执行验证钩子。
+
+    用法：!step_verify <step_name> [--output <sha>]
+    若不传 --output，从 step_outputs 复用上次的 SHA。
+    验证通过后将管线从 BLOCKED 恢复为 RUNNING。
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!step_verify <step_name> [--output <sha>]"
+
+    step_name = positional[0].lower()
+    output_ref = params.get("output", "")
+
+    # 确定 round_name（从发送者的活跃频道推断）
+    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    round_name = next(
+        (r for r, s in _PIPELINE_STATE.items() if s.get("ws_id") == sender_ch),
+        None,
+    )
+    if not round_name:
+        return "❌ 当前工作区无活跃管线"
+
+    # 未提供 --output 时，从 step_outputs 复用
+    if not output_ref:
+        pstate = _PIPELINE_STATE.get(round_name, {})
+        output_ref = (
+            pstate.get("step_outputs", {})
+            .get(step_name, {})
+            .get("sha", "")
+        )
+        if not output_ref:
+            return f"❌ 未找到 {step_name} 的历史产出 SHA，请使用 --output 指定"
+
+    step_config = _get_step_config(round_name)
+    val_passed, val_msg = await _run_validation_hook(
+        round_name, step_name, output_ref, step_config,
+    )
+
+    if val_passed:
+        # 恢复管线运行
+        mgr = _ensure_pipeline_manager()
+        try:
+            await mgr.transition_to(round_name, PipelineStatus.RUNNING)
+        except Exception:
+            pass
+        return (
+            f"✅ **{round_name} {step_name} 验证通过** ✓\n\n"
+            f"{val_msg}\n\n"
+            f"管线已恢复 RUNNING 状态。"
+        )
+
+    return f"🔴 **{round_name} {step_name} 验证仍失败** ❌\n\n{val_msg}"
 
 
 # ── R55 F: Targeted send helper ────────────────────────────
@@ -4558,6 +4756,17 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "workspace_reset": {
         "handler": _cmd_workspace_reset, "min_role": 3, "workspace_scope": True,
         "usage": "!workspace_reset — 关闭当前工作室 + 清理管线状态 + 回大厅",
+    },
+    # ── R80: Validation hook commands ──
+    "step_force": {
+        "handler": _cmd_step_force, "min_role": 3,
+        "desc": "强制推进 Step（跳过验证）",
+        "usage": "!step_force <step_name> --output <sha> [--reason <text>]",
+    },
+    "step_verify": {
+        "handler": _cmd_step_verify, "min_role": 2,
+        "desc": "BLOCKED 状态下重新执行验证",
+        "usage": "!step_verify <step_name> [--output <sha>]",
     },
 }
 

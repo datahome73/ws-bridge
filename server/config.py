@@ -151,3 +151,24 @@ REPO_PATH: str = os.environ.get("R65_REPO_PATH", "/opt/data/ws-bridge")
 R63_ENABLE_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
 R63_ENABLE_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
 R63_ENABLE_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
+
+
+# ── R80: Validation hook system ────────────────────────────────
+ENABLE_VALIDATION_HOOK: bool = (
+    os.environ.get("R80_ENABLE_VALIDATION", "0") == "1"
+)
+"""验证钩子总开关。默认关闭（opt-in），旧管线不受影响。"""
+
+VALIDATION_DEFAULT_SCRIPT: str = os.environ.get(
+    "R80_VALIDATION_SCRIPT",
+    "python3 scripts/verify_default.py {output_ref}",
+)
+"""默认验证脚本模板。未配 validation.script 时使用此值。"""
+
+VALIDATION_DEFAULT_TIMEOUT: int = int(
+    os.environ.get("R80_VALIDATION_TIMEOUT", "30")
+)
+"""默认验证超时（秒）。"""
+
+PIPELINE_PM_AGENT_ID: str = os.environ.get("WS_PM_AGENT_ID", "")
+"""PM 的 agent_id。用于 step_force 权限判断。为空时仅检查全局管理员。"""
