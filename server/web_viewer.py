@@ -111,7 +111,13 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     # Add to in-memory buffer
     if channel not in _chat_buffers:
         _chat_buffers[channel] = []
-    entry = {"ts": ts, "sender": sender_name, "content": content}
+    entry = {"ts": ts, "sender": sender_name, "from_name": sender_name, "content": content}
+    # R84: WS 推送附带 inbox 的 to_name 字段
+    if channel.startswith("_inbox:"):
+        owner_id = persistence.resolve_inbox_owner(channel)
+        if owner_id:
+            entry["to_name"] = auth.get_agent_name(owner_id) or owner_id
+            entry["to_agent"] = owner_id
     _chat_buffers[channel].append(entry)
     if len(_chat_buffers[channel]) > _MAX_BUFFER:
         _chat_buffers[channel][:100] = []
