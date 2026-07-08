@@ -412,7 +412,7 @@ async function loadInboxMessages(since) {
 function createInboxMessageEl(m) {
   const div = document.createElement('div');
   div.className = 'msg bot';
-  const sender = m.from_name || m.from || '?';
+  const sender = m.from_name || m.from || m.sender || '?';
   const receiver = m.to_name || '?';
   const cls = colorMap[sender] || 'unknown';
   div.innerHTML =
