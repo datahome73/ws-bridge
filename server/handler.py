@@ -5259,6 +5259,13 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         targets = [(aid, conns) for aid, conns in _connections.items() if aid == owner_id]
         # 写日志
         write_chat_log(sender_name, content, channel=channel)
+        # 持久化到 DB（R84: 确保 inbox 消息有完整 from_name/to_name 字段）
+        ms.save_message(
+            msg_id=str(uuid.uuid4()), msg_type="broadcast",
+            from_agent=sender_id, from_name=sender_name,
+            content=content, ts=time.time(),
+            data_dir=config.DATA_DIR, channel=channel,
+        )
         # 构建广播消息
         broadcast = json.dumps({
             "type": "broadcast", "channel": channel,

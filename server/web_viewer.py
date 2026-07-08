@@ -218,6 +218,40 @@ async def handle_chat(request: web.Request) -> web.Response:
         return web.Response(text=f"Error: {e}", status=500)
 
 
+async def handle_api_bind(request: web.Request) -> web.Response:
+    code = auth.generate_web_bind_code()
+    auth.create_web_bind_code(code)
+    persistence.save_web_bind_codes(config.DATA_DIR)
+    return web.json_response({"code": code})
+
+
+async def handle_api_check(request: web.Request) -> web.Response:
+    code = request.query.get("code", "").strip().upper()
+    if not code.startswith(auth.WEB_CODE_PREFIX):
+        return web.json_response({"approved": False})
+    codes = persistence.get_web_bind_codes()
+    entry = codes.get(code)
+    if not entry:
+        return web.json_response({"approved": False, "error": "not_found"})
+    if entry.get("approved"):
+        # R8: Set session cookie (7 days) so client restores login on reopen
+        resp = web.json_response({
+            "approved": True,
+            "token": entry.get("token", ""),
+            "name": entry.get("name", ""),
+        })
+        resp.set_cookie(
+            "ws_im_session",
+            entry.get("token", ""),
+            max_age=604800,     # 7 days
+            httponly=True,
+            samesite="Lax",
+            path="/",
+        )
+        return resp
+    return web.json_response({"approved": False})
+
+
 async def handle_api_chat(request: web.Request) -> web.Response:
     """Return messages for a specific channel (from DB + log fallback)."""
     token = request.query.get("token", "")
@@ -332,6 +366,26 @@ async def handle_ws_chat(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_api_approve_web(request: web.Request) -> web.Response:
+    peer = request.remote
+    if peer not in ("127.0.0.1", "::1", "localhost"):
+        return web.json_response({"error": "forbidden"}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid_json"}, status=400)
+
+    code = body.get("code", "").strip().upper()
+    name = body.get("name", "大宏")
+    result = auth.approve_web_bind_code(code, name)
+    persistence.save_web_bind_codes(config.DATA_DIR)
+    persistence.save_web_sessions(config.DATA_DIR)
+
+    if result.get("type") == "approve_ok":
+        logger.info("Web viewer '%s' approved", name)
+    return web.json_response(result)
+
+
 # ── R8: Logout endpoint ────────────────────────────────────────
 
 
@@ -406,13 +460,14 @@ async def handle_api_inbox(request: web.Request) -> web.Response:
     except Exception:
         db_msgs = []
 
-    # Resolve recipient names from channel + add channel label
+    # Resolve recipient names from channel + ensure from_name populated
     for m in db_msgs:
         owner_id = persistence.resolve_inbox_owner(m.get("channel", ""))
-        to_name = auth.get_agent_name(owner_id) if owner_id else (owner_id or "?")
-        m["to_name"] = to_name
+        m["to_name"] = auth.get_agent_name(owner_id) if owner_id else (owner_id or "?")
         m["to_agent"] = owner_id or ""
-        m["_channel_label"] = f"📬 {to_name}"
+        if not m.get("from_name"):
+            agent_id = m.get("from_agent") or m.get("agent_id") or ""
+            m["from_name"] = auth.get_agent_name(agent_id) if agent_id else "系统"
 
     return web.json_response({"messages": db_msgs})
 
@@ -641,7 +696,10 @@ async def handle_api_auth_me(request: web.Request) -> web.Response:
 def setup_routes(app: web.Application) -> None:
     app.router.add_get("/", handle_chat)
     app.router.add_get("/chat", handle_chat)
+    app.router.add_get("/api/bind", handle_api_bind)
+    app.router.add_get("/api/check", handle_api_check)
     app.router.add_get("/api/chat", handle_api_chat)
+    app.router.add_post("/api/approve_web", handle_api_approve_web)
     app.router.add_get("/ws/chat", handle_ws_chat)
     app.router.add_get("/api/channels", handle_api_channels)
     app.router.add_get("/health", _handle_health)
