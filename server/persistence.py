@@ -11,7 +11,6 @@ _pairing_codes: dict = {}
 _approved_users: dict = {}
 _web_bind_codes: dict = {}
 _web_sessions: dict = {}
-_agent_active_channels: dict[str, str] = {}  # agent_id → channel_id
 
 _lock = threading.Lock()
 
@@ -118,39 +117,6 @@ def set_web_sessions(sessions: dict) -> None:
     with _lock:
         _web_sessions = dict(sessions)
 
-
-
-# ── Agent Active Channel ──────────────────────────────────────────────
-
-
-_agent_active_channels: dict[str, str] = {}  # agent_id → channel
-
-
-def load_agent_channels(data_dir: Path) -> None:
-    global _agent_active_channels
-    _agent_active_channels = _load_json(data_dir / "_agent_active_channels.json")
-
-
-def save_agent_channels(data_dir: Path) -> None:
-    with _lock:
-        _save_json_atomic(data_dir / "_agent_active_channels.json", _agent_active_channels)
-
-
-def set_agent_channel(agent_id: str, channel: str) -> None:
-    with _lock:
-        _agent_active_channels[agent_id] = channel
-
-
-def get_agent_channel(agent_id: str) -> str | None:
-    with _lock:
-        return _agent_active_channels.get(agent_id)
-
-
-def reset_agent_channel(agent_id: str) -> None:
-    with _lock:
-        _agent_active_channels.pop(agent_id, None)
-
-
 # ── R68: Inbox channel helpers ─────────────────────────────────
 def get_inbox_channel(agent_id: str) -> str:
     """Get agent's dedicated inbox channel ID."""
@@ -168,6 +134,17 @@ def resolve_inbox_owner(channel: str) -> str | None:
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
         return channel[len(p.INBOX_CHANNEL_PREFIX):]
     return None
+
+
+# ── R82: Workspace store accessor ──────────────────────────────
+
+
+def workspace_store():
+    """Return reference to workspace module for cross-module queries.
+    Delayed import to avoid circular dependency.
+    """
+    from server import workspace as _ws
+    return _ws
 
 
 # ── R72: API Key storage ──────────────────────────────────────────

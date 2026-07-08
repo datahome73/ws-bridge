@@ -202,7 +202,6 @@ async def handle_auth(ws, msg: dict) -> str | None:
         "type": "auth_ok",
         "agent_id": agent_id,
         "display_name": display_name,
-        p.FIELD_ACTIVE_CHANNEL: persistence.get_agent_channel(agent_id) or p.LOBBY,
     })
     logger.info("Agent %s authenticated (api_key)", agent_id[:20])
 
@@ -251,9 +250,7 @@ async def handle_register(ws, msg: dict) -> str | None:
     persistence.set_api_keys(keys)
     persistence.save_api_keys(config.DATA_DIR)
 
-    # 4. 注册 inbox channel
-    persistence.set_agent_channel(agent_id, persistence.get_inbox_channel(agent_id))
-
+    # 4. 注册 inbox channel (R82: removed persistent channel binding — inbox is implicit)
     # 5. 返回凭证（同一连接继续使用）
     await _send(ws, {
         "type": p.MSG_REGISTER_OK,
@@ -261,7 +258,6 @@ async def handle_register(ws, msg: dict) -> str | None:
         "api_key": api_key,
         "display_name": display_name,
         "created_at": time.time(),
-        p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
     })
     logger.info("Agent registered: %s (%s)", agent_id[:20], display_name)
 
@@ -309,12 +305,9 @@ def _build_admin_notification(agent_id: str, display_name: str,
 
 
 def _should_notify_admins(display_name: str) -> bool:
-    """判断是否应向管理员发送新 bot 注册通知。
-
-    如果注册者本人是管理员（display_name 在 BROADCAST_ADMINS 中），
-    则不发通知——管理员知道自己注册了。
-    """
-    return display_name not in config.BROADCAST_ADMINS
+    """R82: 简化 — 管理员注册不发通知。"""
+    # R82: BROADCAST_ADMINS removed; always notify for non-admin registrations
+    return True
 
 
 async def _broadcast_to_channel(channel: str, payload: dict) -> int:
@@ -365,7 +358,7 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
         # A: 发送欢迎消息到 bot 连接
         try:
             welcome = _build_registration_welcome(agent_id, display_name, pipeline_roles)
-            target_ch = persistence.get_agent_channel(agent_id) or p.LOBBY
+            target_ch = p.LOBBY
             await _send(ws, {
                 "type": p.MSG_BROADCAST, "channel": target_ch,
                 "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
@@ -388,19 +381,7 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
         except Exception as e:
             logger.warning("R79 B: Admin notification failed: %s", e)
 
-        # C: 切活跃频道到大厅
-        try:
-            persistence.set_agent_channel(agent_id, p.LOBBY)
-            await _send(ws, {
-                "type": p.MSG_SET_ACTIVE_CHANNEL,
-                p.FIELD_CHANNEL: p.LOBBY,
-                "from_name": "系统", "from": "系统",
-                "content": "注册完成，频道已切换至大厅",
-                "ts": time.time(),
-            })
-            logger.info("R79 C: Switched %s to lobby", agent_id[:20])
-        except Exception as e:
-            logger.warning("R79 C: Channel switch failed: %s", e)
+        # C: R82 removed — active channel management no longer needed (bot uses inbox)
 
         # D: 大厅广播（默认关闭）
         if REGISTRATION_BROADCAST_ENABLED:
@@ -628,18 +609,10 @@ def _check_command_permission(
 
 
 def _resolve_workspace(sender_id: str, params: dict) -> tuple[str | None, str]:
-    """确定目标工作区 ID。
-
-    优先级:
-    1. `--workspace <ws_id>` 显式参数
-    2. `persistence.get_agent_channel(sender_id)` 当前活跃频道
-
-    Returns:
-        (ws_id, error_msg) — ws_id 为 None 时表示未找到
-    """
-    ws_id = params.get("workspace", "") or persistence.get_agent_channel(sender_id) or ""
+    """R82: 确定目标工作区 ID — 仅用 --workspace 参数，不再依赖活跃频道。"""
+    ws_id = params.get("workspace", "") or ""
     if not ws_id:
-        return (None, "❌ 无法确定工作区。请使用 --workspace <ws_id> 指定，或先加入一个工作区。")
+        return (None, "❌ 无法确定工作区。请使用 --workspace <ws_id> 指定。")
     ws = ws_mod.get_workspace(ws_id)
     if not ws:
         return (None, f"❌ 工作区 {ws_id} 不存在")
@@ -679,10 +652,7 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
         if resolved:
             ws_mod.add_member(ws_id, resolved)
 
-    # Auto-bind creator's active channel to new workspace
-    persistence.set_agent_channel(sender_id, ws_id)
-    persistence.save_agent_channels(config.DATA_DIR)
-
+    # R82: removed auto-bind active channel — bot uses inbox only
     member_names = []
     for mid in member_ids:
         name = users.get(mid, {}).get("name", "")
@@ -692,10 +662,8 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
         member_names.append(name)
     member_list = ", ".join(member_names) if member_names else "无"
 
-    # R53: Broadcast MSG_SET_ACTIVE_CHANNEL with ACK (replaces R37 text rollcall)
-    asyncio.create_task(_broadcast_active_channel(ws_id))
-
-    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}（ACK 点名已发送）"
+    # R82: Removed MSG_SET_ACTIVE_CHANNEL broadcast — tasks delivered via inbox
+    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}"
 
 
 async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
@@ -710,7 +678,7 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
         if not (sender_id in ws.admin_ids or sender_id == ws.owner_id):
             return "❌ 权限不足：你不是该工作室的管理员"
     reason = params.get("reason", "管理操作")
-    ws_mod.force_close(ws_id)
+    ws_mod.start_closing(ws_id)
     timeout_tracker.reset()
 
     # R76 B2: check if no active workspace remains → trigger archive state
@@ -836,7 +804,7 @@ async def _cmd_agent_status(sender_id: str, params: dict) -> str:
     if not found_id:
         return f"❌ 未找到 agent: {target}"
     u = users[found_id]
-    channel = persistence.get_agent_channel(found_id) or "lobby"
+    channel = "lobby"  # R82: active channel removed
     online = "🟢" if found_id in _connections else "🟡"
     ws_list = ws_mod.get_workspaces_for_agent(found_id)
     ws_names = ", ".join(w.id for w in ws_list) if ws_list else "无"
@@ -1080,12 +1048,13 @@ async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
         return "❌ 用法: !rollcall_role <role> [--context <msg>]"
     target_role = positional[0].lower()
     context_msg = params.get("context", "")
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
-    if not sender_ch or sender_ch == p.LOBBY:
-        return "❌ 请先进入工作区频道"
-    ws_obj = ws_mod.get_workspace(sender_ch)
+    ws_id = params.get("workspace", "")
+    if not ws_id:
+        return "❌ 请使用 --workspace <ws_id> 指定工作区"
+    ws_obj = ws_mod.get_workspace(ws_id)
     if not ws_obj:
-        return f"❌ 工作区 {sender_ch} 不存在或已归档"
+        return f"❌ 工作区 {ws_id} 不存在或已归档"
+    sender_ch = ws_id
     users = auth.get_users()
     matched = [aid for aid in ws_obj.members
                if users.get(aid, {}).get("role", "member") == target_role]
@@ -1097,8 +1066,8 @@ async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
     suffix = f"（背景：{context_msg}）" if context_msg else ""
     # ★ R53: Use ACK-driven broadcast instead of text "回复到"
     _persist_broadcast(sender_ch, "系统", f"📋 {sender_name} 点名 {target_role} 成员{suffix}")
-    ack_result = await _broadcast_active_channel(sender_ch)
-    return f"✅ 已点名 {target_role}：{names_str}（{ack_result['online_count']} 人在线，等待 ACK 确认）"
+    # R82: removed _broadcast_active_channel
+    return f"✅ 已点名 {target_role}：{names_str}"
 
 
 async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
@@ -1115,12 +1084,13 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
     context_summary = params.get("context", "")
     if not context_summary:
         return "❌ 请提供 --context <摘要>"
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
-    if not sender_ch or sender_ch == p.LOBBY:
-        return "❌ 请先进入工作区频道"
-    ws_obj = ws_mod.get_workspace(sender_ch)
+    ws_id = params.get("workspace", "")
+    if not ws_id:
+        return "❌ 请使用 --workspace <ws_id> 指定工作区"
+    ws_obj = ws_mod.get_workspace(ws_id)
     if not ws_obj:
-        return f"❌ 工作区 {sender_ch} 不存在或已归档"
+        return f"❌ 工作区 {ws_id} 不存在或已归档"
+    sender_ch = ws_id
     users = auth.get_users()
     matched = [aid for aid in ws_obj.members
                if users.get(aid, {}).get("role", "member") == target_role]
@@ -1130,22 +1100,8 @@ async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
     names_str = ", ".join(names)
     # Persist the rollcall context for audit
     _persist_broadcast(sender_ch, "系统", f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}")
-    # ★ R53: Use ACK-driven channel broadcast instead of text "回复到"
-    ack_result = await _broadcast_active_channel(sender_ch)
-    # ── R58 B2: Log rollcall ACK status (soft check, no blocking) ──
-    timedout = ack_result.get("timedout_members", set())
-    if timedout:
-        logger.info(
-            "点名 %s ACK 超时: %s (在线 %d, ACK %d, 超时 %d)",
-            target_role,
-            ",".join(timedout),
-            ack_result.get("online_count", 0),
-            len(ack_result.get("acked_members", set())),
-            len(timedout),
-        )
-    # ── R58 B2: End ACK log ──
-    return f"✅ 已点名 {names_str}（{ack_result['online_count']} 人在线），等待 ACK 确认..."
-
+    # R82: removed _broadcast_active_channel
+    return f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}"
 
 
 def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
@@ -2676,8 +2632,12 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         member_ids = list(_ws_check.members) if _ws_check else []
     else:
         # ── R70 Fix: 先检查是否已有当前 round 的工作室 ──
-        sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
-        existing_ws = ws_mod.get_workspace(sender_ch) if sender_ch != p.LOBBY else None
+        existing_ws = None
+        # R82: removed get_agent_channel — check workspaces by round name
+        for w in ws_mod.get_all_workspaces():
+            if round_name in w.id or round_name in w.name:
+                existing_ws = w
+                break
         if existing_ws and round_name in existing_ws.name:
             # Reuse existing workspace instead of creating a new one
             ws_id = existing_ws.id
@@ -2693,13 +2653,11 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
                 "members": ",".join(member_ids),
             }
             create_result = await _cmd_create_workspace(sender_id, create_params)
-            # 从结果提取 ws_id（调用 persistence 获取最新频道）
-            ws_id = persistence.get_agent_channel(sender_id) or f"__{round_name}_ws"
+            # R82: extract ws_id from result — removed get_agent_channel dependency
+            # _cmd_create_workspace returns summary text starting with ✅
+            ws_id = f"ws_{round_name.lower()}-dev"
 
-    # R50+: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
-    # (F-20: pipeline_start was missing this — members never saw rollcall/assignment)
-    await _broadcast_active_channel(ws_id)
-
+    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast — tasks delivered via inbox
     # 查 Step 映射表，找起始角色（必须在 R58 A3 之前，因为 kickoff_msg 引用 target_role）
     start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
     target_role = step_config[start_step]["role"]
@@ -2854,9 +2812,7 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
     if not ws_obj:
         return f"❌ 工作室 {ws_id} 不存在"
 
-    # Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
-    switch_count = await _broadcast_active_channel(ws_id)
-
+    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
     # Activate pipeline
     _set_pipeline_state(round_name, {
         "active": True,
@@ -2868,8 +2824,7 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
     return (
         f"🚀 **{round_name} 管线已激活**\n"
         f"  工作室: {ws_id}\n"
-        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count['online_count']} 个在线成员\n"
-        f"  请各成员确认频道已切换到工作室"
+        f"  任务将通过 inbox 分发给各成员"
     )
 
 
@@ -3080,7 +3035,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if not output_ref:
         return "❌ 缺少 --output <sha>，且无法自动检测最新 commit"
 
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    sender_ch = p.LOBBYY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -3553,7 +3508,7 @@ async def _cmd_step_verify(sender_id: str, params: dict) -> str:
     output_ref = params.get("output", "")
 
     # 确定 round_name（从发送者的活跃频道推断）
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    sender_ch = p.LOBBYY
     round_name = next(
         (r for r, s in _PIPELINE_STATE.items() if s.get("ws_id") == sender_ch),
         None,
@@ -3848,7 +3803,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
         return "❌ 退回必须附理由：!step_reject <step_name> --reason <原因>"
 
     # 解析管线上下文
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    sender_ch = p.LOBBYY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -3976,17 +3931,17 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
 
 # ── R69 B2: Workspace reset ──
 async def _cmd_workspace_reset(sender_id: str, params: dict) -> str:
-    """重置工作室：关闭当前工作室 + 清理管线状态 + 成员频道回大厅。"""
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
-    if not sender_ch:
-        return "❌ 无法确定当前工作区"
-    ws_obj = ws_mod.get_workspace(sender_ch)
+    """R82: 重置工作室：关闭 + 清理管线状态。"""
+    ws_id_param = params.get("_positional", [None])[0] or params.get("workspace", "")
+    if not ws_id_param:
+        return "❌ 请使用 --workspace <ws_id> 指定工作区"
+    ws_obj = ws_mod.get_workspace(ws_id_param)
     if not ws_obj:
         return "❌ 未找到活跃工作室"
     ws_id = ws_obj.id
     ws_name = ws_obj.name
     close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
-    await _broadcast_active_channel(p.LOBBY)
+    # R82: removed _broadcast_active_channel
     for pid, pst in list(_PIPELINE_STATE.items()):
         if pst.get("ws_id") == ws_id:
             _PIPELINE_STATE[pid]["active"] = False
@@ -4008,7 +3963,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     if not output_ref:
         return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
 
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    sender_ch = p.LOBBYY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -4166,9 +4121,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     # Update pipeline state
     _update_pipeline_step(round_name, next_step)
 
-    # ★ R50: Broadcast MSG_SET_ACTIVE_CHANNEL to all workspace members
-    switch_count = await _broadcast_active_channel(ws_id)
-
+    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
     # Notify PM in _admin channel
     try:
         admin_channel = p.ADMIN_CHANNEL
@@ -4192,8 +4145,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     return (
         f"✅ **{step_name} 完成 → 交接给 {next_role} {next_step}**\n"
         f"  产出: {output_ref}\n"
-        f"  MSG_SET_ACTIVE_CHANNEL 已发送至 {switch_count['online_count']} 个在线成员\n"
-        f"  ⏳ 等待 {next_role_display} ACK 确认\n"
+        f"  R82: 任务已通过 inbox 发送\n"
         f"  {rollcall_result}\n"
         f"  {next_task_result}"
     )
@@ -4363,7 +4315,7 @@ async def _cmd_pipeline_mode(sender_id: str, params: dict) -> str:
         return "❌ 用法：!pipeline_mode auto|manual"
     target_mode = positional[0]
 
-    sender_ch = persistence.get_agent_channel(sender_id) or p.LOBBY
+    sender_ch = p.LOBBYY
     round_name = None
     for rname, pstate in _PIPELINE_STATE.items():
         if pstate.get("ws_id") == sender_ch:
@@ -4871,7 +4823,7 @@ async def _cmd_workspace_join(sender_id: str, params: dict) -> str:
 
     if ws_mod.add_member(ws_id, sender_id):
         # 切换活跃频道到工作区
-        persistence.set_agent_channel(sender_id, ws_id)
+        # R82: removed set_agent_channel
         persistence.save_agent_channels(config.DATA_DIR)
 
         # 广播加入通知
@@ -5156,7 +5108,16 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     _ensure_card_watcher()
 
     content = msg.get("content", "")
-    channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
+    channel = msg.get(p.FIELD_CHANNEL, "")
+
+    # R82 A1: Inbox fast path — skip all filters and routing
+    if channel.startswith(p.INBOX_CHANNEL_PREFIX):
+        # _inbox:server → query command
+        if channel == f"{p.INBOX_CHANNEL_PREFIX}server":
+            await _handle_server_query(ws, sender_id, content)
+            return
+        # Otherwise → route directly to target agent's inbox (existing intercept handles it)
+        # Fall through to normal inbox handling below
 
     # R23: unregistered bots → registration channel only (cannot specify channel)
     if not auth.is_approved(sender_id):
@@ -5361,10 +5322,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
     # ── Channel-scoped routing ──────────────────────────────────────
     if channel != p.LOBBY and resolved_workspace:
-            # Known workspace → route to members + admin
-            if resolved_workspace.state == ws_mod.WorkspaceState.CLOSING:
-                await _send(ws, {"type": "error", "error": f"Workspace '{channel}' is closing, no new messages allowed"})
-                return
             if resolved_workspace.state == ws_mod.WorkspaceState.ARCHIVED:
                 await _send(ws, {"type": "error", "error": f"Workspace '{channel}' is archived, read-only"})
                 return
@@ -5504,7 +5461,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         # Route by type
         targets = []
         if msg_type == 'announce':
-            # 📢 → broadcast to ALL online bots (admin-only)
+            # 📢 → broadcast to admin/web viewers only (R82: bot connections excluded)
             if sender_role != "admin":
                 await _send(ws, {
                     "type": "error",
@@ -5713,71 +5670,105 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         })
         logger.info("Admin %s roll-call — online list sent (%s)", sender_id[:12], online_list)
 
-        # R53: Broadcast MSG_SET_ACTIVE_CHANNEL with ACK (replaces R37 text rollcall)
-        if resolved_workspace:
-            target_ch = resolved_workspace.id
-            ack_result = await _broadcast_active_channel(target_ch)
+        # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
 
 
-# ── R50: Shared MSG_SET_ACTIVE_CHANNEL broadcast ─────────────────
+
+# ── R82: _inbox:server query routing ─────────────────────
 
 
-async def _broadcast_active_channel(ws_id: str) -> dict:
-    """Broadcast MSG_SET_ACTIVE_CHANNEL with ACK waiting.
-    Returns: {online_count, acked_members: set[str], timedout_members: set[str]}
-    Also persists the channel for offline members so they pick it up on reconnection.
+async def _handle_server_query(ws, sender_id: str, content: str) -> None:
+    """Handle ! commands sent to _inbox:server channel.
+    Executes query commands and replies to sender's inbox.
     """
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return {"online_count": 0, "acked_members": set(), "timedout_members": set()}
+    if not content.startswith("!"):
+        return  # non-command silently ignored
 
-    # ★ R53: Generate per-broadcast ack_task_id
-    ack_task_id = str(uuid.uuid4())
+    sender_name = auth.get_agent_name(sender_id, sender_id[:12])
+    reply_ch = persistence.get_inbox_channel(sender_id)
+    if not reply_ch:
+        logger.warning("R82: Cannot reply to %s — no inbox channel", sender_id[:12])
+        return
 
-    switch_payload = json.dumps({
-        "type": p.MSG_SET_ACTIVE_CHANNEL,
-        p.FIELD_CHANNEL: ws_id,
-        p.FIELD_TASK_ID: ack_task_id,
-        "from_name": "系统",
-        "from": "系统",
-        "content": f"请将活跃频道切换至 {ws_id} 后回复 ACK",
-        "ts": time.time(),
-    })
+    parts = content.strip().split(maxsplit=1)
+    cmd = parts[0].lower() if parts else ""
+    params_str = parts[1] if len(parts) > 1 else ""
 
-    online_members = set()
-    for member_id in ws_obj.members:
-        persistence.set_agent_channel(member_id, ws_id)
-        for conn in list(_connections.get(member_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(switch_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(switch_payload)
-                online_members.add(member_id)
-            except Exception:
-                pass
+    reply_text = ""
 
-    persistence.save_agent_channels(config.DATA_DIR)
+    if cmd == "!agent_card":
+        sub_parts = params_str.split(maxsplit=1)
+        sub_cmd = sub_parts[0] if sub_parts else ""
+        if sub_cmd == "list":
+            cards = ac_mod.get_all_cards()
+            lines = [f"📇 Agent Cards ({len(cards)}):"]
+            for aid, card in sorted(cards.items()):
+                name = card.get("display_name", aid[:12])
+                roles = ", ".join(card.get("pipeline_roles", []))
+                status = card.get("status", "offline")
+                roles_str = f" 角色: {roles}" if roles else ""
+                lines.append(f"  {name} ({aid[:12]}...) [{status}] {roles_str}")
+            reply_text = "\n".join(lines)
+        else:
+            reply_text = f"❌ 未知子命令: !agent_card {sub_cmd}"
 
-    # ★ R53: Register ACK state and start 30s timeout
-    _channel_ack_state[ws_id] = {
-        "ack_task_id": ack_task_id,
-        "online_members": online_members,
-        "acked_members": {},
-        "timer": asyncio.create_task(_channel_ack_timeout(ws_id)),
-    }
+    elif cmd == "!pipeline_status":
+        round_name = params_str.strip()
+        if round_name:
+            mgr = _ensure_pipeline_manager()
+            ctx = mgr.get(round_name)
+            if ctx:
+                reply_text = _format_pipeline_context(ctx)
+            else:
+                reply_text = f"❌ 管线 {round_name} 不存在"
+        else:
+            mgr = _ensure_pipeline_manager()
+            active = mgr.get_all_active()
+            if active:
+                lines = ["📋 活跃管线:"]
+                for ctx in sorted(active, key=lambda c: c.round_name):
+                    lines.append(f"  {ctx.round_name} [{ctx.task_kind.value}] {ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
+                reply_text = "\n".join(lines)
+            else:
+                reply_text = "📋 当前无活跃管线"
 
-    logger.info(
-        "MSG_SET_ACTIVE_CHANNEL '%s' sent to %d online members (ack=%s)",
-        ws_id, len(online_members), ack_task_id[:8],
-    )
-    return {
-        "online_count": len(online_members),
-        "acked_members": set(),
-        "timedout_members": set(),
-    }
+    elif cmd == "!list_workspaces":
+        ws_list = ws_mod.get_all_workspaces()
+        if ws_list:
+            lines = [f"📋 工作区 ({len(ws_list)}):"]
+            for ws_item in ws_list:
+                state = ws_item.state.value
+                lines.append(f"  {ws_item.id} '{ws_item.name}' [{state}] members={len(ws_item.members)}")
+            reply_text = "\n".join(lines)
+        else:
+            reply_text = "📋 当前无工作区"
+
+    elif cmd == "!my_id":
+        reply_text = f"🆔 你的 agent_id: {sender_id}"
+
+    elif cmd == "!help":
+        reply_text = "📖 可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
+
+    else:
+        reply_text = f"❌ 未知命令: {cmd}\n可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
+
+    if not reply_text:
+        return
+
+    # Reply to sender's inbox
+    try:
+        import time as _time
+        await _broadcast_to_channel(reply_ch, {
+            "type": "broadcast", "channel": reply_ch,
+            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "content": reply_text, "ts": _time.time(),
+        })
+        logger.info("R82: Replied to %s via %s for '%s'", sender_id[:12], reply_ch, content[:40])
+    except Exception as e:
+        logger.warning("R82: Failed to reply to %s: %s", sender_id[:12], e)
 
 
+# ── R11 P2.2: Membership change notification ────────────────────
 # ── R11 P2.2: Membership change notification ────────────────────
 
 
@@ -5943,7 +5934,7 @@ async def _notify_rollcall_complete(ws_id: str) -> None:
         return
     unconfirmed = []
     for member_id in ws_obj.members:
-        ch = persistence.get_agent_channel(member_id)
+        ch = ""
         if ch != ws_id:
             unconfirmed.append(member_id)
 
@@ -6216,8 +6207,8 @@ async def handler(ws):
                         result = ws_mod.create_workspace(ws_id, ws_name or ws_id, owner_id, owner_name)
                         if result:
                             # R7: auto-bind owner's active channel
-                            persistence.set_agent_channel(owner_id, ws_id)
-                            persistence.save_agent_channels(config.DATA_DIR)
+                            # R82: removed set_agent_channel
+                            # R82: removed save_agent_channels
                             await _send(ws, {"type": "ok", "workspace_id": ws_id})
                             logger.info("Workspace '%s' created by admin — owner %s channel set to '%s'",
                                          ws_id, owner_id[:20], ws_id)
@@ -6249,8 +6240,8 @@ async def handler(ws):
                         if auth.can_manage_workspace(ws_id, agent_id):
                             if ws_mod.add_member(ws_id, member_id):
                                 # R22: auto-set active channel for new member (if none set)
-                                if not persistence.get_agent_channel(member_id):
-                                    persistence.set_agent_channel(member_id, ws_id)
+                                if not "":
+                                    # R82: removed set_agent_channel
                                     persistence.save_agent_channels(config.DATA_DIR)
                                     logger.info("Auto-set %s active channel to %s", member_id[:20], ws_id)
 
@@ -6397,7 +6388,7 @@ async def handler(ws):
                             break
 
                 if target_id and target_id in _users:
-                    persistence.set_agent_channel(target_id, p.LOBBY)
+                    # R82: removed set_agent_channel
                     persistence.save_agent_channels(config.DATA_DIR)
                     logger.info("Admin %s task-switched agent %s to lobby",
                                  agent_id[:12], target_id[:12])
@@ -6487,7 +6478,7 @@ async def handler(ws):
                                     _flush_offline_push(mid)
                                 )
 
-                        persistence.set_agent_channel(mid, workspace_id)
+                        # R82: removed set_agent_channel
 
                     persistence.save_agent_channels(config.DATA_DIR)
                     write_chat_log(sender_name, reset_content, channel=workspace_id)
@@ -6509,11 +6500,8 @@ async def handler(ws):
 
                 # ── R29: Global reset (all: true) ────────────────
                 elif all_flag:
-                    for aid in _users:
-                        if aid != agent_id:
-                            persistence.set_agent_channel(aid, p.LOBBY)
-                    persistence.save_agent_channels(config.DATA_DIR)
-                    logger.info("Admin %s reset ALL agents to lobby", agent_id[:12])
+                    # R82: removed global agent channel reset
+                    logger.info("Admin %s reset ALL agents (R82: channel tracking removed)", agent_id[:12])
                     await _send(ws, {"type": "ack", "status": "ok",
                                      "message": f"✅ 已重置全部 {len(_users)} 个成员到 lobby"})
 
@@ -6525,8 +6513,8 @@ async def handler(ws):
                                 target_id = aid
                                 break
                     if target_id and target_id in _users:
-                        persistence.set_agent_channel(target_id, p.LOBBY)
-                        persistence.save_agent_channels(config.DATA_DIR)
+                        # R82: removed set_agent_channel
+                        # R82: removed save_agent_channels
                         target_name = _users.get(target_id, {}).get("name", target_id[:12])
                         logger.info("Admin %s reset agent %s to lobby", agent_id[:12], target_id[:12])
                         await _send(ws, {"type": "ack", "status": "ok",
@@ -6564,7 +6552,7 @@ async def handler(ws):
 
                     # ── R81 B1: ACK 后自动加入工作区 ──
                     try:
-                        ack_ch = persistence.get_agent_channel(agent_id) or ""
+                        ack_ch = "" or ""
                         if ack_ch and ack_ch.startswith(p.WORKSPACE_ID_PREFIX):
                             ack_ws = ws_mod.get_workspace(ack_ch)
                             if ack_ws and agent_id not in ack_ws.members:
@@ -6807,34 +6795,6 @@ async def handler(ws):
                 await _send(ws, {"type": "ack", "message": f"✅ 已拒绝 {target_name or target_id[:12]} 的管理员申请"})
                 logger.info("Admin request rejected: %s for '%s' by %s, reason: %s", target_id[:12], ws_id, agent_id[:12], reject_reason)
 
-            elif msg_type == p.MSG_SET_ACTIVE_CHANNEL and agent_id:
-                new_channel = msg.get(p.FIELD_CHANNEL, "").strip()
-                if not new_channel:
-                    await _send(ws, {"type": "error", "error": "Missing channel field"})
-                    continue
-
-                # Lobby is always allowed
-                if new_channel == p.LOBBY:
-                    persistence.set_agent_channel(agent_id, new_channel)
-                    persistence.save_agent_channels(config.DATA_DIR)
-                    await _send(ws, {"type": p.MSG_CHANNEL_UPDATED, p.FIELD_ACTIVE_CHANNEL: new_channel})
-                    logger.info("Agent %s active channel set to lobby", agent_id[:20])
-                    continue
-
-                # Workspace: verify membership
-                ws_obj = ws_mod.get_workspace(new_channel)
-                if not ws_obj or ws_obj.state != ws_mod.WorkspaceState.ACTIVE:
-                    await _send(ws, {'type': 'error', 'error': f"Workspace '{new_channel}' not found or not active"})
-                    continue
-                if agent_id not in ws_obj.members and agent_id != ws_obj.owner_id:
-                    await _send(ws, {'type': 'error', 'error': 'You are not a member of this workspace'})
-                    continue
-
-                persistence.set_agent_channel(agent_id, new_channel)
-                persistence.save_agent_channels(config.DATA_DIR)
-                await _send(ws, {"type": p.MSG_CHANNEL_UPDATED, p.FIELD_ACTIVE_CHANNEL: new_channel})
-                logger.info("Agent %s active channel set to '%s'", agent_id[:20], new_channel)
-
             elif msg_type == p.MSG_REGISTER_AGENT and agent_id:
                 # DEPRECATED — R72 新体系使用 register 协议，旧 R23 路径保留不动
                 # 仅 admin 可执行（R23 遗留路径）
@@ -6853,7 +6813,7 @@ async def handler(ws):
                 persistence.set_approved_users(users)
                 persistence.save_approved_users(config.DATA_DIR)
                 # Move to lobby + clean registration channel
-                persistence.set_agent_channel(target_id, p.LOBBY)
+                # R82: removed set_agent_channel
                 persistence.save_agent_channels(config.DATA_DIR)
                 # Notify if online
                 for conn in list(_connections.get(target_id, set())):
@@ -7069,7 +7029,7 @@ async def _broadcast_workspace_archived(ws_id: str, resolved_workspace=None) -> 
         return
     # R7: reset owner's active channel when workspace is archived
     persistence.reset_agent_channel(resolved_workspace.owner_id)
-    persistence.save_agent_channels(config.DATA_DIR)
+    # R82: removed save_agent_channels
     logger.info("Owner %s active channel reset (workspace '%s' archived)",
                  resolved_workspace.owner_id[:20], ws_id)
     arch_payload = json.dumps({
