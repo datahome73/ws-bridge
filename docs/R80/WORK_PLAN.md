@@ -123,7 +123,7 @@ pipeline:
 - ✅ WORK_PLAN 编写中
 - 状态：📋 **当前**
 
-### Step 2：技术方案（Architect — 主角：小开，备用：爱泰）
+### Step 2：技术方案（Architect — 主角：架构师，备用：开发工程师）
 
 **任务：** 输出技术方案文档 `docs/R80/R80-tech-plan.md`
 
@@ -137,7 +137,7 @@ pipeline:
 
 **完成条件：** 技术方案推 dev + SHA
 
-### Step 3：编码（Developer — 主角：爱泰，备用：小开）
+### Step 3：编码（Developer — 主角：开发工程师，备用：架构师）
 
 **精确改动点：**
 
@@ -297,7 +297,7 @@ print(f"✅ Commit {output_ref} 本地存在"); sys.exit(0)
 
 **完成后：** `git add server/handler.py server/config.py scripts/verify_default.py` → commit → `git push origin dev`
 
-### Step 4：审查（Reviewer — 主角：小周，备用：泰虾）
+### Step 4：审查（Reviewer — 主角：审查工程师，备用：测试工程师）
 
 **审查重点：**
 
@@ -312,7 +312,7 @@ print(f"✅ Commit {output_ref} 本地存在"); sys.exit(0)
 | 7 | `PipelineContext` BLOCKED ↔ RUNNING 转换正确 | `transition_to(RUNNING)` 在验证通过后执行 |
 | 8 | 无 scope creep | 只改 ~100 行 |
 
-### Step 5：测试（QA — 主角：泰虾，备用：小周）
+### Step 5：测试（QA — 主角：测试工程师，备用：审查工程师）
 
 **验收标准测试（从需求文档 §3 复制）：**
 
@@ -336,7 +336,7 @@ print(f"✅ Commit {output_ref} 本地存在"); sys.exit(0)
 | ✅-16 | 默认脚本检查 commit 存在性 | 存在→exit 0；不存在→exit 1 | `python3 verify_default.py` |
 | ✅-17 | 默认脚本自动应用到无配置的 step | 无 validation 的走默认脚本 | 不配 validation 验证 |
 
-### Step 6：合并部署归档（Admin — 主角：小爱，备用：小开）
+### Step 6：合并部署归档（Admin — 主角：运维工程师，备用：架构师）
 
 **操作顺序：**
 
