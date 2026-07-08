@@ -44,6 +44,13 @@ _delivery_status: dict[str, dict[str, str]] = {}
 # R11 P1.2: Offline push queue
 _offline_push_queue: dict[str, list[dict]] = {}
 
+# R79: 系统消息发送者标识
+SYSTEM_AGENT_ID: str = "_system"
+# R79 D: 注册后大厅广播开关（默认关闭）
+REGISTRATION_BROADCAST_ENABLED: bool = (
+    os.environ.get("REGISTRATION_BROADCAST_ENABLED", "0") == "1"
+)
+
 # ── R42: Pipeline state ──────────────────────────────────────────
 _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
 
@@ -267,9 +274,150 @@ async def handle_register(ws, msg: dict) -> str | None:
     return agent_id
 
 
+# ── R79: Registration helpers ─────────────────────────────────────────
+
+
+def _build_registration_welcome(agent_id: str, display_name: str,
+                                pipeline_roles: list[str]) -> str:
+    """构建注册欢迎消息文本。"""
+    roles_str = ", ".join(pipeline_roles) if pipeline_roles else "未声明"
+    return (
+        f"🎉 欢迎加入 ws-bridge！\n\n"
+        f"你已成功注册，Agent ID: {agent_id[:16]}...\n"
+        f"当前角色: {roles_str}\n\n"
+        f"📋 下一事项：\n"
+        f"  1. 配置 config.yaml（bot_name / mention_keyword）\n"
+        f"  2. 阅读 WORKSPACE_RULES.md 了解平台规则\n"
+        f"  3. 在频道中 @管理员 确认配置完毕\n\n"
+        f"💡 帮助：发送 !help 查看可用命令"
+    )
+
+
+def _build_admin_notification(agent_id: str, display_name: str,
+                              pipeline_roles: list[str]) -> str:
+    """构建管理员通知消息文本。"""
+    roles_str = ", ".join(pipeline_roles) if pipeline_roles else "未声明"
+    return (
+        f"📢 新 bot 注册通知\n\n"
+        f"Agent ID: {agent_id[:16]}...\n"
+        f"显示名称: {display_name}\n"
+        f"角色: {roles_str}\n\n"
+        f"操作:\n"
+        f"  !approve_pairing {agent_id}   批准加入\n"
+        f"  !agent_card set {agent_id} roles...   修改角色"
+    )
+
+
+def _should_notify_admins(display_name: str) -> bool:
+    """判断是否应向管理员发送新 bot 注册通知。
+
+    如果注册者本人是管理员（display_name 在 BROADCAST_ADMINS 中），
+    则不发通知——管理员知道自己注册了。
+    """
+    return display_name not in config.BROADCAST_ADMINS
+
+
+async def _broadcast_to_channel(channel: str, payload: dict) -> int:
+    """向指定频道的所有连接广播消息。返回发送数。同时持久化。"""
+    payload_json = json.dumps(payload)
+    sent = 0
+    for aid, conns in _connections.items():
+        for conn in list(conns):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(payload_json)
+                elif hasattr(conn, "send"):
+                    await conn.send(payload_json)
+                sent += 1
+            except Exception:
+                pass
+    # 同时持久化到 DB + chat log
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="broadcast",
+            from_agent=SYSTEM_AGENT_ID,
+            from_name="系统",
+            content=payload.get("content", ""),
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+            channel=channel,
+        )
+        write_chat_log("系统", payload.get("content", ""), channel=channel)
+    except Exception:
+        pass
+    return sent
+
+
 async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
-    """R72: Bot 自主注册 Agent Card。返回确认消息。"""
-    return ac_mod.register_from_agent(agent_id, msg)
+    """R72: Bot 自主注册 Agent Card。返回确认消息。
+
+    R79: 追加欢迎消息 + 管理员通知 + 频道切换 + 大厅广播。
+    """
+    result = ac_mod.register_from_agent(agent_id, msg)
+
+    # ── R79: 注册后行为（全部 try/except，不阻断注册流程）──
+    try:
+        card = ac_mod.get_card(agent_id) or {}
+        display_name = card.get("display_name", "") or agent_id[:12]
+        pipeline_roles = card.get("pipeline_roles", [])
+
+        # A: 发送欢迎消息到 bot 连接
+        try:
+            welcome = _build_registration_welcome(agent_id, display_name, pipeline_roles)
+            target_ch = persistence.get_agent_channel(agent_id) or p.LOBBY
+            await _send(ws, {
+                "type": p.MSG_BROADCAST, "channel": target_ch,
+                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                "content": welcome, "ts": time.time(),
+            })
+            logger.info("R79 A: Welcome sent to %s", agent_id[:20])
+        except Exception as e:
+            logger.warning("R79 A: Welcome failed for %s: %s", agent_id[:20], e)
+
+        # B: 管理员通知（非管理员注册时）
+        try:
+            if _should_notify_admins(display_name):
+                notify = _build_admin_notification(agent_id, display_name, pipeline_roles)
+                await _broadcast_to_channel(p.ADMIN_CHANNEL, {
+                    "type": p.MSG_BROADCAST, "channel": p.ADMIN_CHANNEL,
+                    "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                    "content": notify, "ts": time.time(),
+                })
+                logger.info("R79 B: Admin notified for %s", agent_id[:20])
+        except Exception as e:
+            logger.warning("R79 B: Admin notification failed: %s", e)
+
+        # C: 切活跃频道到大厅
+        try:
+            persistence.set_agent_channel(agent_id, p.LOBBY)
+            await _send(ws, {
+                "type": p.MSG_SET_ACTIVE_CHANNEL,
+                p.FIELD_CHANNEL: p.LOBBY,
+                "from_name": "系统", "from": "系统",
+                "content": "注册完成，频道已切换至大厅",
+                "ts": time.time(),
+            })
+            logger.info("R79 C: Switched %s to lobby", agent_id[:20])
+        except Exception as e:
+            logger.warning("R79 C: Channel switch failed: %s", e)
+
+        # D: 大厅广播（默认关闭）
+        if REGISTRATION_BROADCAST_ENABLED:
+            try:
+                bcast = f"🆕 新伙伴加入：{display_name}\n角色：{', '.join(pipeline_roles) if pipeline_roles else '未声明'}"
+                await _broadcast_to_channel(p.LOBBY, {
+                    "type": p.MSG_BROADCAST, "channel": p.LOBBY,
+                    "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                    "content": bcast, "ts": time.time(),
+                })
+            except Exception as e:
+                logger.warning("R79 D: Lobby broadcast failed: %s", e)
+
+    except Exception as e:
+        logger.warning("R79: Registration post-process error (non-fatal): %s", e)
+
+    return result
 
 
 async def _push_offline(ws, since_ts: float) -> None:
