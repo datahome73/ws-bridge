@@ -3035,7 +3035,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if not output_ref:
         return "❌ 缺少 --output <sha>，且无法自动检测最新 commit"
 
-    sender_ch = p.LOBBYY
+    sender_ch = p.LOBBY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -3508,7 +3508,7 @@ async def _cmd_step_verify(sender_id: str, params: dict) -> str:
     output_ref = params.get("output", "")
 
     # 确定 round_name（从发送者的活跃频道推断）
-    sender_ch = p.LOBBYY
+    sender_ch = p.LOBBY
     round_name = next(
         (r for r, s in _PIPELINE_STATE.items() if s.get("ws_id") == sender_ch),
         None,
@@ -3803,7 +3803,7 @@ async def _cmd_step_reject(sender_id: str, params: dict) -> str:
         return "❌ 退回必须附理由：!step_reject <step_name> --reason <原因>"
 
     # 解析管线上下文
-    sender_ch = p.LOBBYY
+    sender_ch = p.LOBBY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -3963,7 +3963,7 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
     if not output_ref:
         return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
 
-    sender_ch = p.LOBBYY
+    sender_ch = p.LOBBY
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -4315,7 +4315,7 @@ async def _cmd_pipeline_mode(sender_id: str, params: dict) -> str:
         return "❌ 用法：!pipeline_mode auto|manual"
     target_mode = positional[0]
 
-    sender_ch = p.LOBBYY
+    sender_ch = p.LOBBY
     round_name = None
     for rname, pstate in _PIPELINE_STATE.items():
         if pstate.get("ws_id") == sender_ch:
@@ -4824,8 +4824,6 @@ async def _cmd_workspace_join(sender_id: str, params: dict) -> str:
     if ws_mod.add_member(ws_id, sender_id):
         # 切换活跃频道到工作区
         # R82: removed set_agent_channel
-        persistence.save_agent_channels(config.DATA_DIR)
-
         # 广播加入通知
         sender_name = auth.get_agent_name(sender_id, sender_id[:12])
         await _broadcast_to_channel(ws_id, {
@@ -6206,9 +6204,7 @@ async def handler(ws):
                     if ws_id and owner_id:
                         result = ws_mod.create_workspace(ws_id, ws_name or ws_id, owner_id, owner_name)
                         if result:
-                            # R7: auto-bind owner's active channel
-                            # R82: removed set_agent_channel
-                            # R82: removed save_agent_channels
+                            # R82: removed auto-bind active channel
                             await _send(ws, {"type": "ok", "workspace_id": ws_id})
                             logger.info("Workspace '%s' created by admin — owner %s channel set to '%s'",
                                          ws_id, owner_id[:20], ws_id)
@@ -6239,11 +6235,7 @@ async def handler(ws):
                     if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.ACTIVE:
                         if auth.can_manage_workspace(ws_id, agent_id):
                             if ws_mod.add_member(ws_id, member_id):
-                                # R22: auto-set active channel for new member (if none set)
-                                if not "":
-                                    # R82: removed set_agent_channel
-                                    persistence.save_agent_channels(config.DATA_DIR)
-                                    logger.info("Auto-set %s active channel to %s", member_id[:20], ws_id)
+                                # R82: removed auto-set active channel
 
                                 await _send(ws, {"type": "ok", "workspace_id": ws_id, "member_id": member_id})
                                 logger.info("Member %s added to workspace '%s'", member_id, ws_id)
@@ -6389,8 +6381,7 @@ async def handler(ws):
 
                 if target_id and target_id in _users:
                     # R82: removed set_agent_channel
-                    persistence.save_agent_channels(config.DATA_DIR)
-                    logger.info("Admin %s task-switched agent %s to lobby",
+                    logger.info("Admin %s task-switched agent %s to lobby (R82: channel tracking removed)",
                                  agent_id[:12], target_id[:12])
                 else:
                     logger.info("Admin %s task-switch target '%s' not found (silently ignored)",
@@ -6480,7 +6471,6 @@ async def handler(ws):
 
                         # R82: removed set_agent_channel
 
-                    persistence.save_agent_channels(config.DATA_DIR)
                     write_chat_log(sender_name, reset_content, channel=workspace_id)
 
                     reset_id = str(uuid.uuid4())
@@ -6514,7 +6504,6 @@ async def handler(ws):
                                 break
                     if target_id and target_id in _users:
                         # R82: removed set_agent_channel
-                        # R82: removed save_agent_channels
                         target_name = _users.get(target_id, {}).get("name", target_id[:12])
                         logger.info("Admin %s reset agent %s to lobby", agent_id[:12], target_id[:12])
                         await _send(ws, {"type": "ack", "status": "ok",
@@ -6814,7 +6803,6 @@ async def handler(ws):
                 persistence.save_approved_users(config.DATA_DIR)
                 # Move to lobby + clean registration channel
                 # R82: removed set_agent_channel
-                persistence.save_agent_channels(config.DATA_DIR)
                 # Notify if online
                 for conn in list(_connections.get(target_id, set())):
                     try:
@@ -7027,11 +7015,8 @@ async def _broadcast_workspace_archived(ws_id: str, resolved_workspace=None) -> 
         resolved_workspace = ws_mod.get_workspace(ws_id)
     if not resolved_workspace:
         return
-    # R7: reset owner's active channel when workspace is archived
-    persistence.reset_agent_channel(resolved_workspace.owner_id)
-    # R82: removed save_agent_channels
-    logger.info("Owner %s active channel reset (workspace '%s' archived)",
-                 resolved_workspace.owner_id[:20], ws_id)
+    # R82: removed active channel reset — bot uses inbox only
+    logger.info("R82: Workspace '%s' archived — no channel reset", ws_id)
     arch_payload = json.dumps({
         "type": "broadcast",
         "channel": ws_id,
