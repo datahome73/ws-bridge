@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.47
+> **版本：** v2.48
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -11,7 +11,7 @@
 
 | # | 事项 | 严重度 | 轮次 | 状态 |
 |:-:|:----|:-----:|:----:|:----:|
-| F-3 | **P3 角色体系** — `workspace_admin` 角色在 ws-bridge 中缺失，当前降级为 P1/P2 限速 | 🟡 P2 | 待分配 | ⬜ 待启动 |
+|| F-3 | **P3 角色体系** — `workspace_admin` 角色在 ws-bridge 中缺失，当前降级为 P1/P2 限速。R81: workspace member self-management (join/leave/add/remove/list_members) | 🟡 P2 | R81 | 🟢 已完成 ✅ |
 | F-4 | **测试标签与前缀匹配冲突** — `[R{N}测试]` 在 `📢` 之前破坏 startswith | 🟢 P3 | R45 | 🟢 已完成 ✅ |
 | F-5 | **P3 工作室管理能力增强** — 增加管理工作室的权限/功能（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
 | F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
@@ -129,12 +129,11 @@
 
 ## 四、变更记录
 
-| 版本 | 日期 | 变更 |
-|:---:|:----:|:----|
-|| v2.40 | 2026-07-07 | 🎯 **R74 完成 ✅** — 管线通用化：WORK_PLAN frontmatter 全量配置 + Raw URL 解耦 + 不拼接覆盖 + _R62_REPO_BASE 删除 + _infer_artifact_url 优先读 frontmatter + admin→operations 角色名 + inbox 权限开放 + display_name 匹配。审查 12/12 ✅ 100% 追溯，0 阻塞。编码 commit 9b2354e |
-|| v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
-
+|| 版本 | 日期 | 变更 |
+||:---:|:----:|:----|
+||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
 ||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅** — 验证钩子系统：step auto-verify gate + verify_default.py。审查 🟢 通过。17/17 45/45 ALL GREEN 🟢。合并部署 main `49a345b`，ws-bridge:latest（r80）镜像 |
+|| v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 ||| v2.46 | 2026-07-07 | 🎯 **R79 完成 ✅** — 新虾注册流程完善：欢迎消息 + 审批通知 + 自动切频道 + 大厅广播 + scripts/ 清理。审查 🟢 通过。12/12 37/37 ALL GREEN 🟢。合并部署 main `63b2e0d`，ws-bridge:latest（r79）镜像 |\n||| | 2026-07-08 | ➕ **R79 follow-up** — 小谷 `_cmd_close_workspace` 归档通知：遍历成员通知归档上下文。合并部署 main `0475ede`，ws-bridge:latest |
 ||| v2.45 | 2026-07-07 | 🎯 **R78 完成 ✅** — 全局变量迁移补完：角色映射 + ACK 状态统一管理 + 小谷守护进程。审查 🟢 通过，B-1 已修复。10/10 验收 38/38 ALL GREEN 🟢。合并部署 main `a1bd8e8`，ws-bridge:latest（r78）镜像 |
 ||| v2.44 | 2026-07-07 | 🎯 **R77 完成 ✅** — PipelineContext：统一管线上下文对象。PipelineContext 类 + 上下文注入 + 历史消息追溯。7/7 验收 ALL GREEN 🟢。合并部署 main `2df79c0`，ws-bridge:latest（r77）镜像 |
