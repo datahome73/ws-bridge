@@ -627,6 +627,25 @@ def _check_command_permission(
 # ── R35: Admin command handlers ──────────────────────────────────
 
 
+def _resolve_workspace(sender_id: str, params: dict) -> tuple[str | None, str]:
+    """确定目标工作区 ID。
+
+    优先级:
+    1. `--workspace <ws_id>` 显式参数
+    2. `persistence.get_agent_channel(sender_id)` 当前活跃频道
+
+    Returns:
+        (ws_id, error_msg) — ws_id 为 None 时表示未找到
+    """
+    ws_id = params.get("workspace", "") or persistence.get_agent_channel(sender_id) or ""
+    if not ws_id:
+        return (None, "❌ 无法确定工作区。请使用 --workspace <ws_id> 指定，或先加入一个工作区。")
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return (None, f"❌ 工作区 {ws_id} 不存在")
+    return (ws_id, "")
+
+
 async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
     """Create a new workspace. P3+ (workspace admin / global admin).
 
@@ -2759,6 +2778,44 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         "mode": mode,                              # R55 E: 自动/手动模式
     })
 
+    # ── R81 B2: 成员不足检测 + inbox 邀请 ──
+    try:
+        ws_obj = ws_mod.get_workspace(ws_id)
+        if ws_obj and len(ws_obj.members) <= 2:
+            step_config = _get_step_config(round_name)
+            all_roles = set()
+            for step_key, step_cfg in step_config.items():
+                role = step_cfg.get("role", "")
+                if role:
+                    all_roles.add(role)
+
+            invited = []
+            for role in all_roles:
+                agents = _get_agents_by_role(role)
+                for aid in agents:
+                    if aid not in ws_obj.members:
+                        target_ch = persistence.get_inbox_channel(aid)
+                        if target_ch:
+                            await _broadcast_to_channel(target_ch, {
+                                "type": "broadcast", "channel": target_ch,
+                                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                                "content": (
+                                    f"📩 管线 {round_name} 已在工作区 {ws_obj.name} 启动。\n"
+                                    f"角色 {role} 需要你的参与。\n"
+                                    f"请使用 `!workspace_join --workspace {ws_id}` 加入。"
+                                ),
+                                "ts": time.time(),
+                            })
+                            invited.append(f"{role}({aid[:12]})")
+
+            if invited:
+                logger.info(
+                    "R81 B2: Invited %d agents to join %s: %s",
+                    len(invited), ws_id, ", ".join(invited),
+                )
+    except Exception as e:
+        logger.warning("R81 B2: Member invite failed: %s", e)
+
     return (
         f"🚀 **{round_name} 管线已启动**\n"
         f"  Step: {start_step} → {target_role}\n"
@@ -4768,8 +4825,220 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "desc": "BLOCKED 状态下重新执行验证",
         "usage": "!step_verify <step_name> [--output <sha>]",
     },
+    # ── R81: Workspace self-management commands (min_role=2) ──
+    "workspace_join": {
+        "handler": _cmd_workspace_join, "min_role": 2,
+        "usage": "!workspace_join [--workspace <ws_id>]",
+    },
+    "workspace_leave": {
+        "handler": _cmd_workspace_leave, "min_role": 2,
+        "usage": "!workspace_leave [--workspace <ws_id>]",
+    },
+    "workspace_add": {
+        "handler": _cmd_workspace_add, "min_role": 2,
+        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_remove": {
+        "handler": _cmd_workspace_remove, "min_role": 2,
+        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_list_members": {
+        "handler": _cmd_workspace_list_members, "min_role": 2,
+        "usage": "!workspace_list_members [--workspace <ws_id>]",
+    },
 }
 
+
+# ── R81: Workspace member self-management commands ──────────────
+
+
+async def _cmd_workspace_join(sender_id: str, params: dict) -> str:
+    """加入工作区。
+
+    用法：!workspace_join [--workspace <ws_id>]
+    权限：L2 member（全员可用）
+    """
+    ws_id, err = _resolve_workspace(sender_id, params)
+    if err:
+        return err
+
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作区 {ws_id} 不存在"
+
+    if sender_id in ws.members:
+        return f"⏳ 你已在工作区 {ws.name} 中"
+
+    if ws_mod.add_member(ws_id, sender_id):
+        # 切换活跃频道到工作区
+        persistence.set_agent_channel(sender_id, ws_id)
+        persistence.save_agent_channels(config.DATA_DIR)
+
+        # 广播加入通知
+        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
+        await _broadcast_to_channel(ws_id, {
+            "type": "broadcast", "channel": ws_id,
+            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "content": f"👋 {sender_name} 加入了工作区",
+            "ts": time.time(),
+        })
+        return f"✅ 已加入工作区 {ws.name}"
+
+    return f"❌ 加入工作区 {ws.name} 失败"
+
+
+async def _cmd_workspace_leave(sender_id: str, params: dict) -> str:
+    """退出工作区。
+
+    用法：!workspace_leave [--workspace <ws_id>]
+    权限：L2 member（全员可用）
+    限制：Owner 不能退出自己的工作区
+    """
+    ws_id, err = _resolve_workspace(sender_id, params)
+    if err:
+        return err
+
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作区 {ws_id} 不存在"
+
+    if sender_id not in ws.members:
+        return f"⏳ 你不在工作区 {ws.name} 中"
+
+    # Owner 守卫
+    if sender_id == ws.owner_id:
+        return "❌ 你是该工作区的所有者，不能退出。如需关闭请使用 !close_workspace"
+
+    if ws_mod.remove_member(ws_id, sender_id):
+        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
+        await _broadcast_to_channel(ws_id, {
+            "type": "broadcast", "channel": ws_id,
+            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "content": f"👋 {sender_name} 退出了工作区",
+            "ts": time.time(),
+        })
+        return f"✅ 已退出工作区 {ws.name}"
+
+    return f"❌ 退出工作区 {ws.name} 失败"
+
+
+async def _cmd_workspace_add(sender_id: str, params: dict) -> str:
+    """邀请他人加入工作区。
+
+    用法：!workspace_add <agent_id> [--workspace <ws_id>]
+    权限：L2 member（sender 必须在目标工作区中）
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!workspace_add <agent_id> [--workspace <ws_id>]"
+
+    target_id = positional[0]
+    ws_id, err = _resolve_workspace(sender_id, params)
+    if err:
+        return err
+
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作区 {ws_id} 不存在"
+
+    # sender 必须在目标工作区中
+    if sender_id not in ws.members:
+        return f"❌ 你不在工作区 {ws.name} 中，无法邀请他人"
+
+    if target_id in ws.members:
+        return f"⏳ {target_id[:12]}... 已在工作区中"
+
+    if ws_mod.add_member(ws_id, target_id):
+        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
+        await _broadcast_to_channel(ws_id, {
+            "type": "broadcast", "channel": ws_id,
+            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "content": f"📩 {sender_name} 邀请了 {target_id[:12]}... 加入工作区",
+            "ts": time.time(),
+        })
+        return f"✅ {target_id[:12]}... 已加入工作区 {ws.name}"
+
+    return f"❌ 邀请失败"
+
+
+async def _cmd_workspace_remove(sender_id: str, params: dict) -> str:
+    """从工作区移除成员（仅 owner）。
+
+    用法：!workspace_remove <agent_id> [--workspace <ws_id>]
+    权限：L2 member（但仅 ws.owner_id 可执行）
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!workspace_remove <agent_id> [--workspace <ws_id>]"
+
+    target_id = positional[0]
+    ws_id, err = _resolve_workspace(sender_id, params)
+    if err:
+        return err
+
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作区 {ws_id} 不存在"
+
+    # Owner 检查（硬性守卫）
+    if sender_id != ws.owner_id:
+        return "❌ 权限不足：仅工作区所有者可移除成员"
+
+    if target_id == ws.owner_id:
+        return "❌ 不能移除工作区所有者"
+
+    if target_id not in ws.members:
+        return f"⏳ {target_id[:12]}... 不在工作区中"
+
+    if ws_mod.remove_member(ws_id, target_id):
+        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
+        target_name = auth.get_agent_name(target_id, target_id[:12])
+        await _broadcast_to_channel(ws_id, {
+            "type": "broadcast", "channel": ws_id,
+            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "content": f"🚫 {sender_name} 移除了 {target_name}",
+            "ts": time.time(),
+        })
+        return f"✅ 已从工作区移除 {target_id[:12]}..."
+
+    return f"❌ 移除失败"
+
+
+async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
+    """列出工作区成员。
+
+    用法：!workspace_list_members [--workspace <ws_id>]
+    权限：L2 member
+    """
+    ws_id, err = _resolve_workspace(sender_id, params)
+    if err:
+        return err
+
+    ws = ws_mod.get_workspace(ws_id)
+    if not ws:
+        return f"❌ 工作区 {ws_id} 不存在"
+
+    lines = [f"📋 工作区: {ws.name} ({ws.id})"]
+    lines.append(f"  状态: {ws.state.value}")
+    lines.append(f"  成员: {len(ws.members)} 人")
+    lines.append("")
+
+    for member_id in sorted(ws.members):
+        name = auth.get_agent_name(member_id, member_id[:12])
+        # 角色标识
+        if member_id == ws.owner_id:
+            role_badge = "👑 owner"
+        elif member_id in ws.admin_ids:
+            role_badge = "🛡️ admin"
+        else:
+            role_badge = "👤 member"
+        # 在线状态
+        is_online = member_id in _connections and bool(_connections[member_id])
+        status_dot = "🟢" if is_online else "⚪"
+
+        lines.append(f"  {status_dot} {name} ({member_id[:12]}...) {role_badge}")
+
+    return "\n".join(lines)
 
 
 async def _restore_pipeline_timers() -> None:
@@ -6292,6 +6561,21 @@ async def handler(ws):
                 state = _channel_ack_state[ws_id]
                 if status == "switched":
                     state["acked_members"][agent_id] = time.time()
+
+                    # ── R81 B1: ACK 后自动加入工作区 ──
+                    try:
+                        ack_ch = persistence.get_agent_channel(agent_id) or ""
+                        if ack_ch and ack_ch.startswith(p.WORKSPACE_ID_PREFIX):
+                            ack_ws = ws_mod.get_workspace(ack_ch)
+                            if ack_ws and agent_id not in ack_ws.members:
+                                ws_mod.add_member(ack_ch, agent_id)
+                                logger.info(
+                                    "R81 B1: Auto-added %s to workspace %s on ACK",
+                                    agent_id[:12], ack_ch[:20],
+                                )
+                    except Exception as e:
+                        logger.warning("R81 B1: Auto-add on ACK failed: %s", e)
+
                     await _send(ws, {"type": "ack", "status": "ok",
                                      "message": "✅ 频道切换已确认"})
 
