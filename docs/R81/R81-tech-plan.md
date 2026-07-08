@@ -1,11 +1,53 @@
 # R81 技术方案 — 工作区成员自动化管理 🤖
 
-> **版本：** v1.0
+> **版本：** v1.1
 > **状态：** ✅ 技术方案
 > **架构师：** 👷 架构师
 > **日期：** 2026-07-09
-> **基线：** `1dbdee7`（main）
+> **基线：** `134a1e5`（dev — R81 Step 2 初稿）
+> **代码基线确认：** `server/handler.py` 6807 行 / `server/workspace.py` 604 行
 > **改动范围：** `server/handler.py` `server/workspace.py`（接口确认）
+
+---
+
+## 0. 代码审计确认
+
+### 0.1 WORK_PLAN 声明 vs 实际
+
+| 声明 | WORK_PLAN 预估算 | 实际 | 偏差 |
+|:-----|:----------------:|:----:|:----:|
+| `_ADMIN_COMMANDS` 位置 | ~L4603 | L4603-L4771 | ✅ 一致 |
+| `_cmd_crollcall` 存在 | 作为 B1 入口引用 | ❌ 不存在，仅 `_cmd_rollcall_role`(L1055) + `_cmd_rollcall_next`(L1085) | ⚠️ 见 §2.1 |
+| ACK 响应处理位置 | 约 L3400-3500 | L6282-L6301（MSG_ACK 消息分支） | ⚠️ 见 §2.1 |
+| `_cmd_pipeline_start()` 末尾 | 约 L2140-2160 | L2760+（返回前） | ⚠️ 见 §2.2 |
+| `add_member(ws_id, agent_id) → bool` | ✅ 已知 | L332 ✅ | 一致 |
+| `remove_member(ws_id, agent_id) → bool` | ✅ 已知 | L341 ✅ | 一致 |
+| `Workspace.members` | set[str] | L185 ✅ | 一致 |
+| 审计日志方式 | 命令体内部调用 | ❌ 已被中央路由器 L4974-4975 自动处理 | ⚠️ 见 §0.2 |
+
+### 0.2 关键发现 — 审计日志自动处理
+
+`server/handler.py` L4974-4975 的中央命令路由器已对所有 `_ADMIN_COMMANDS` 注册的命令自动调用 `_log_audit(sender_id, cmd_name, params, "success", result)`。因此新命令的 `_cmd_*` 函数**不需要**在函数体内手动调用 `_audit_logger.log()`，否则会造成双倍日志。
+
+### 0.3 各函数实际行号
+
+| 函数 | 行号 | 签名 |
+|:-----|:-----|:------|
+| `_broadcast_to_channel(channel, payload)` | L320 | `async def → int` |
+| `_send_cmd_response(ws, sender_id, from_name, content, channel)` | L506 | `async def → None` |
+| `_cmd_create_workspace(sender_id, params)` | L630 | `async def → str` |
+| `_cmd_rollcall_role(sender_id, params)` | L1055 | `async def → str` |
+| `_cmd_rollcall_next(sender_id, params)` | L1085 | `async def → str` |
+| `_cmd_pipeline_start(sender_id, params)` | L2481-L2766 | `async def → str` |
+| `_ADMIN_COMMANDS` 注册表 | L4603-L4771 | dict |
+| MSG_ACK 消息处理入口 | L6282 | `msg_type == p.MSG_ACK` |
+| `persistence.get_agent_channel(agent_id)` | persistence.py:144 | `→ str \| None` |
+| `auth.get_agent_name(agent_id, default)` | auth.py:224 | `→ str` |
+| `ws_mod.add_member(ws_id, agent_id)` | workspace.py:332 | `→ bool` |
+| `ws_mod.remove_member(ws_id, agent_id)` | workspace.py:341 | `→ bool` |
+| `_get_agents_by_role(role)` | handler.py:1250 | `→ list[str]` |
+| `_get_step_config(round_name)` | handler.py:1481 | `→ dict` |
+| `p.WORKSPACE_ID_PREFIX` | protocol.py:161 | `= \"ws:\"` |
 
 ---
 
@@ -79,7 +121,6 @@ async def _cmd_workspace_join(sender_id: str, params: dict) -> str:
             "content": f"👋 {sender_name} 加入了工作区",
             "ts": time.time(),
         })
-        _audit_logger.log(f"[R81] !workspace_join by {sender_id} → {ws_id}")
         return f"✅ 已加入工作区 {ws.name}"
     
     return f"❌ 加入工作区 {ws.name} 失败"
@@ -118,7 +159,6 @@ async def _cmd_workspace_leave(sender_id: str, params: dict) -> str:
             "content": f"👋 {sender_name} 退出了工作区",
             "ts": time.time(),
         })
-        _audit_logger.log(f"[R81] !workspace_leave by {sender_id} → {ws_id}")
         return f"✅ 已退出工作区 {ws.name}"
     
     return f"❌ 退出工作区 {ws.name} 失败"
@@ -161,7 +201,6 @@ async def _cmd_workspace_add(sender_id: str, params: dict) -> str:
             "content": f"📩 {sender_name} 邀请了 {target_id[:12]}... 加入工作区",
             "ts": time.time(),
         })
-        _audit_logger.log(f"[R81] !workspace_add by {sender_id} → {ws_id} target={target_id}")
         return f"✅ {target_id[:12]}... 已加入工作区 {ws.name}"
     
     return f"❌ 邀请失败"
@@ -208,7 +247,6 @@ async def _cmd_workspace_remove(sender_id: str, params: dict) -> str:
             "content": f"🚫 {sender_name} 移除了 {target_name}",
             "ts": time.time(),
         })
-        _audit_logger.log(f"[R81] !workspace_remove by {sender_id} → {ws_id} target={target_id}")
         return f"✅ 已从工作区移除 {target_id[:12]}..."
     
     return f"❌ 移除失败"
@@ -216,7 +254,7 @@ async def _cmd_workspace_remove(sender_id: str, params: dict) -> str:
 
 ### 1.6 命令注册
 
-在 `_ADMIN_COMMANDS` 字典中新增 5 条注册（L4405 区域末尾）：
+在 `_ADMIN_COMMANDS` 字典中新增 5 条注册（L4603-L4771 区域末尾，在 L4770 的 `}` 之前插入）：
 
 ```python
 "workspace_join": {
@@ -247,32 +285,28 @@ async def _cmd_workspace_remove(sender_id: str, params: dict) -> str:
 
 ### 2.1 点名 ACK 后自动加入工作区
 
-**入口位置：** `_cmd_rollcall` / `_cmd_rollcall_role` 的 ACK 响应处理部分。
+**⚠️ 代码审计修正：** 不存在 `_cmd_rollcall` 函数。`_cmd_rollcall_role`(L1055) 是**点名发起者**的函数，而 ACK 响应**接收方**的处理位于 WebSocket 消息主循环的 MSG_ACK 分支（L6282-L6301）。
 
-点名流程中，bot 通过 `!ack` 命令或自动 ACK 机制响应。在其响应处理中追加自动加入逻辑：
+**插入点：** `server/handler.py` L6295，在 `state["acked_members"][agent_id] = time.time()` 之后追加：
 
 ```python
-# 在点名 ACK 处理函数的末尾追加（约 L3400-3500 区域）
-
-# ── R81 B1: ACK 后自动加入工作区 ──
-try:
-    # 从当前活跃频道推断工作区
-    ack_ch = persistence.get_agent_channel(sender_id) or ""
-    if ack_ch and ack_ch.startswith(p.WORKSPACE_ID_PREFIX):
-        ack_ws = ws_mod.get_workspace(ack_ch)
-        if ack_ws and sender_id not in ack_ws.members:
-            ws_mod.add_member(ack_ch, sender_id)
-            logger.info(
-                "R81 B1: Auto-added %s to workspace %s on ACK",
-                sender_id[:12], ack_ch[:20],
-            )
-except Exception as e:
-    logger.warning("R81 B1: Auto-add on ACK failed: %s", e)
-```
+                    # ── R81 B1: ACK 后自动加入工作区 ──
+                    try:
+                        ack_ch = persistence.get_agent_channel(agent_id) or ""
+                        if ack_ch and ack_ch.startswith(p.WORKSPACE_ID_PREFIX):
+                            ack_ws = ws_mod.get_workspace(ack_ch)
+                            if ack_ws and agent_id not in ack_ws.members:
+                                ws_mod.add_member(ack_ch, agent_id)
+                                logger.info(
+                                    "R81 B1: Auto-added %s to workspace %s on ACK",
+                                    agent_id[:12], ack_ch[:20],
+                                )
+                    except Exception as e:
+                        logger.warning("R81 B1: Auto-add on ACK failed: %s", e)
 
 ### 2.2 pipeline_start 成员不足时 inbox 邀请
 
-**入口位置：** `_cmd_pipeline_start()` 末尾（约 L2140-2160 区域），创建工作区之后。
+**入口位置：** `_cmd_pipeline_start()` 末尾（L2760+ 区域），在 `return` 语句之前（L2762 前）。
 
 ```python
 # ── R81 B2: 成员不足检测 + inbox 邀请 ──
@@ -414,13 +448,16 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
 | `pipeline_force_complete` | 4 | ❌ **保留** | 跳过验证仅限 L4 |
 | `step_complete` | 3 | ❌ **保留** | 推进 step 影响管线顺序 |
 | `step_force` | 3 | ❌ **保留** | 强制推进需验证身份 |
-| `step_verify` | 3 | ✅ **可降级到 2** | 重新执行验证，无风险 |
+| `step_verify` | 2（**已降级**） | ✅ **已验证，保持** | R80 已降级到位，无需再操作 |
+| `pipeline` | 2（**已降级**） | ✅ **已验证，保持** | R77 已降级到位，无需再操作 |
+| `agent_card`/`agent_card_list`/`agent_card_get` | 2（**已降级**） | ✅ **已验证，保持** | R73 已降级到位，无需再操作 |
 
 ### 4.3 降级汇总
 
 | 等级 | 命令数 |
 |:-----|:------|
-| 可降级（✅ 无条件） | 6 个（list_workspaces, list_agents, agent_status, list_workspace_admins, task_list, pipeline_status, step_verify） |
+| 可降级（✅ 无条件） | 6 个（list_workspaces, list_agents, agent_status, list_workspace_admins, task_list, pipeline_status） |
+| 已验证已降级（✅ 保持） | 3 个（step_verify, pipeline, agent_card/list/get） |
 | 建议保留（⚠️ 暂缓） | 2 个（audit_log, pipeline_block） |
 | 必须保留（❌ 不可降） | 其余 10+ 个 |
 
@@ -517,17 +554,17 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
 
 ## 7. 审计日志
 
-所有 5 个新命令通过 `_audit_logger.log()` 记录操作记录：
+**代码审计修正：** 中央命令路由器 L4974-4975 已自动对所有 `_ADMIN_COMMANDS` 命令调用 `_log_audit()`。新命令**不需要**在函数体内手动记录审计日志。自动记录格式：
 
-| 命令 | 日志内容 | 审计格式 |
-|:-----|:---------|:---------|
-| `workspace_join` | `[R81] !workspace_join by {sender_id} → {ws_id}` | 含操作者 + 目标工作区 |
-| `workspace_leave` | `[R81] !workspace_leave by {sender_id} → {ws_id}` | 含操作者 + 退出工作区 |
-| `workspace_add` | `[R81] !workspace_add by {sender_id} → {ws_id} target={target_id}` | 含操作者 + 被邀请人 |
-| `workspace_remove` | `[R81] !workspace_remove by {sender_id} → {ws_id} target={target_id}` | 含操作者 + 被移除人 |
-| `workspace_list_members` | 不记录（仅查询，无副作用） | — |
+| 命令 | `_log_audit` 参数 | 说明 |
+|:-----|:------------------|:------|
+| `workspace_join` | `_log_audit(sender_id, "workspace_join", params, "success", result)` | 含操作者 + 目标工作区 |
+| `workspace_leave` | `_log_audit(sender_id, "workspace_leave", params, "success", result)` | 含操作者 + 退出工作区 |
+| `workspace_add` | `_log_audit(sender_id, "workspace_add", params, "success", result)` | 含操作者 + 被邀请人 |
+| `workspace_remove` | `_log_audit(sender_id, "workspace_remove", params, "success", result)` | 含操作者 + 被移除人 |
+| `workspace_list_members` | `_log_audit(sender_id, "workspace_list_members", params, "success", result)` | 仅查询，无副作用 |
 
-现有 `_audit_logger.log()` 模式（参考 `_cmd_create_workspace` / `_cmd_close_workspace` 等）直接复用。
+`result` 参数包含命令的返回值（含 ws_id 等），`params` 包含传入参数（含 `--workspace` 和位置参数）。
 
 ---
 
@@ -535,4 +572,5 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
 
 | 版本 | 日期 | 变更 |
 |:----:|:----|:------|
+| v1.1 | 2026-07-09 | 代码审计修正：B1 实际插入点 L6295（MSG_ACK 分支，非 `_cmd_rollcall`）；`_audit_logger` 由中央路由器自动处理；`_ADMIN_COMMANDS` 行号 L4603-L4771；D 表补充已验证已降级命令；添加 §0 基线确认 |
 | v1.0 | 2026-07-09 | 初稿 — R81 工作区成员自动化管理：5 个新命令 + 2 处自动补充 + 1 个查询 + min_role 降级评估 |
