@@ -4825,7 +4825,10 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "desc": "BLOCKED 状态下重新执行验证",
         "usage": "!step_verify <step_name> [--output <sha>]",
     },
-    # ── R81: Workspace self-management commands (min_role=2) ──
+}
+
+# ── R81: Workspace self-management commands ───────────────────
+_ADMIN_COMMANDS.update({
     "workspace_join": {
         "handler": _cmd_workspace_join, "min_role": 2,
         "usage": "!workspace_join [--workspace <ws_id>]",
@@ -4846,7 +4849,7 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "handler": _cmd_workspace_list_members, "min_role": 2,
         "usage": "!workspace_list_members [--workspace <ws_id>]",
     },
-}
+})
 
 
 # ── R81: Workspace member self-management commands ──────────────
