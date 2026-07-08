@@ -710,6 +710,44 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
     except Exception as e:
         logger.warning("R76: Archive state write failed (non-fatal): %s", e)
 
+    # ── R79+: Notify all workspace members that the round is over ──
+    try:
+        _round_name = ws.name.split('-')[0] if '-' in ws.name else ws.name
+        _end_msg = (
+            f"📋 {_round_name} 轮的开发工作已经结束，更新记忆，话题归档。\n\n"
+            f"工作室「{ws.name}」已关闭。下一轮开发将另启新工作室。"
+        )
+        for _member_id in list(ws.members):
+            if _member_id == sender_id:
+                continue
+            _inbox_ch = f"_inbox:{_member_id}"
+            write_chat_log("系统", _end_msg, channel=_inbox_ch)
+            ms.save_message(
+                msg_id=str(uuid.uuid4()), msg_type="broadcast",
+                from_agent=SYSTEM_AGENT_ID, from_name="系统",
+                content=_end_msg, ts=time.time(),
+                data_dir=config.DATA_DIR, channel=_inbox_ch,
+            )
+            _payload = json.dumps({
+                "type": "broadcast", "channel": _inbox_ch,
+                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                "content": _end_msg, "ts": time.time(),
+            })
+            for _conn in list(_connections.get(_member_id, set())):
+                try:
+                    if hasattr(_conn, "send_str"):
+                        await _conn.send_str(_payload)
+                    elif hasattr(_conn, "send"):
+                        await _conn.send(_payload)
+                except Exception:
+                    pass
+        _member_count = len(ws.members) - (1 if sender_id in ws.members else 0)
+        if _member_count > 0:
+            logger.info("Round-end notifications sent to %d member(s) for %s",
+                        _member_count, _round_name)
+    except Exception as e:
+        logger.warning("Round-end notification failed (non-fatal): %s", e)
+
     return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
 
 
