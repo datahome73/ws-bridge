@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.48
+> **版本：** v2.49
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -131,7 +131,7 @@
 
 || 版本 | 日期 | 变更 |
 ||:---:|:----:|:----|
-||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
+||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n|||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
 ||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅** — 验证钩子系统：step auto-verify gate + verify_default.py。审查 🟢 通过。17/17 45/45 ALL GREEN 🟢。合并部署 main `49a345b`，ws-bridge:latest（r80）镜像 |
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 ||| v2.46 | 2026-07-07 | 🎯 **R79 完成 ✅** — 新虾注册流程完善：欢迎消息 + 审批通知 + 自动切频道 + 大厅广播 + scripts/ 清理。审查 🟢 通过。12/12 37/37 ALL GREEN 🟢。合并部署 main `63b2e0d`，ws-bridge:latest（r79）镜像 |\n||| | 2026-07-08 | ➕ **R79 follow-up** — 小谷 `_cmd_close_workspace` 归档通知：遍历成员通知归档上下文。合并部署 main `0475ede`，ws-bridge:latest |
