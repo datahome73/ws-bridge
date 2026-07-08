@@ -1,7 +1,7 @@
 # R82 产品需求 — Inbox-Only 架构重构 🏗️
 
-> **版本：** v1.0（初稿，待审核）
-> **状态：** 📝 草稿
+> **版本：** v1.0 ✅（项目负责人审核通过）
+> **状态：** ✅ 已审核
 > **产品经理：** 🧐 PM
 > **日期：** 2026-07-10
 > **本轮改动范围：** `server/handler.py`、`shared/protocol.py`、`server/workspace.py`、`server/persistence.py`、`server/web_viewer.py`、`clients/`、`server/config.py`
