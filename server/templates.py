@@ -130,19 +130,15 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 <script>
 const TOKEN='__TOKEN__';
 
-// ── R20: Tab state model — fixed 5-slot architecture (R35 + R38 + R76) ──
+// ── R83: Tab state model — 3-tab (inbox | admin | history) ──
 const TAB_STATE = {
-  tab1: { id: 'tab1', channel: 'lobby',       label: '🌐 大厅',     permanent: true,  visible: true },
-  tab2: { id: 'tab2', channel: null,           label: '📋 活跃',     permanent: false, visible: false },
-  // R35: admin tab (read-only, no input box)
-  tab4: { id: 'tab4', channel: '_admin',       label: '🔧 管理员',   permanent: true,  visible: true },
-  // R76: inbox tab (read-only, no input box, always visible)
-  tab5: { id: 'tab5', channel: '__inbox__',    label: '📬 收件箱',   permanent: true,  visible: true },
-  tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史查看器', permanent: true,  visible: true },
+  tab1: { id: 'tab1', channel: '__inbox__',    label: '📬 收件箱',   permanent: true, visible: true },
+  tab2: { id: 'tab2', channel: '_admin',       label: '🔧 管理员',   permanent: true, visible: true },
+  tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史',    permanent: true, visible: true },
 };
 let activeTabId = 'tab1';
-let unreadCounts = { lobby: 0 };
-const msgContainers = { lobby: [] };
+let unreadCounts = { '__inbox__': 0 };
+const msgContainers = {};
 let searchMode = false;
 // R38 / 🔧 F-8: Deduplicate messages from WS push + poll double-delivery
 const _seenMsgHashes = {};
@@ -211,32 +207,22 @@ function createMessageEl(m) {
 
 function renderTabBar() {
   const bar = document.getElementById('tabBar');
-  var html = '';
-
-  // Tab 2: 活跃工作室 (conditional) — W-6: first, most-used
-  if (TAB_STATE.tab2.visible && TAB_STATE.tab2.channel) {
-    html += '<div class="tab' + (activeTabId === 'tab2' ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
-      '📋 ' + escapeHtml(TAB_STATE.tab2.label.replace('📋 ', '')) + '</div>';
+  let html = '';
+  for (const [id, tab] of Object.entries(TAB_STATE)) {
+    const isActive = activeTabId === id;
+    if (id === 'tab1') {
+      const inboxUnread = unreadCounts['__inbox__'] || 0;
+      html += '<div class="tab' + (isActive ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">📬 收件箱' +
+        (inboxUnread > 0 ? '<span class="badge">' + inboxUnread + '</span>' : '') + '</div>';
+    } else if (id === 'tab2') {
+      html += '<div class="tab admin-tab' + (isActive ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
+        tab.label + '</div>';
+    } else {
+      const tab3Class = 'tab' + (isActive ? ' active' : '') + (!tab.channel ? ' pending' : '');
+      html += '<div class="' + tab3Class + '" data-tab="tab3" onclick="selectTab(\'tab3\')">' +
+        (tab.channel ? tab.label : '🗂️ 历史') + '</div>';
+    }
   }
-
-  // Tab 1: 大厅 (always) — W-6: second
-  html += '<div class="tab' + (activeTabId === 'tab1' ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">' +
-    '🌐 大厅</div>';
-
-  // Tab 4: 管理员 (always) — W-6: third
-  html += '<div class="tab admin-tab' + (activeTabId === 'tab4' ? ' active' : '') + '" data-tab="tab4" onclick="selectTab(\'tab4\')">' +
-    '🔧 管理员</div>';
-
-  // R76: Tab 5: 收件箱 (always) — fourth, with unread badge
-  const inboxUnread = unreadCounts['__inbox__'] || 0;
-  html += '<div class="tab' + (activeTabId === 'tab5' ? ' active' : '') + '" data-tab="tab5" onclick="selectTab(\'tab5\')">📬 收件箱' +
-    (inboxUnread > 0 ? '<span class="badge">' + inboxUnread + '</span>' : '') + '</div>';
-
-  // Tab 3: 历史查看器 (always, pending style when no content loaded) — W-6: last
-  const tab3Class = 'tab' + (activeTabId === 'tab3' ? ' active' : '') + (!TAB_STATE.tab3.channel ? ' pending' : '');
-  html += '<div class="' + tab3Class + '" data-tab="tab3" onclick="selectTab(\'tab3\')">' +
-    '🗂️ ' + (TAB_STATE.tab3.channel ? escapeHtml(TAB_STATE.tab3.label.replace('🗂️ ', '')) : '历史查看器') + '</div>';
-
   bar.innerHTML = html;
 }
 
@@ -252,12 +238,22 @@ function selectTab(tabId) {
 
   activeTabId = tabId;
 
-  // R76: inbox tab — no input box, clear unread, load inbox messages
-  if (tabId === 'tab5') {
+  // R83: inbox tab (tab1) — no input box, clear unread, load inbox messages
+  if (tabId === 'tab1') {
     unreadCounts['__inbox__'] = 0;
     renderTabBar();
     document.getElementById('inputArea').style.display = 'none';
     loadInboxMessages(archiveMode ? lastArchiveTs : null);
+    return;
+  }
+
+  // R83: admin tab (tab2) — no input box
+  if (tabId === 'tab2') {
+    document.getElementById('inputArea').style.display = 'none';
+    const tab = TAB_STATE[tabId];
+    if (tab && tab.channel) {
+      loadMessages(tab.channel, archiveMode ? lastArchiveTs : null);
+    }
     return;
   }
 
@@ -279,21 +275,6 @@ function switchHistoryTab(wsId, wsName) {
   // R76: load archive full-channel history if workspace is archived
   loadArchiveMessages(wsId);
 }
-
-function switchToActiveTab(wsId, wsName) {
-  TAB_STATE.tab2.channel = wsId;
-  TAB_STATE.tab2.label = '📋 ' + wsName;
-  TAB_STATE.tab2.visible = true;
-  if (!(wsId in unreadCounts)) unreadCounts[wsId] = 0;
-  if (!(wsId in msgContainers)) msgContainers[wsId] = [];
-  // R33: persist tab2 state to localStorage
-  try { localStorage.setItem('ws_tab2_channel', wsId); } catch(e) {}
-  try { localStorage.setItem('ws_tab2_label', wsName); } catch(e) {}
-  renderTabBar();
-  selectTab('tab2');
-}
-
-// ── Message loading ──
 
 async function loadMessages(channel, since) {
   const list = document.getElementById('msgList');
@@ -473,7 +454,7 @@ function buildWsItem(w) {
   var clickAction;
   if (w.state === 'active') {
     const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
-    clickAction = "switchToActiveTab('" + w.id + "','" + safeName + "')";
+    clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
   } else {
     const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
     clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
@@ -529,40 +510,7 @@ async function renderWsPanel() {
 // ── Initialization ──
 
 async function init() {
-  // R33-0: Restore tab2 from localStorage (immediate, no network dependency)
-  var restoredTab2 = false;
-  try {
-    var savedChannel = localStorage.getItem('ws_tab2_channel');
-    var savedLabel = localStorage.getItem('ws_tab2_label');
-    if (savedChannel && savedLabel) {
-      TAB_STATE.tab2.channel = savedChannel;
-      TAB_STATE.tab2.label = '📋 ' + savedLabel;
-      TAB_STATE.tab2.visible = true;
-      restoredTab2 = true;
-    }
-  } catch(e) {}
-
-  // 0. R28: Fetch workspaces to verify tab2 state + update localStorage
-  try {
-    const resp = await fetch('/api/workspaces');
-    const data = await resp.json();
-    const workspaces = data.workspaces || [];
-    const activeWs = workspaces.filter(function(w) { return w.state === 'active'; });
-    if (activeWs.length > 0) {
-      TAB_STATE.tab2.channel = activeWs[0].id;
-      TAB_STATE.tab2.label = '📋 ' + (activeWs[0].name || activeWs[0].id);
-      TAB_STATE.tab2.visible = true;
-      // Update localStorage with fresh data
-      try { localStorage.setItem('ws_tab2_channel', activeWs[0].id); } catch(e) {}
-      try { localStorage.setItem('ws_tab2_label', activeWs[0].name || activeWs[0].id); } catch(e) {}
-    } else if (!restoredTab2) {
-      // No active workspace and nothing restored from localStorage → keep 2 tabs
-      TAB_STATE.tab2.channel = null;
-      TAB_STATE.tab2.visible = false;
-    }
-  } catch(e) {
-    // API failed → keep whatever localStorage restored (graceful degradation)
-  }
+  // R83: 默认收件箱 tab，no tab2 restore
 
   // R76: load archive state from /api/channels
   try {
@@ -579,12 +527,8 @@ async function init() {
   // 1. Render tab bar (fixed slots, no fetch needed)
   renderTabBar();
 
-  // W-7: Pull-to-refresh → always go to first tab
-  // (tab2=active if visible, else tab1=lobby)
+  // R83: 默认打开收件箱 tab
   var firstTab = 'tab1';
-  if (TAB_STATE.tab2.visible && TAB_STATE.tab2.channel) {
-    firstTab = 'tab2';
-  }
   selectTab(firstTab);
 
   // 3. WS live
@@ -597,12 +541,12 @@ async function init() {
       try {
         const data = JSON.parse(e.data);
         if (data.type === 'chat_message') {
-          const ch = data.channel || 'lobby';
-          // R76: inbox messages → separate handling with unread badge
+          const ch = data.channel || '';
+          // R83: inbox messages → separate handling with unread badge
           if (ch.startsWith('_inbox:')) {
             const msg = data.message || data;
             _inboxCache.push(msg);
-            if (activeTabId === 'tab5') {
+            if (activeTabId === 'tab1') {
               const list = document.getElementById('msgList');
               list.insertBefore(createInboxMessageEl(msg), list.firstChild);
             } else {
@@ -659,7 +603,7 @@ async function init() {
   }, 5000);
 
 
-  // 5. R20: Poll workspaces (15s) — detect Tab2 active changes + refresh panel
+  // 5. R83: Poll workspaces — refresh panel cache + detect history tab changes
   setInterval(async function() {
     try {
       const resp = await fetch('/api/workspaces');
@@ -672,36 +616,14 @@ async function init() {
       // Invalidate panel cache so next open re-fetches
       wsPanelCache = null;
 
-      // Detect active workspace changes for Tab2
-      const activeIds = workspaces.filter(function(w) { return w.state === 'active'; }).map(function(w) { return w.id; });
-      if (TAB_STATE.tab2.channel && activeIds.indexOf(TAB_STATE.tab2.channel) === -1) {
-        // Current active workspace no longer active → hide Tab2
-        TAB_STATE.tab2.channel = null;
-        TAB_STATE.tab2.visible = false;
-        // R33: clear expired localStorage
-        try { localStorage.removeItem('ws_tab2_channel'); } catch(e) {}
-        try { localStorage.removeItem('ws_tab2_label'); } catch(e) {}
-        if (activeTabId === 'tab2') {
-          selectTab('tab1');
-        } else {
-          renderTabBar();
-        }
-      } else if (activeIds.length > 0 && !TAB_STATE.tab2.channel) {
-        // R33: New active workspace appeared → full setup + localStorage
-        var ws = workspaces.find(function(w) { return w.id === activeIds[0]; });
-        switchToActiveTab(activeIds[0], ws ? ws.name : activeIds[0]);
-      } else {
-        renderTabBar();
-      }
-
       // Check if Tab3's channel still exists
       if (TAB_STATE.tab3.channel) {
         var exists = workspaces.some(function(w) { return w.id === TAB_STATE.tab3.channel; });
         if (!exists) {
           TAB_STATE.tab3.channel = null;
-          TAB_STATE.tab3.label = '🗂️ 历史查看器';
+          TAB_STATE.tab3.label = '🗂️ 历史';
           if (activeTabId === 'tab3') {
-            selectTab('tab1');  // 自动回退到大厅
+            selectTab('tab1');  // 自动回退到收件箱
           } else {
             renderTabBar();
           }
@@ -803,7 +725,7 @@ async function init() {
     const q = document.getElementById('searchInput').value.trim();
     if (!q) return;
     const activeTab = TAB_STATE[activeTabId];
-    const channel = activeTab ? activeTab.channel : 'lobby';
+    const channel = activeTab ? activeTab.channel : '';
     const resp = await fetch('/api/chat/search?q=' + encodeURIComponent(q) + '&channel=' + encodeURIComponent(channel) + '&token=' + encodeURIComponent(TOKEN));
     const data = await resp.json();
     const results = data.results || [];
