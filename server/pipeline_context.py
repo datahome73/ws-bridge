@@ -170,6 +170,12 @@ class PipelineContext:
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineContext":
         """从 JSON 字典反序列化（str → Path, value → enum）。"""
+        # R78 A1: 兼容旧 JSON 格式（单值 str → 多值 list[str]）
+        raw_role_map = d.get("role_agent_map", {})
+        if raw_role_map and isinstance(next(iter(raw_role_map.values())), str):
+            role_agent_map = {k: [v] for k, v in raw_role_map.items()}
+        else:
+            role_agent_map = raw_role_map
         return cls(
             round_name=d["round_name"],
             task_kind=PipelineTaskKind(d["task_kind"]),
@@ -182,13 +188,7 @@ class PipelineContext:
             current_step=d.get("current_step", 1),
             total_steps=d.get("total_steps", 6),
             blocked_reason=d.get("blocked_reason"),
-            # R78 A1: 兼容旧 JSON 格式（单值 str → 多值 list[str]）
-            raw_role_map = d.get("role_agent_map", {}),
-            role_agent_map=(
-                {k: [v] for k, v in raw_role_map.items()}
-                if raw_role_map and isinstance(next(iter(raw_role_map.values())), str)
-                else raw_role_map
-            ),
+            role_agent_map=role_agent_map,
             agent_card_ids=d.get("agent_card_ids", {}),
             last_output_sha=d.get("last_output_sha", ""),
             ack_states=d.get("ack_states", {}),
