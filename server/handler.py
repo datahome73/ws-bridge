@@ -5019,7 +5019,10 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
     return "\n".join(lines)
 
 
-# ── R81: Workspace self-management commands ───────────────────
+
+
+
+# Register R81 workspace commands
 _ADMIN_COMMANDS.update({
     "workspace_join": {
         "handler": _cmd_workspace_join, "min_role": 2,
@@ -5042,7 +5045,6 @@ _ADMIN_COMMANDS.update({
         "usage": "!workspace_list_members [--workspace <ws_id>]",
     },
 })
-
 
 async def _restore_pipeline_timers() -> None:
     """On server start, recover pipeline timeout timers from task store."""
