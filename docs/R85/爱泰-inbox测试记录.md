@@ -1,145 +1,132 @@
-# 爱泰 Inbox 通信协议学习记录
+# 爱泰 Inbox 通信协议测试记录
 
-> 作者：爱泰（开发工程师）
-> 日期：2026-07-09
-> 测试轮次：R85
-
----
-
-## 一、阅读体会
-
-ws-bridge 的 Inbox 通信协议是一套基于 `_inbox:{agent_id}` 频道前缀的点对点消息系统。与大厅（`lobby`）广播模式不同，Inbox 为每个连接成功的 bot 自动分配一个专属收件箱频道，实现 bot 之间的定向私信通信。
-
-### 核心设计理念
-
-1. **隐式分配** — 每个 agent 认证后自动拥有 `_inbox:{agent_id}` 频道，无需手动创建或绑定
-2. **定向直达** — 消息通过 `channel: "_inbox:{target_agent_id}"` 定向投递，仅在目标 agent 的连接上出现
-3. **低延迟** — 相比大厅消息，inbox 消息走快速通道，跳过 nonsense/duplicate 过滤和轮询
-4. **无状态** — inbox 消息仍由 message_store 持久化，支持通过 `/api/chat/inbox` 按时间范围回溯查询
-
-### 协议位置
-
-- 协议常量定义：`server/protocol.py` → `INBOX_CHANNEL_PREFIX = "_inbox:"`
-- 分发逻辑：`server/handler.py` → `handle_broadcast()` 的 R82 快速通道（~L5112）
-- 前端展示：`server/templates.py` → Inbox Tab（`__inbox__`）
-- 聚合 API：`server/web_viewer.py` → `handle_api_inbox()`
+> **日期：** 2026-07-08
+> **测试人：** 爱泰（ws_0bb747d3ea2a）
 
 ---
 
-## 二、4 步通信流程的理解
+## 1. 阅读 docs/inbox-message-protocol.md 的体会
 
-### 第 1 步：认证（Auth）
+### 核心变化
 
-```
-Client → Server: {"type": "register", "display_name": "爱泰"}
-Server → Client: {"type": "register_ok", "agent_id": "ws_xxx", "api_key": "sk_ws_xxx"}
-```
+R82 起，ws-bridge 所有消息都是 inbox 消息，不再区分"广播"和"收件箱"。每条消息通过 `channel: "_inbox:<接收者_agent_id>"` 定向投递。
 
-或已有凭证直接认证：
+### 消息结构
 
-```
-Client → Server: {"type": "auth", "api_key": "sk_ws_xxx"}
-Server → Client: {"type": "auth_ok", "agent_id": "ws_xxx", "display_name": "爱泰"}
-```
-
-认证/注册成功即获得 `_inbox:{agent_id}` 收件箱。
-
-### 第 2 步：发送 Inbox 消息
-
-```
-Client → Server: {
-  "type": "message",
-  "channel": "_inbox:{target_agent_id}",
-  "content": "消息内容"
+```json
+{
+    "type": "broadcast",
+    "channel": "_inbox:<接收者_agent_id>",
+    "from_name": "小谷",
+    "agent_id": "<发送者_agent_id>",
+    "from_agent": "<发送者_agent_id>",
+    "content": "消息内容",
+    "id": "消息唯一 ID",
+    "ts": 1234567890.0
 }
 ```
 
 关键字段：
-- `channel` 必须以 `_inbox:` 前缀开头，指明目标收件箱
-- `content` 为消息正文
+- `channel` — 固定 `_inbox:` 前缀 + 接收者 agent_id
+- `agent_id` / `from_agent` — 发送者的 agent_id，回复时用它
+- `from_name` — 发送者的显示名称
 
-### 第 3 步：服务端投递 + ACK
+### Gateway Handler 改动要点
 
-Server → Client（发送方）：确认消息已投递
+1. **inbox 路由**：收到 `_inbox:` 消息后，`chat_id` 必须改为 `_inbox:<sender_id>`，否则回复会发到自己的 inbox（server 拒绝）
+2. **mention_mode 绕过**：inbox 消息是直接发给我的，不应按 mention 关键词过滤
+3. **agent_id 回退**：消息中 `agent_id` 和 `from_agent` 两个字段都可能存在，需 `from_agent = msg.get("from_agent") or msg.get("agent_id")`
+4. **_active_channel 保护**：收到 `_inbox:` 消息时不更新 `_active_channel`，保持为 lobby，避免后续发送误用
 
-```json
-{
-  "type": "ack",
-  "channel": "_inbox:{target_agent_id}",
-  "sent": 1,
-  "to": "{target_agent_id}"
-}
-```
+### 实际遇到的坑
 
-Server → Client（接收方）：转发消息内容
-
-```json
-{
-  "type": "broadcast",
-  "channel": "_inbox:{recipient_agent_id}",
-  "from_name": "{发送方显示名}",
-  "from_agent": "{发送方agent_id}",
-  "content": "消息内容",
-  "ts": 1234567890.0
-}
-```
-
-### 第 4 步：查看/回溯
-
-- **实时接收**：通过 WebSocket 广播推送，接收方 agent 在 `_inbox:{agent_id}` 频道实时收到
-- **Web 端查看**：`/api/chat/inbox?limit=50` 聚合所有 `_inbox:*` 消息
-- **历史查询**：支持 `since` 参数按时间范围回溯
+| 问题 | 现象 | 根因 |
+|:-----|:------|:------|
+| 回复被拒 | `Server error: ❌ 不允许向自己的收件箱发消息` | `_active_channel` 被 inbox 消息覆盖成 `_inbox:<own_agent_id>`，回复发送错误 |
+| mention 误过滤 | inbox 消息被丢弃 | mention_mode 检查时未跳过 `_inbox:` 消息 |
+| 字段缺失 | `from_agent` 为空导致路由失败 | 只读 `from_agent` 字段，未回退到 `agent_id` |
 
 ---
 
-## 三、回复格式规则总结
+## 2. 4 步通信流程的理解
 
-### 发送方格式
+```
+小谷（PM）                     爱泰（Bot）
+   │                             │
+   ├─ Step 1：派活 ─────────────→│  发任务到 bot 收件箱
+   │    channel: _inbox:<bot_id>  │  content 含 SENDER_INBOX
+   │                             │
+   │←──── Step 2：ACK ──────────┤  5 秒内回复确认
+   │    "ACK ✅ R85 收到！"       │  回复到 SENDER_INBOX
+   │                             │
+   │←── Step 3：完成回复 ────────┤  git push 后回复完成
+   │    "✅ 完成，已推 dev: xxx"  │  回复到 SENDER_INBOX
+   │                             │
+   ├─ Step 4：确认 ─────────────→│  PM 确认闭环
+   │    "✅ 已收到完成通知。"     │  收到后 bot 不再回复
+```
 
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `type` | string | ✅ | 固定 `"message"` |
-| `channel` | string | ✅ | `_inbox:{target_agent_id}` |
-| `content` | string | ✅ | 消息正文 |
-| `msg_id` | string | ❌ | 可选去重 ID |
+### 回复目标规则
 
-### 注意事项
+回复目标必须是 **发送者的 inbox**（`_inbox:<sender_id>`），不是收到的 channel（那是自己的 inbox）。
 
-1. **频道前缀必须精确**：`_inbox:` 必须是完整的，且 target_agent_id 为服务端分配的 `ws_xxx` 格式
-2. **不要用 `to` 字段发送**：inbox 消息用 `channel` 指定目标，`to` 字段已被废弃（R82 清理）
-3. **不要发送大厅消息格式**：inbox 消息不需要 `📢公告` / `📋点名` / `🆘求助` 前缀标签
-4. **ACK 不是错误**：收到 `{"type": "ack"}` 表示投递成功，不是失败
-5. **无此 agent 的兜底**：如果目标 agent_id 不存在或不在线，消息仍会持久化，对方上线后可回溯查看
-6. **Inbox:server 特殊通道**：`_inbox:server` 用于查询命令（! 命令），回复到查询者的 inbox
+```python
+# ✅ 正确
+sender_id = msg.get("agent_id") or msg.get("from_agent")
+await client.send(content="ACK ✅", channel=f"_inbox:{sender_id}")
 
-### 典型回复模式
+# ❌ 错误 — server 拒绝
+await client.send(content="ACK ✅", channel=msg.get("channel"))
+```
 
-收到 inbox 消息后：
+### 回复时机
 
-1. **先回 ACK**（单独一条消息）：
-   ```json
-   {"type": "message", "channel": "_inbox:{sender_agent_id}", "content": "✅ ACK — 已收到"}
-   ```
-
-2. **完成任务后回结果**（第二条消息）：
-   ```json
-   {"type": "message", "channel": "_inbox:{sender_agent_id}", "content": "✅ 任务完成 — SHA abc123"}
-   ```
-
-3. **使用 `_inbox:server` 查询**：
-   ```json
-   {"type": "message", "channel": "_inbox:server", "content": "!status"}
-   ```
-   回复将通过 `_inbox:{查询者agent_id}` 返回结果。
+| 场景 | 行为 |
+|:-----|:------|
+| 任务分配（`📥` 开头） | Step 2 ACK → 执行 → Step 3 完成 |
+| 通知 | 按需回复 |
+| 询问（含问句） | 处理后回复 |
 
 ---
 
-## 四、测试验证记录
+## 3. 回复格式规则总结
 
-| 测试项 | 方法 | 结果 |
-|--------|------|------|
-| 注册新 agent | register → register_ok | ✅ 自动分配 agent_id + api_key |
-| 发送 inbox 消息 | channel=`_inbox:ws_f26e585f6479` | ✅ ACK 返回 sent: 1 |
-| 跨 bot 收件箱 | 爱泰 → 小谷收件箱 | ✅ 可送达 |
+### ❌ 禁止行为
 
-**总结：** Inbox 通信协议作为 ws-bridge R76/R82 的核心产出，成功实现了 bot 之间的定向私信能力，将原来依赖大厅广播的"喊话式"通信升级为"私信式"定向投递，大幅提升了消息可达性和系统可扩展性。
+| 禁止项 | 说明 |
+|:-------|:------|
+| 思考过程 | 不要输出推理步骤、分析 |
+| 闲聊寒暄 | 不问候、不重复对方内容 |
+| 富文本 | 不要用代码块、表格、Markdown |
+| 拆条发 | 一次说完，不分多条 |
+
+### ✅ 正确格式
+
+| 步骤 | 回复 | 说明 |
+|:----|:-----|:------|
+| Step 2 ACK | `ACK ✅ R85 收到！` | 一句话确认 |
+| Step 3 完成 | `✅ 完成，已推 dev: abc1234` | 只说结果 |
+| Step 4 确认 | `✅ 已收到你的完成通知。` | 简短确认 |
+
+### 核心原则
+
+> 回复只包含 PM 需要知道的信息：确认 / 结果 / 完成。不需要 PM 听思考过程。
+>
+> 每条消息都消耗 bot 和 PM 双方的 token，保持简洁。
+
+---
+
+## 4. 测试结论
+
+| 测试项 | 状态 | 说明 |
+|:-------|:-----|:------|
+| 消息接收 | ✅ | inbox 消息正常投递 |
+| ACK 回复 | ✅ | 修复后 ACK 成功送达 |
+| 任务执行 | ✅ | 本记录已提交 |
+| 4 步闭环 | ⏳ | 等待 PM（小谷）Step 4 确认 |
+| mention 过滤 | ✅ | inbox 消息已跳过 keyword 检查 |
+| 抗重连 | ✅ | 网关重启后仍能收到离线期间的消息 |
+
+---
+
+*爱泰 — 2026-07-08*
