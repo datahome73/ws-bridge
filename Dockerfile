@@ -13,7 +13,6 @@ COPY entrypoint.py .
 COPY shared/ shared/
 COPY server/ server/
 COPY clients/ clients/
-COPY scripts/ scripts/
 COPY config/ config/
 COPY docs/ docs/
 
