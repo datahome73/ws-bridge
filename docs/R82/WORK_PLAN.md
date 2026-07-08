@@ -1,3 +1,64 @@
+---
+pipeline:
+  name: "R82 Inbox-Only 架构重构"
+  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/WORK_PLAN.md"
+
+  workspace:
+    members:
+      architect:
+        mention_keyword: "小开;architect;架构师"
+        rules: "输出技术方案文档"
+      developer:
+        mention_keyword: "爱泰;developer;开发"
+        rules: "按技术方案编码实现"
+      reviewer:
+        mention_keyword: "小周;reviewer;审查"
+        rules: "代码审查 + 兼容性检查"
+      qa:
+        mention_keyword: "泰虾;qa;测试"
+        rules: "全量回归测试"
+      operations:
+        mention_keyword: "小爱;operations;运维"
+        rules: "合并部署归档"
+
+  steps:
+    step2:
+      role: architect
+      title: "技术方案"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/R82-product-requirements.md"
+      timeout_minutes: 360
+    step3:
+      role: developer
+      title: "编码实现"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/R82-product-requirements.md"
+      timeout_minutes: 360
+    step4:
+      role: reviewer
+      title: "代码审查"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/R82-product-requirements.md"
+      timeout_minutes: 120
+    step5:
+      role: qa
+      title: "测试验证"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/R82-product-requirements.md"
+      timeout_minutes: 240
+    step6:
+      role: operations
+      title: "合并部署归档"
+      context:
+        work_plan_url: "${pipeline.work_plan_url}"
+        requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R82/R82-product-requirements.md"
+      timeout_minutes: 60
+---
+
 # R82 工作计划 — Inbox-Only 架构重构 🏗️
 
 > **版本：** v1.0（初稿，待推）
@@ -75,7 +136,7 @@
 PM 启动管线后，server 执行：
 1. 创建 workspace 元数据（时间戳 + pipeline_id + 角色清单）
 2. 解析 WORK_PLAN frontmatter
-3. 通过 inbox 向 arch bot 发送 Step 2 任务
+3. 通过 inbox 向 architect bot 发送 Step 2 任务
 
 **无频道切换、无活跃频道广播、无点名流程** — 直接 inbox 派活。
 
