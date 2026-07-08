@@ -80,12 +80,18 @@ class PipelineContext:
     blocked_reason: str | None = None                # status=BLOCKED 时的原因
 
     # ── 管线成员（角色 → agent_id）──
-    role_agent_map: dict[str, str] = field(default_factory=dict)     # {"architect": "ws_xxx", ...}
+    role_agent_map: dict[str, list[str]] = field(default_factory=dict)  # {"architect": ["ws_xxx"], ...}
     agent_card_ids: dict[str, str] = field(default_factory=dict)     # {"ws_xxx": card_id, ...}
 
     # ── Git 同步状态 ──
     last_output_sha: str = ""                        # 上次处理的 commit SHA
     git_sync_branch: str = "dev"                     # 同步分支
+
+    # ── R78: ACK 状态（step → ack_info）──
+    ack_states: dict[str, dict] = field(default_factory=dict)  # {"step2": {"state": "ACKED", "by": "ws_xxx", ...}}
+
+    # ── R78: Step 配置列表 ──
+    steps: list[dict] = field(default_factory=list)  # [{"name": "step2", "executor_role": "arch", ...}]
 
     # ── 元信息（审计用）──
     created_at: float = 0.0
@@ -153,6 +159,8 @@ class PipelineContext:
             "agent_card_ids": self.agent_card_ids,
             "last_output_sha": self.last_output_sha,
             "git_sync_branch": self.git_sync_branch,
+            "ack_states": self.ack_states,
+            "steps": self.steps,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "created_by": self.created_by,
@@ -162,6 +170,12 @@ class PipelineContext:
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineContext":
         """从 JSON 字典反序列化（str → Path, value → enum）。"""
+        # R78 A1: 兼容旧 JSON 格式（单值 str → 多值 list[str]）
+        raw_role_map = d.get("role_agent_map", {})
+        if raw_role_map and isinstance(next(iter(raw_role_map.values())), str):
+            role_agent_map = {k: [v] for k, v in raw_role_map.items()}
+        else:
+            role_agent_map = raw_role_map
         return cls(
             round_name=d["round_name"],
             task_kind=PipelineTaskKind(d["task_kind"]),
@@ -174,9 +188,11 @@ class PipelineContext:
             current_step=d.get("current_step", 1),
             total_steps=d.get("total_steps", 6),
             blocked_reason=d.get("blocked_reason"),
-            role_agent_map=d.get("role_agent_map", {}),
+            role_agent_map=role_agent_map,
             agent_card_ids=d.get("agent_card_ids", {}),
             last_output_sha=d.get("last_output_sha", ""),
+            ack_states=d.get("ack_states", {}),
+            steps=d.get("steps", []),
             git_sync_branch=d.get("git_sync_branch", "dev"),
             created_at=d.get("created_at", 0.0),
             updated_at=d.get("updated_at", 0.0),
@@ -331,6 +347,108 @@ class PipelineContextManager:
             ctx.updated_at = time.time()
             self._save()
             return True
+
+    # ── R78 A2: 全局角色映射（不关联具体轮次）──
+
+    def set_global_role_map(self, role_agent_map: dict[str, list[str]]) -> None:
+        """由 _refresh_role_agent_map() 调用，更新全局快照。"""
+        self._global_role_map = role_agent_map
+
+    def get_global_role_map(self) -> dict[str, list[str]]:
+        """返回全局角色映射快照。"""
+        return dict(getattr(self, "_global_role_map", {}))
+
+    def get_role_agents(self, role: str, round_name: str | None = None) -> list[str]:
+        """获取指定角色的 agent 列表。"""
+        if round_name:
+            ctx = self._contexts.get(round_name)
+            if ctx and role in ctx.role_agent_map:
+                return ctx.role_agent_map[role]
+        return getattr(self, "_global_role_map", {}).get(role, [])
+
+    async def update_role_agent_map_round(
+        self, round_name: str, role: str, agent_ids: list[str],
+    ) -> bool:
+        """更新指定管线的单个角色映射。"""
+        async with self._lock:
+            ctx = self._contexts.get(round_name)
+            if not ctx:
+                return False
+            ctx.role_agent_map[role] = agent_ids
+            ctx.updated_at = time.time()
+            self._save()
+            return True
+
+    # ── R78 B2: ACK 状态操作 ──
+
+    async def set_ack_state(
+        self, round_name: str, step: str, ack_info: dict,
+    ) -> bool:
+        """设置指定 step 的 ACK 状态。"""
+        async with self._lock:
+            ctx = self._contexts.get(round_name)
+            if not ctx:
+                return False
+            ctx.ack_states[step] = ack_info
+            ctx.updated_at = time.time()
+            self._save()
+            return True
+
+    def has_ack_for_agent(
+        self, round_name: str, step: str, agent_id: str,
+    ) -> bool:
+        """检查某 agent 是否已对某 step 回复了 ACK。"""
+        ctx = self._contexts.get(round_name)
+        if not ctx:
+            return False
+        ack = ctx.ack_states.get(step, {})
+        return ack.get("state") == "ACKED" and ack.get("by") == agent_id
+
+    # ── R78 C2: Step 配置操作 ──
+
+    def get_step_config(self, round_name: str) -> dict:
+        """获取 step 配置字典（name→dict 格式）。
+
+        优先从 ctx.steps 读取，回退空 dict。
+        """
+        ctx = self._contexts.get(round_name)
+        if ctx and ctx.steps:
+            return {s["name"]: s for s in ctx.steps}
+        return {}
+
+    async def update_steps(
+        self, round_name: str, steps: list[dict],
+    ) -> bool:
+        """更新管线的 step 配置列表。"""
+        async with self._lock:
+            ctx = self._contexts.get(round_name)
+            if not ctx:
+                return False
+            ctx.steps = steps
+            ctx.updated_at = time.time()
+            self._save()
+            return True
+
+    # ── R78 D1: restore from history ──
+
+    async def restore_from_history(
+        self, round_name: str,
+    ) -> PipelineContext | None:
+        """从历史 JSONL 恢复已归档管线。"""
+        history = self.get_history(limit=200)
+        for entry in history:
+            if entry.get("round_name") == round_name:
+                ctx = PipelineContext.from_dict(entry)
+                if ctx.status in (PipelineStatus.COMPLETED, PipelineStatus.CANCELLED):
+                    return None  # 终态不可恢复
+                async with self._lock:
+                    ctx.status = PipelineStatus.RUNNING if ctx.status == PipelineStatus.BLOCKED else ctx.status
+                    ctx.blocked_reason = None if ctx.status == PipelineStatus.RUNNING else ctx.blocked_reason
+                    ctx.updated_at = time.time()
+                    self._contexts[round_name] = ctx
+                    self._save()
+                return ctx
+        return None
 
     def get_history(self, limit: int = 20) -> list[dict]:
         """读取历史归档。"""

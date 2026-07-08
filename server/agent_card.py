@@ -383,7 +383,16 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
     # Update _ROLE_AGENT_MAP from handler for role-based routing
     if pipeline_roles:
         try:
+            # R78 A3: 先走 PipelineContextManager（新路径）
             from . import handler as _handler_mod
+            mgr = _handler_mod._pipeline_manager
+            if mgr is not None:
+                current_map = mgr.get_global_role_map()
+                for r in pipeline_roles:
+                    if agent_id not in current_map.setdefault(r, []):
+                        current_map[r].append(agent_id)
+                mgr.set_global_role_map(current_map)
+            # 双写旧变量（过渡期后删除）
             for r in pipeline_roles:
                 if r not in _handler_mod._ROLE_AGENT_MAP:
                     _handler_mod._ROLE_AGENT_MAP[r] = []

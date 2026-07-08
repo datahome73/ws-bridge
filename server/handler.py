@@ -50,6 +50,12 @@ _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws
 # ── R62: Pipeline config (read-only, separate from runtime state) ──
 _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
 
+# R78 A: DEPRECATED — 迁移到 PipelineContextManager._global_role_map
+_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
+
+# R78 B: DEPRECATED — 迁移到 PipelineContext.ack_states
+_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
+
 # ── R77: PipelineContextManager — 统一管线上下文管理 ──────────────
 _pipeline_manager: PipelineContextManager | None = None
 
@@ -1016,6 +1022,12 @@ def _refresh_role_agent_map() -> None:
     logger.info("R63 role-agent map refreshed: %d roles, %d entries",
                 len(_ROLE_AGENT_MAP),
                 sum(len(v) for v in _ROLE_AGENT_MAP.values()))
+    # R78 A2: 同步写到 Manager 全局快照
+    try:
+        mgr = _ensure_pipeline_manager()
+        mgr.set_global_role_map(dict(_ROLE_AGENT_MAP))
+    except Exception:
+        pass
 
 
 # ---- R67 B1: Startup card load + watcher ------------------------------
@@ -1054,9 +1066,10 @@ def _get_agents_by_role(role: str,
     """Find agents by pipeline role.
 
     Priority chain:
-    1. _ROLE_AGENT_MAP (from Agent Card pipeline_roles)
-    2. Fallback: auth.get_users().role (legacy compat)
-    3. Optional: filter by workspace_members
+    1. PipelineContextManager.get_role_agents() (R78 new path)
+    2. _ROLE_AGENT_MAP (DEPRECATED fallback)
+    3. Fallback: auth.get_users().role (legacy compat)
+    4. Optional: filter by workspace_members
 
     Args:
         role: Pipeline role name (arch/dev/review/qa/admin).
@@ -1065,7 +1078,14 @@ def _get_agents_by_role(role: str,
     Returns:
         List of matching agent IDs.
     """
-    agents = _ROLE_AGENT_MAP.get(role, [])
+    # R78 A4: 优先走 Manager 查询
+    try:
+        mgr = _ensure_pipeline_manager()
+        agents = mgr.get_role_agents(role)
+    except Exception:
+        agents = []
+    if not agents:
+        agents = _ROLE_AGENT_MAP.get(role, [])
     if not agents:
         # Fallback to auth roles
         users = auth.get_users()
@@ -1273,7 +1293,18 @@ def _load_step_config() -> dict[str, dict]:
 
 
 def _get_step_config(round_name: str) -> dict[str, dict]:
-    """Unified step config reader: prefer frontmatter, fallback to legacy."""
+    """Unified step config reader: prefer PipelineContext.steps, then frontmatter, then legacy fallback.
+
+    R78 C3: 优先从 PipelineContext.steps 读取。
+    """
+    # R78 C3: 优先走 Manager
+    try:
+        mgr = _ensure_pipeline_manager()
+        ctx_steps = mgr.get_step_config(round_name)
+        if ctx_steps:
+            return ctx_steps
+    except Exception:
+        pass
     pconfig = _PIPELINE_CONFIG.get(round_name, {})
     psteps = pconfig.get("steps", {})
     if psteps:
@@ -1862,6 +1893,14 @@ def _update_step_ack_state(sender_id: str, content: str) -> None:
                 ack_state["state"] = "ACKNOWLEDGED"
             logger.info("ACK updated: %s %s → %s (from %s)",
                         ack_key, old_state, ack_state["state"], sender_id[:12])
+            # R78 B3: 双写 Manager
+            try:
+                mgr = _ensure_pipeline_manager()
+                round_name = ack_key.split("/")[0]
+                step = ack_key.split("/")[1] if "/" in ack_key else ack_key
+                asyncio.ensure_future(mgr.set_ack_state(round_name, step, dict(ack_state)))
+            except Exception:
+                pass
 
 
 def _format_ack_status(ack_key: str) -> str:
@@ -2069,23 +2108,45 @@ async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
 
 
 def _format_pipeline_context(ctx: PipelineContext) -> str:
-    """格式化 PipelineContext 为人类可读文本。"""
+    """格式化 PipelineContext 为人类可读文本。R78 D2: 增强版 ACK 展示。"""
     from datetime import datetime
     lines = [
         f"📋 {ctx.round_name} [{ctx.task_kind.value}]",
         f"  状态: {ctx.status.value}",
         f"  Step: {ctx.current_step}/{ctx.total_steps}",
         f"  阶段: {ctx.current_phase}",
-        f"  活跃: {'✅' if ctx.is_active() else '❌'}",
-        f"  创建: {datetime.fromtimestamp(ctx.created_at).strftime('%m/%d %H:%M')}" if ctx.created_at else "  创建: -",
     ]
+    # R78 D2: ACK 状态逐 step 展示
+    if ctx.ack_states:
+        ack_parts = []
+        for i in range(1, ctx.total_steps + 1):
+            step = f"step{i}"
+            ack = ctx.ack_states.get(step, {})
+            state = ack.get("state", "")
+            role = ack.get("role_name", "")
+            if state == "ACKED":
+                ack_parts.append(f"step{i} ✅{role}")
+            elif state == "PENDING":
+                ack_parts.append(f"step{i} ⏳{role}")
+            elif state == "FAILED":
+                ack_parts.append(f"step{i} ❌{role}")
+            elif state in ("SENT", "DELIVERED", "IN_PROGRESS", "ACKNOWLEDGED"):
+                ack_parts.append(f"step{i} 🔄{role}")
+            else:
+                ack_parts.append(f"step{i} ⬜")
+        lines.append(f"  ACK: {' | '.join(ack_parts)}")
     if ctx.blocked_reason:
-        lines.append(f"  阻塞原因: {ctx.blocked_reason}")
+        lines.append(f"  阻塞: {ctx.blocked_reason}")
     if ctx.role_agent_map:
-        roles = ", ".join(f"{r}={a[:12]}" for r, a in ctx.role_agent_map.items())
-        lines.append(f"  成员: {roles}")
+        parts = []
+        for role, agents in ctx.role_agent_map.items():
+            agents_str = ",".join(a[:12] for a in agents)
+            parts.append(f"{role}={agents_str}")
+        lines.append(f"  成员: {'; '.join(parts)}")
     if ctx.workspace_id:
-        lines.append(f"  工作室: {ctx.workspace_id[:24]}")
+        lines.append(f"  工作室: {ctx.workspace_id}")
+    if ctx.created_at:
+        lines.append(f"  创建: {datetime.fromtimestamp(ctx.created_at).strftime('%m/%d %H:%M')}")
     return "\n".join(lines)
 
 
@@ -2103,25 +2164,37 @@ async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
     mgr = _ensure_pipeline_manager()
 
     if subcmd == "create":
-        # !pipeline create R77 dev [--steps 6]
+        # R78 D3: !pipeline create R78 dev [--steps 6] [--ws ws_id] [--pm-inbox inbox_id]
         round_name = parts[1] if len(parts) >= 2 else ""
         task_kind = parts[2] if len(parts) >= 3 else "dev"
         extra_args = parts[3] if len(parts) >= 4 else ""
         total_steps = 6
+        ws_id = ""
+        pm_inbox = ""
         if "--steps" in extra_args:
             try:
                 total_steps = int(extra_args.split("--steps")[1].strip().split()[0])
             except (IndexError, ValueError):
                 pass
+        if "--ws" in extra_args:
+            try:
+                ws_id = extra_args.split("--ws")[1].strip().split()[0]
+            except (IndexError, ValueError):
+                pass
+        if "--pm-inbox" in extra_args:
+            try:
+                pm_inbox = extra_args.split("--pm-inbox")[1].strip().split()[0]
+            except (IndexError, ValueError):
+                pass
         if not round_name:
-            return "❌ 用法: !pipeline create <round> <kind> [--steps N]"
+            return "❌ 用法: !pipeline create <round> <kind> [--steps N] [--ws id] [--pm-inbox id]"
         try:
             ctx = await mgr.create(
                 round_name=round_name,
                 task_kind=PipelineTaskKind(task_kind),
                 workspace_dir=Path(config.REPO_PATH) if hasattr(config, 'REPO_PATH') else Path("/opt/data/ws-bridge"),
-                workspace_id="",
-                pm_inbox_id="",
+                workspace_id=ws_id,
+                pm_inbox_id=pm_inbox,
                 total_steps=total_steps,
                 created_by=sender_id,
             )
@@ -2189,6 +2262,21 @@ async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
             return "❌ 用法: !pipeline cancel <round>"
         ok = await mgr.cancel(round_name)
         return f"🚫 {round_name} cancelled {'✅' if ok else '❌ not found'}"
+
+    elif subcmd == "resume":
+        # R78 D1: !pipeline resume R77 — 从历史恢复已归档管线
+        round_name = parts[1] if len(parts) >= 2 else ""
+        if not round_name:
+            return "❌ 用法: !pipeline resume <round>"
+        ctx = await mgr.restore_from_history(round_name)
+        if ctx is None:
+            return f"❌ {round_name} 不存在或已终态（COMPLETED/CANCELLED），不可恢复"
+        return (
+            f"✅ {round_name} 已恢复\n"
+            f"  状态: {ctx.status.value}\n"
+            f"  Step: {ctx.current_step}/{ctx.total_steps}\n"
+            f"  成员: {len(ctx.role_agent_map)} 个角色\n"
+        )
 
     elif subcmd == "history":
         entries = mgr.get_history(limit=10)
