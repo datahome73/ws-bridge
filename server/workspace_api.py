@@ -19,7 +19,7 @@ async def api_workspaces(request: web.Request) -> web.Response:
             "owner_name": w.owner_name,
             "state": w.state.value,
             "member_count": len(w.members),
-            "ack_count": len(w.closing_acks),
+            "ack_count": 0,
             "created_at": w.created_at,
             "last_active_at": w.last_active_at,
             "closed_at": w.closed_at,
