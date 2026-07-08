@@ -1,7 +1,7 @@
 # R83 产品需求 — Web 端 Inbox 化改造 🎯
 
-> **版本：** v1.0（初稿，待审核）
-> **状态：** 📝 草稿
+> **版本：** v1.0 ✅（项目负责人审核通过）
+> **状态：** ✅ 已审核
 > **产品经理：** 🧐 PM
 > **日期：** 2026-07-10
 > **本轮改动范围：** `server/templates.py`（CHAT_TEMPLATE JS）、`server/web_viewer.py`（路由+API）、`server/message_store.py`（可能）、`server/workspace_api.py`（可能）
