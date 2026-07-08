@@ -3,6 +3,7 @@
 > **审查人：** 🔍 审查工程师
 > **审查对象：** `083529b` feat(R78): 全局变量迁移补完 — 角色映射 + ACK 状态统一管理
 > **审查日期：** 2026-07-09
+> **重审日期：** 2026-07-09（修复 commit `cbaa7f8` 验证通过）
 > **改动统计：** 3 文件, +233/-18 行
 > **技术方案：** `docs/R78/R78-tech-plan.md`
 
@@ -10,13 +11,13 @@
 
 ## 0. 审查结论
 
-> 🔴 **退回 — 1 项 🔴 阻塞 + 2 项 🟡 + 2 项 💡**
+> 🟢 **通过 — 原始审查 1 项 🔴 已修复，2 项 🟡 + 2 项 💡 已确认非阻塞**
 >
 > | 级别 | 数量 | 说明 |
 > |:----:|:----:|:------|
-> | 🔴 阻塞 | 1 | B-1: `PipelineContext.from_dict()` `raw_role_map` NameError |
-> | 🟡 W 级 | 2 | W-1: `set_global_role_map()` 无锁保护 / W-2: `_step_ack_states` 未实际迁移 |
-> | 💡 建议 | 2 | S-1: `from_dict` 简化写法建议 / S-2: agent_card.py 循环 import 模式 |
+> | 🔴 阻塞 | 0 | B-1 已修复 ✅ |
+> | 🟡 W 级 | 2 | W-1: `set_global_role_map()` 无锁保护（GIL 安全）/ W-2: `_step_ack_states` 未实际迁移（Phase 4） |
+> | 💡 建议 | 2 | S-1: `from_dict` 写法 / S-2: agent_card.py 循环 import |
 
 ---
 
@@ -33,41 +34,23 @@
 
 ## 2. PipelineContext — role_agent_map 类型兼容
 
-### 🔴 2.1 B-1: `from_dict()` 中 `raw_role_map` NameError
+### ✅ 2.1 B-1: `from_dict()` 中 `raw_role_map` NameError — 已修复
 
-**代码位置：** `pipeline_context.py:186-191`
+**修复代码位置：** `pipeline_context.py:173-179`（commit `cbaa7f8`）
 
-```python
-# R78 A1: 兼容旧 JSON 格式（单值 str → 多值 list[str]）
-raw_role_map = d.get("role_agent_map", {}),   # ← kwarg, 非局部变量
-role_agent_map=(
-    {k: [v] for k, v in raw_role_map.items()}  # ← NameError
-    if raw_role_map and isinstance(next(iter(raw_role_map.values())), str)
-    else raw_role_map                           # ← NameError
-),
-```
+**原始问题：** `raw_role_map = d.get("role_agent_map", {}),` 为 `cls()` 关键字参数而非局部变量，后续表达式引用抛出 NameError。
 
-**根因分析：**
-
-| 问题 | 说明 |
-|:-----|:------|
-| `raw_role_map = d.get(...),` | 这是 `cls()` 调用的关键字参数 `raw_role_map=d.get(...)`，不是局部变量赋值 |
-| `raw_role_map.items()` 中的 `raw_role_map` | Python 函数调用参数在**调用者作用域**中求值——`raw_role_map` 不在 `from_dict` 的局部/外层作用域中，抛出 NameError |
-| 尾逗号 `,` | `kwarg=value,` 在函数调用中**不**将值变为元组——只是语法上的可选尾逗号 |
-
-**修复前行为：** 任何对 `PipelineContext.from_dict()` 的调用均抛出 `NameError: name 'raw_role_map' is not defined`。
-
-**修复：** 在 `cls()` 调用前声明为局部变量：
+**修复方案：** 将 `raw_role_map` 声明移至 `cls()` 调用前作为局部变量：
 
 ```python
 @classmethod
 def from_dict(cls, d: dict) -> "PipelineContext":
     # R78 A1: 兼容旧 JSON 格式（单值 str → 多值 list[str]）
-    raw = d.get("role_agent_map", {})
-    if raw and isinstance(next(iter(raw.values())), str):
-        role_agent_map = {k: [v] for k, v in raw.items()}
+    raw_role_map = d.get("role_agent_map", {})
+    if raw_role_map and isinstance(next(iter(raw_role_map.values())), str):
+        role_agent_map = {k: [v] for k, v in raw_role_map.items()}
     else:
-        role_agent_map = raw
+        role_agent_map = raw_role_map
     return cls(
         ...
         role_agent_map=role_agent_map,
@@ -75,13 +58,17 @@ def from_dict(cls, d: dict) -> "PipelineContext":
     )
 ```
 
-**实际测试验证（3 种场景全部 NameError）：**
+**验证结果（5/5 全通过）：**
 
 | 场景 | 预期 | 实际 | 状态 |
 |:-----|:-----|:-----|:----:|
-| 旧格式 `{'arch': 'ws_xxx'}` | → `{'arch': ['ws_xxx']}` | NameError | 🔴 |
-| 新格式 `{'arch': ['ws_xxx']}` | → 原样通过 | NameError | 🔴 |
-| 无 `role_agent_map` 字段 | → `{}` | NameError | 🔴 |
+| 旧格式 `{'arch': 'ws_xxx', 'dev': 'ws_yyy'}` | → `{'arch': ['ws_xxx'], 'dev': ['ws_yyy']}` | ✅ | ✅ |
+| 新格式 `{'arch': ['ws_xxx', 'ws_yyy']}` | → 原样通过 | ✅ | ✅ |
+| 无 `role_agent_map` 字段 | → `{}` | ✅ | ✅ |
+| 空 `{}` | → `{}` | ✅ | ✅ |
+| 混合空+非空 list | → 原样通过 | ✅ | ✅ |
+
+> **结论：** B-1 已修复 ✅
 
 ### ✅ 2.2 兼容逻辑本身（语法修复后正确）
 
@@ -293,25 +280,14 @@ asyncio.ensure_future(mgr.set_ack_state(round_name, step, dict(ack_state)))
 
 ## 10. 总结
 
-### 🔴 必须修复（B-1）
+### 🔴 已修复 — B-1
 
-`from_dict()` 的 `raw_role_map` NameError 是致命缺陷。**任何从持久化恢复上下文、`restore_from_history()`、`get_history()` 读取等路径都会崩溃。**
+`from_dict()` 的 `raw_role_map` NameError 已由 commit `cbaa7f8` 修复。修复方式：将 `raw_role_map` 定义移至 `cls()` 调用外作为局部变量。
 
-**修复预览（~8 行改动）：**
-```python
-@classmethod
-def from_dict(cls, d: dict) -> "PipelineContext":
-    raw = d.get("role_agent_map", {})
-    if raw and isinstance(next(iter(raw.values())), str):
-        role_agent_map = {k: [v] for k, v in raw.items()}
-    else:
-        role_agent_map = raw
-    return cls(
-        ...
-        role_agent_map=role_agent_map,
-        ...
-    )
-```
+实测验证 5/5 全通过：
+- 旧格式 str→list[str] ✅
+- 新格式 list[str] 原样通过 ✅
+- 空/缺失字段 → 默认 {} ✅
 
 ### ✅ 通过项摘要
 
@@ -324,6 +300,7 @@ def from_dict(cls, d: dict) -> "PipelineContext":
 | 5️⃣ 旧变量 DEPRECATED 标记 | ✅ 两处已标记 |
 | 6️⃣ Scope 合规 | ✅ 3 文件，零 scope creep |
 
-> **总体：🔴 退回 — 请修复 B-1（8 行修改）后重新提交审查**
+> **总体：🟢 通过 — B-1 已修复确认（commit `cbaa7f8`），2 项 🟡 + 2 项 💡 非阻塞**
 >
 > 审查完毕：2026-07-09 🔍 审查工程师
+> 重审签收：B-1 ✅ 通过
