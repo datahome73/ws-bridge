@@ -4827,31 +4827,6 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     },
 }
 
-# ── R81: Workspace self-management commands ───────────────────
-_ADMIN_COMMANDS.update({
-    "workspace_join": {
-        "handler": _cmd_workspace_join, "min_role": 2,
-        "usage": "!workspace_join [--workspace <ws_id>]",
-    },
-    "workspace_leave": {
-        "handler": _cmd_workspace_leave, "min_role": 2,
-        "usage": "!workspace_leave [--workspace <ws_id>]",
-    },
-    "workspace_add": {
-        "handler": _cmd_workspace_add, "min_role": 2,
-        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_remove": {
-        "handler": _cmd_workspace_remove, "min_role": 2,
-        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_list_members": {
-        "handler": _cmd_workspace_list_members, "min_role": 2,
-        "usage": "!workspace_list_members [--workspace <ws_id>]",
-    },
-})
-
-
 # ── R81: Workspace member self-management commands ──────────────
 
 
@@ -5042,6 +5017,31 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
         lines.append(f"  {status_dot} {name} ({member_id[:12]}...) {role_badge}")
 
     return "\n".join(lines)
+
+
+# ── R81: Workspace self-management commands ───────────────────
+_ADMIN_COMMANDS.update({
+    "workspace_join": {
+        "handler": _cmd_workspace_join, "min_role": 2,
+        "usage": "!workspace_join [--workspace <ws_id>]",
+    },
+    "workspace_leave": {
+        "handler": _cmd_workspace_leave, "min_role": 2,
+        "usage": "!workspace_leave [--workspace <ws_id>]",
+    },
+    "workspace_add": {
+        "handler": _cmd_workspace_add, "min_role": 2,
+        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_remove": {
+        "handler": _cmd_workspace_remove, "min_role": 2,
+        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_list_members": {
+        "handler": _cmd_workspace_list_members, "min_role": 2,
+        "usage": "!workspace_list_members [--workspace <ws_id>]",
+    },
+})
 
 
 async def _restore_pipeline_timers() -> None:
