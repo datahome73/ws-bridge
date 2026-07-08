@@ -11,14 +11,13 @@ DATA_DIR = os.environ.get("WS_DATA_DIR", "./data")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-from server.persistence import load_pairing_codes, load_approved_users, load_web_bind_codes, load_web_sessions, load_agent_channels, load_api_keys
+from server.persistence import load_pairing_codes, load_approved_users, load_web_bind_codes, load_web_sessions, load_api_keys
 import server.config as cfg
 
 load_pairing_codes(cfg.DATA_DIR)
 load_approved_users(cfg.DATA_DIR)
 load_web_bind_codes(cfg.DATA_DIR)
 load_web_sessions(cfg.DATA_DIR)
-load_agent_channels(cfg.DATA_DIR)
 load_api_keys(cfg.DATA_DIR)  # R72: API Key 存储
 
 from server.web_viewer import setup_routes
