@@ -10,6 +10,11 @@ Features:
   - Thread-safe message deduplication via seen_ids
   - ACK waiting + retry on timeout
   - Offline catchup via last_seen_ts (persisted to JSON file)
+  - Inbox message protocol (R82+):
+    All received messages are inbox messages.
+    Reply = send_message(content, channel=f"_inbox:{sender_agent_id}")
+    sender_agent_id from msg.agent_id or msg.from_agent.
+    See docs/inbox-message-protocol.md for details.
 """
 
 from __future__ import annotations
