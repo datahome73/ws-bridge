@@ -3035,7 +3035,12 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if not output_ref:
         return "❌ 缺少 --output <sha>，且无法自动检测最新 commit"
 
-    sender_ch = p.LOBBY
+    # ── R84 FIX: 用发送者所在的工作区取代 lobby ──
+    active_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
+    active_ws = [w for w in active_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
+    if not active_ws:
+        return "❌ 请在工作区中使用此命令（你不在任何活跃工作室中）"
+    sender_ch = active_ws[0].id
     ws_obj = ws_mod.get_workspace(sender_ch)
     if not ws_obj:
         return "❌ 请在工作区中使用此命令"
@@ -6870,8 +6875,14 @@ async def handler(ws):
             elif msg_type == "approve_web" and agent_id:
                 users = auth.get_users()
                 if users.get(agent_id, {}).get("role") == "admin":
-                    logger.info("Web viewer bind code rejected: deprecated feature removed in R83")
-                    await _send(ws, {"type": "error", "error": "bind_code_deprecated"})
+                    code = msg.get("code", "").strip().upper()
+                    name = msg.get("name", "大宏")
+                    result = auth.approve_web_bind_code(code, name)
+                    if result.get("type") == "approve_ok":
+                        persistence.save_web_bind_codes(config.DATA_DIR)
+                        persistence.save_web_sessions(config.DATA_DIR)
+                        logger.info("Web viewer '%s' approved via WS", name)
+                    await _send(ws, result)
 
             elif msg_type == p.MSG_TOKEN_SET_MODE and agent_id:
                 # Admin only: set token/free mode
