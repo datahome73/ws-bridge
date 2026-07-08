@@ -9,7 +9,6 @@ from pathlib import Path
 
 _pairing_codes: dict = {}
 _approved_users: dict = {}
-_web_bind_codes: dict = {}
 _web_sessions: dict = {}
 
 _lock = threading.Lock()
@@ -73,17 +72,7 @@ def set_approved_users(users: dict) -> None:
         _approved_users = dict(users)
 
 
-# ── Web viewer bind codes & sessions ──────────────────────────────
-
-
-def load_web_bind_codes(data_dir: Path) -> None:
-    global _web_bind_codes
-    _web_bind_codes = _load_json(data_dir / "_web_bind_codes.json")
-
-
-def save_web_bind_codes(data_dir: Path) -> None:
-    with _lock:
-        _save_json_atomic(data_dir / "_web_bind_codes.json", _web_bind_codes)
+# ── Web viewer sessions ──────────────────────────────────────────────
 
 
 def load_web_sessions(data_dir: Path) -> None:
@@ -94,17 +83,6 @@ def load_web_sessions(data_dir: Path) -> None:
 def save_web_sessions(data_dir: Path) -> None:
     with _lock:
         _save_json_atomic(data_dir / "_web_sessions.json", _web_sessions)
-
-
-def get_web_bind_codes() -> dict:
-    with _lock:
-        return dict(_web_bind_codes)
-
-
-def set_web_bind_codes(codes: dict) -> None:
-    global _web_bind_codes
-    with _lock:
-        _web_bind_codes = dict(codes)
 
 
 def get_web_sessions() -> dict:

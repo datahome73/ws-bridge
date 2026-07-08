@@ -16,10 +16,10 @@ from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
 from .persistence import (
     load_pairing_codes, load_approved_users,
-    load_web_bind_codes, load_web_sessions,
+    load_web_sessions,
     load_api_keys,
     save_pairing_codes, save_approved_users,
-    save_web_bind_codes, save_web_sessions,
+    save_web_sessions,
 )
 from .web_viewer import setup_routes, _ws_clients, write_chat_log
 import shared.protocol as p
@@ -210,14 +210,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg_type == "approve_web" and agent_id:
                 users = (await _get_users())
                 if users.get(agent_id, {}).get("role") == "admin":
-                    from . import auth as _auth
-                    code = data.get("code", "").strip().upper()
-                    name = data.get("name", "大宏")
-                    result = _auth.approve_web_bind_code(code, name)
-                    if result.get("type") == "approve_ok":
-                        save_web_bind_codes(DATA_DIR)
-                        save_web_sessions(DATA_DIR)
-                    await ws.send_json(result)
+                    logger.warning("Web viewer bind code rejected: deprecated feature removed in R83")
+                    await ws.send_json({"type": "error", "error": "bind_code_deprecated"})
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
@@ -788,7 +782,6 @@ def main():
     # Load persisted data
     load_pairing_codes(DATA_DIR)
     load_approved_users(DATA_DIR)
-    load_web_bind_codes(DATA_DIR)
     load_web_sessions(DATA_DIR)
     # R82: removed load_agent_channels
     load_api_keys(DATA_DIR)  # R72: API Key 存储

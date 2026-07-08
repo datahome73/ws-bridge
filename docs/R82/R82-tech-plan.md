@@ -1,671 +1,490 @@
 # R82 技术方案 — Inbox-Only 架构重构 🏗️
 
 > **版本：** v1.0
-> **状态：** ✅ 技术方案
-> **架构师：** 👷 架构师
-> **日期：** 2026-07-10
-> **基于需求：** docs/R82/R82-product-requirements.md v1.0 ✅
-> **基线：** `7698241`（dev）
-> **改动范围：** `server/handler.py` `shared/protocol.py` `server/workspace.py` `server/persistence.py` `server/config.py`
+> **状态：** ✅ 已审核通过
+> **架构师：** 👷 Architect
+> **日期：** 2026-07-08
+> **基于需求文档：** docs/R82/R82-product-requirements.md v1.0 ✅
+> **基线：** `7698241` (R81 origin/dev HEAD)
+> **改动范围：** `server/handler.py`、`shared/protocol.py`、`server/workspace.py`、`server/persistence.py`、`server/config.py`
+> **不动：** `clients/`、`server/web_viewer.py`、`server/auth.py`、`server/agent_card.py`
 
 ---
 
 ## 目录
 
-1. [删除路径 vs 保留路径决策树](#1-删除路径-vs-保留路径决策树)
-2. [精确改动点（函数名/行号）](#2-精确改动点函数名行号)
-3. [handle_broadcast 简化](#3-handle_broadcast-简化)
-4. [inbox:server 查询路由](#4-inboxserver-查询路由)
-5. [工作室元数据模型](#5-工作室元数据模型)
-6. [1-0 配置与协议常量清理](#6-配置与协议常量清理)
-7. [改动汇总](#7-改动汇总)
-8. [兼容性分析](#8-兼容性分析)
-9. [风险与缓解](#9-风险与缓解)
+1. [精确改动点](#1-精确改动点)
+2. [删除路径 / 保留路径决策树](#2-删除路径--保留路径决策树)
+3. [工作室时间切片模型](#3-工作室时间切片模型)
+4. [兼容性分析](#4-兼容性分析)
+5. [风险与缓解](#5-风险与缓解)
+6. [改动统计](#6-改动统计)
 
 ---
 
-## 1. 删除路径 vs 保留路径决策树
+## 1. 精确改动点
 
-### 1.1 决策树总览
+### 1.1 handler.py — 改动点汇总
 
-```
-[函数/机制] → 保留？删除？简化？
-```
+#### 🅿️0-1: 删除 `_broadcast_active_channel()` 函数
+- **位置：** `server/handler.py` L5725-5778（~53 行）
+- **描述：** 整个函数删除。该函数向工作室所有成员发送 `MSG_SET_ACTIVE_CHANNEL` 报文，等待 ACK 超时。inbox-only 架构下不再需要 bot 切换频道。
+- **连带删除：**
+  - `_channel_ack_state` 字典（L138, ~20 行引用）
+  - `_channel_ack_timeout()` 函数（L5984-6021, ~37 行）
+  - `_resolve_ws_by_ack_task_id()` 函数（L6024-6028, ~5 行）
 
-```
-handle_broadcast
-├── inbox 消息 (channel.startswith("_inbox:"))
-│   ├── 定向投递给目标 agent          → ✅ 保留（核心功能）
-│   └── filter: _is_nonsense/duplicate → ❌ 删除（inbox 直达，不经滤网）
-├── lobby 消息 (channel == "lobby")
-│   ├── 从 admin/bot → lobby          → ⚠️ 简化（只投给真人 Web 端，不投 bot 连接）
-│   └── filter 滤网                    → ⚠️ 简化（减少 → 只保留防刷限流）
-├── admin 消息 (channel == "_admin")
-│   ├── ! 命令路由                     → ✅ 保留（真人通过 admin 执行管理）
-│   └── 进度通知                       → ✅ 保留（给 Web 端看）
-├── workspace 消息 (channel startswith "ws:")
-│   ├── 工作室消息路由                  → ❌ 删除（bot 不走工作室频道）
-│   └── 工作室 ACL 守卫                 → ❌ 删除
-└── channel 回退逻辑 (auto-resolve)    → ❌ 删除（bot 不再需要频道推断）
+#### 🅿️0-2: 删除 `_broadcast_active_channel()` 的 8 个调用点
 
-_broadcast_active_channel()
-├── _cmd_create_workspace 调用         → ❌ 删除
-├── _cmd_rollcall / _cmd_rollcall_role → ❌ 删除
-├── _cmd_pipeline_start                → ❌ 删除
-├── !activate_pipeline                 → ❌ 删除
-├── _cmd_step_handoff                  → ❌ 删除
-├── admin rollcall                     → ❌ 删除
-└── _cmd_pipeline_shrink               → ❌ 删除
+| # | 行号 | 所在函数 | 当前用途 | 删除方式 |
+|:-:|:----:|:---------|:---------|:---------|
+| 1 | **L696** | `_cmd_create_workspace` | 创建工作室后广播频道切换 | **删除** — 创建工作室后不再频道切换 |
+| 2 | **L1100** | `_cmd_rollcall`（点名） | 点名后广播频道切换 | **删除** — 点名通过 inbox 通知，不再切换频道 |
+| 3 | **L1134** | `_cmd_rollcall`（下一环节） | 下一环节广播 | **删除** — 同上 |
+| 4 | **L2701** | `_cmd_pipeline_start` / F-20 修复 | 管线启动广播 | **删除** — 改用 inbox 派活 |
+| 5 | **L2858** | pipeline_start 后续 | 同上 | **删除** |
+| 6 | **L3989** | `_cmd_close_workspace` | 关闭后 lobby 广播 | **删除** — 不需要广播频道切换 |
+| 7 | **L4170** | 重置/恢复 | 频道恢复广播 | **删除** |
+| 8 | **L5719** | `_resolve_ws_routing` | 频道解析回退 | **删除** |
 
-persistence.get/set_agent_channel()
-├── register 流程设置 inbox            → ❌ 删除（不再维护活跃频道）
-├── handle_agent_card_register 频道切换 → ❌ 删除
-├── _cmd_create_workspace 绑定         → ❌ 删除
-├── _cmd_step_complete 推断            → ❌ 删除
-├── _cmd_workspace_join 切换           → ❌ 删除
-└── handle_broadcast 频道回退          → ❌ 删除
+#### 🅿️0-3: 简化 `handle_broadcast()` — Inbox-only 路由
 
-protocol.py 频道相关常量
-├── MSG_SET_ACTIVE_CHANNEL             → ❌ 删除
-├── MSG_CHANNEL_UPDATED               → ❌ 删除
-├── FIELD_ACTIVE_CHANNEL               → ❌ 删除
-├── LOBBY                              → ⚠️ 保留（admin/Web 端仍需）
-├── ADMIN_CHANNEL                      → ⚠️ 保留
-└── INBOX_CHANNEL_PREFIX               → ✅ 保留（核心）
+- **位置：** `server/handler.py` L5141-5600（~460 行 → 精简至 ~250 行）
 
-workspace.py
-├── Workspace dataclass (频道模型)      → ⚠️ 重写为元数据模型
-├── create_workspace (创建频道)        → ❌ 删除频道创建逻辑
-├── close_workspace (关闭频道)         → ⚠️ 简化为时间戳标记
-├── add_member / remove_member         → ⚠️ 保留（元数据记录成员）
-└── get_workspace / get_all            → ⚠️ 保留
-```
-
-### 1.2 按文件统计
-
-| 文件 | 删除 | 保留 | 简化 |
-|:-----|:----|:-----|:-----|
-| `server/handler.py` | ~-210 行 | ~+50 行（inbox:server） | ~-90 行 |
-| `shared/protocol.py` | ~-10 行 | — | — |
-| `server/workspace.py` | ~-50 行 | ~+30 行 | ~+50 行 |
-| `server/persistence.py` | ~-15 行 | ~+30 行 | — |
-| `server/config.py` | ~-5 行 | — | — |
-| **合计** | **~-290 行** | **~+110 行** | **净删 ~-180 行** |
-
----
-
-## 2. 精确改动点（函数名/行号）
-
-### 2.1 handler.py — 按改动类型分组
-
-#### 🗑️ 整函数删除
-
-| 函数 | 行号 | 长度 | 原因 | 替代 |
-|:-----|:----:|:----:|:-----|:-----|
-| `_broadcast_active_channel()` | L5456-5510 | ~55 行 | MSG_SET_ACTIVE_CHANNEL 整机制删除 | inbox 直发 Step 任务 |
-| `MSG_SET_ACTIVE_CHANNEL` handler | L6526 | ~3 行 | ws_handler 中的处理分支 | 无 |
-| `_is_nonsense()` | — | ~20 行 | lobby 滤网，bot 不读 lobby | 无 |
-| `_is_duplicate()` | — | ~15 行 | inbox 直达，不需要去重 | 无 |
-
-#### 🗑️ 函数内代码块删除
-
-| 函数 | 行号 | 删除内容 |
-|:-----|:----:|:---------|
-| `handle_broadcast()` | L4890 | `channel = msg.get(...) or persistence.get_agent_channel(...) or p.LOBBY` → 直接取 `msg.get(p.FIELD_CHANNEL, "")` |
-| `handle_broadcast()` | L4893-4894 | 注册频道限制（bot 注册后直接 inbox） |
-| `handle_broadcast()` | L4909-4915 | nonsense/duplicate 过滤（inbox 消息跳过） |
-| `handle_broadcast()` | L4940-4970 | lobby/workspace 路由中投给 bot 连接的分支 |
-| `handle_broadcast()` | L5147-5170 | workspace 消息的 admin/bot 分发逻辑 |
-| `_cmd_create_workspace()` | L676-677 | `asyncio.create_task(_broadcast_active_channel(ws_id))` |
-| `_cmd_create_workspace()` | L663-665 | `persistence.set_agent_channel(sender_id, ws_id)` 活跃频道绑定 |
-| `_cmd_rollcall()` | L1081 | `ack_result = await _broadcast_active_channel(sender_ch)` |
-| `_cmd_rollcall_role()` | L1115 | `ack_result = await _broadcast_active_channel(sender_ch)` |
-| `_cmd_pipeline_start()` | L2680-2682 | `await _broadcast_active_channel(ws_id)` |
-| `!activate_pipeline` handler | L2800-2801 | `switch_count = await _broadcast_active_channel(ws_id)` |
-| `_cmd_step_handoff()` | L4112-4113 | `switch_count = await _broadcast_active_channel(ws_id)` |
-| `admin rollcall` | L5449-5450 | `ack_result = await _broadcast_active_channel(target_ch)` |
-| `handle_register()` | L254-255 | `persistence.set_agent_channel(agent_id, inbox_ch)` |
-| `handle_agent_card_register()` | L393 | `persistence.set_agent_channel(agent_id, p.LOBBY)`（R79 追加） |
-| `_cmd_workspace_join()` | — | `persistence.set_agent_channel(sender_id, ws_id)`（R81 新增） |
-| 各 `sender_ch = persistence.get_agent_channel(...)` | 多处 | 替换为 `p.LOBBY` 常量或 workspace 元数据查询 |
-
-#### ✨ 新增代码
-
-| 函数 | 行数 | 说明 |
-|:-----|:----:|:------|
-| `_detect_server_query()` | ~15 | 检测 `channel == "_inbox:server"` 的查询命令 |
-| `_handle_server_query()` | ~30 | 执行查询命令并回复到发送者 inbox |
-| `handle_broadcast` 中 inbox 跳过过滤 | ~5 | 在 inbox 分支开头跳过 nonsense/duplicate |
-
-#### 🔧 简化（保留但精简）
-
-| 函数 | 改动 |
-|:-----|:------|
-| `handle_broadcast()` lobby 分支 | 删除投递给 bot 连接的代码，只保留投递给 Web viewer + 日志持久化 |
-| `handle_broadcast()` workspace 分支 | 删除投递给 bot 连接的代码，只保留 admin/Web viewer |
-| `_SILENT_PREFIXES` | 保留（admin 频道仍需要），inbox 路径跳过 |
-
-### 2.2 protocol.py — 删除的常量
-
-| 常量 | 行号 | 原因 |
-|:-----|:----:|:------|
-| `MSG_SET_ACTIVE_CHANNEL = "set_active_channel"` | L83 | 频道切换机制删除 |
-| `MSG_CHANNEL_UPDATED = "channel_updated"` | L84 | 频道切换确认删除 |
-| `FIELD_ACTIVE_CHANNEL = "active_channel"` | L150 | 活跃频道字段删除 |
-
-### 2.3 persistence.py — 删除的函数
-
-| 函数 | 行号 | 原因 |
-|:-----|:----:|:------|
-| `get_agent_channel()` | ~L155 | 活跃频道持久化不需要 |
-| `set_agent_channel()` | 相邻行 | 同上 |
-| `save_agent_channels()` | 相邻行 | 同上 |
-| `_agent_channels` 字典 | 模块级 | 活跃频道全局变量删除 |
-
-### 2.4 config.py — 删除的配置
-
-| 配置 | 原因 |
-|:-----|:------|
-| `BROADCAST_ADMINS` | 不再需要区分 admin 广播（bot 只看 inbox） |
-
-### 2.5 workspace.py — 改动
-
-**Workspace dataclass 保持结构**（元数据仍然需要 owner_id、members、timestamps），但**删除**：
-
-- `token_ring` 字段（R10 令牌环 — 通道消息流控，bot 不再需要）
-- 与频道广播相关的逻辑
-
-**新增**：
-- `workflow_url` 字段（WORK_PLAN 链接）
-- `pipeline_round` 字段（关联的管线轮次名）
-- 时间切片查询 API
-
----
-
-## 3. handle_broadcast 简化
-
-### 3.1 当前流程（~200 行路由代码）
-
-```
-handle_broadcast(ws, sender_id, msg)
-  ├── (1) 频道推断: channel = msg.channel or persistence.get_agent_channel() or LOBBY
-  ├── (2) R23: 注册频道过滤
-  ├── (3) R12: 限流检查
-  ├── (4) nonsense/duplicate/SILENT_PREFIXES 过滤
-  ├── (5) R57 rollcall ACK hook
-  ├── (6) R63 rollcall auto-register
-  ├── (7) R63 Phase 4: step ACK 检测
-  ├── (8) 📢 admin-only 广播检查
-  ├── (9) 解析 @mentions → task 检测
-  ├── (10) ! 命令路由
-  ├── (11) _admin 频道 intercept
-  ├── (12) inbox 频道 intercept → 投递给目标 agent
-  ├── (13) 未知频道回退逻辑
-  ├── (14) workspace 频道路由 (ACL + 成员分发)
-  ├── (15) lobby 频道投递
-  ├── (16) 写入 3 个持久化 + 内容审核
-  └── (17) 返回 ack
-```
-
-### 3.2 改造后流程（~120 行）
-
-```
-handle_broadcast(ws, sender_id, msg)
-  ├── (1) 获取 channel: msg.get("channel", "")
-  │        ← 删除 get_agent_channel 回退（bot 必须显式指定 channel）
-  ├── (2) inbox 快速通道 (channel.startswith("_inbox:"))
-  │     ├── _inbox:server → _handle_server_query()（查询命令）
-  │     ├── 其他 _inbox:xxx → 直投目标 agent
-  │     └── 跳过限流、nonsense、duplicate、SILENT_PREFIXES
-  │         ← 删除 ~30 行过滤代码
-  ├── (3) R12: 限流检查（仅 lobby/admin）
-  ├── (4) ! 命令路由（admin 频道保持）
-  ├── (5) _admin 频道 intercept（保留，投递 Web viewer）
-  ├── (6) lobby 频道（简化 — 只投 Web viewer，不投 bot 连接）
-  ├── (7) 写入持久化 + 日志
-  └── (8) 返回 ack
-```
-
-**关键变化：**
-
-| 变化 | 旧代码 | 新代码 |
-|:-----|:-------|:-------|
-| 频道推断 | `msg.channel or get_agent_channel() or LOBBY` | `msg.get("channel", "")` — bot 必须显式指定 |
-| inbox 过滤 | 经过 nonsense/duplicate 过滤 | **直达**，跳过所有滤网 |
-| lobby 投递 | 投给所有 bot + Web viewer | 只投 Web viewer |
-| workspace 投递 | 投给 workspace 成员 + admin | 只投 admin/Web viewer |
-| rollcall/step ACK | 嵌入广播流程 | 删除（不再需要） |
-
-### 3.3 Inbox 快速通道伪代码
-
+**改动 3a — 删除 channel 回退到 `get_agent_channel`（L5159）：**
 ```python
-# 在 handle_broadcast 最开头（限流之前）
-
-# R82 A1: Inbox 快速通道 — 跳过所有过滤和路由
-channel = msg.get(p.FIELD_CHANNEL, "")
-if channel.startswith(p.INBOX_CHANNEL_PREFIX):
-    # _inbox:server → 查询命令
-    if channel == f"{p.INBOX_CHANNEL_PREFIX}server":
-        await _handle_server_query(ws, sender_id, content)
-        return
-    
-    # 目标 inbox → 直投目标 agent
-    owner_id = persistence.resolve_inbox_owner(channel)
-    if not owner_id:
-        await _send(ws, {"type": "error", "error": "❌ 无效的收件箱通道"})
-        return
-    
-    # 投递给目标 agent（单播）
-    sent = 0
-    for conn in list(_connections.get(owner_id, set())):
-        try:
-            payload = json.dumps({
-                "type": "broadcast", "channel": channel,
-                "from_name": sender_name, "agent_id": sender_id,
-                "from": sender_name, "from_agent": sender_id,
-                "content": content, "ts": time.time(),
-            })
-            if hasattr(conn, "send_str"):
-                await conn.send_str(payload)
-            elif hasattr(conn, "send"):
-                await conn.send(payload)
-            sent += 1
-        except Exception:
-            pass
-    
-    # 持久化并返回
-    write_chat_log(sender_name, content, channel=channel)
-    ms.save_message(...)
-    await _send(ws, {"type": "ack", "channel": channel, "sent": sent, "to": owner_id})
-    return
+# 旧
+channel = msg.get(p.FIELD_CHANNEL) or persistence.get_agent_channel(sender_id) or p.LOBBY
+# 新
+channel = msg.get(p.FIELD_CHANNEL) or p.LOBBY
 ```
+- 不再需要 `get_agent_channel()` 回退 — bot 不维护活跃频道
+
+**改动 3b — 保留 📢/📋/@ 大厅路由（L5482-5551），但 bot 不接收：**
+- 大厅路由**保留给真人**，改动点：移除 admin 之外的 bot 从大厅接收消息
+- 在 L5505-5546 的 `targets` 构建中，排除非 admin bot（使用 `_connections` 但只路由给 admin/真人）
+- `_classify_lobby_message()` 函数保留不动
+
+**改动 3c — 工作室（workspace）频道路由（L5363-5481）简化：**
+- 当前：L5363-5481 路由到工作室 members + admin
+- 改为：工作室消息只路由给**真人**（即 `_connections` 中 role=admin 或非 bot 的 agent_id）
+- Bot 不再接收工作室频道广播
+- 工作室频道本身保留（真人仍需在里面聊天）
+
+**改动 3d — Inbox 通道 intercept 保持不变（L5277-5313）：**
+- `_inbox:xxx` 的完整路由逻辑**保留不动**
+- 这是 inbox-only 架构的核心通道 — 0 改动
+- 仅补充：移除对 `get_agent_channel` 的依赖（inbox 路由已不依赖）
+
+**改动 3e — 删除或简化 `_is_nonsense` / `_is_duplicate` 在 inbox 路径上的判断：**
+- 当前：L5179-5185 对所有非 `!` 消息进行 nonsense/duplicate 过滤
+- 改为：inbox 通道消息跳过 nonsense/duplicate 过滤（L5277 inbox 分支已 return，不受影响 ✅）
+- 非 inbox 消息仍保留过滤（给真人用）
+
+**改动 3f — 删除 R63 Phase 3 的 workspace channel rollcall ACK（L5208-5212）：**
+- `if channel.startswith(p.WORKSPACE_ID_PREFIX) or channel.startswith("ws:")` 的分支
+- 该分支依赖 workspace 频道模型，inbox-only 后不再触发
+- **直接删除** L5206-5212 的 `_handle_rollcall_ack` 调用
+
+**改动 3g — 删除 silent/noise 过滤（L5188-5190）：**
+- `_SILENT_PREFIXES` 过滤是频道污染补丁
+- 删除 L5188-5190 的整个过滤块
+- `_SILENT_PREFIXES` 元组（L32-40）保留（被 Admin 频道 `_persist_broadcast` 等外部路径引用）
+
+#### 🅿️1-1: 删除 `set_active_channel` admin 命令
+
+- **位置：** `server/__main__.py` L390-404
+- **描述：** 管理员通过 WebSocket 协议设置 agent 活跃频道的功能。inbox-only 后废弃。
+- **删除方式：** 删除 L390-404 整个 elif 分支。
+- **注意：** 不影响 `MSG_ADMIN_REQUEST`（L406+）和其他消息类型处理。
+
+#### 🅿️1-2: 删除注册流程中的活跃频道设置
+
+- **位置：** `server/handler.py` L391-396（`handle_agent_card_register` 内）
+- **当前代码：**
+  ```python
+  persistence.set_agent_channel(agent_id, p.LOBBY)
+  await _send(ws, {
+      "type": p.MSG_SET_ACTIVE_CHANNEL,
+      p.FIELD_CHANNEL: p.LOBBY,
+  })
+  ```
+- **删除方式：** 删除 L391-396 整个代码块。注册后 bot 不再被切换到 lobby 频道。
+
+#### 🅿️1-3: 删除 `_cmd_create_workspace` 中的活跃频道绑定
+
+- **位置：** `server/handler.py` L682-684
+- **当前代码：**
+  ```python
+  persistence.set_agent_channel(sender_id, ws_id)
+  persistence.save_agent_channels(config.DATA_DIR)
+  ```
+- **删除方式：** 删除 L682-684，创建工作室不再自动切换发送者的活跃频道。
+
+#### 🅿️1-4: 删除欢迎消息中的活跃频道查询
+
+- **位置：** `server/handler.py` L368
+- **当前代码：**
+  ```python
+  target_ch = persistence.get_agent_channel(agent_id) or p.LOBBY
+  ```
+- **改为：** 直接使用 `p.LOBBY` 而非查询活跃频道。欢迎消息始终发到大厅（给真人看）。
 
 ---
 
-## 4. inbox:server 查询路由
+### 1.2 persistence.py — 改动点
 
-### 4.1 路由规则
+#### 🅿️0-4: 删除活跃频道相关代码
 
-**入口：** `handle_broadcast` 中 `channel == "_inbox:server"` 时调用
+| # | 行号 | 函数/变量 | 删除方式 |
+|:-:|:----:|:----------|:---------|
+| 1 | **L126** | `_agent_active_channels: dict[str, str]` | 删除整个字典 |
+| 2 | **L129-131** | `load_agent_channels()` | 删除整个函数 |
+| 3 | **L134-136** | `save_agent_channels()` | 删除整个函数 |
+| 4 | **L139-141** | `set_agent_channel()` | 删除整个函数 |
+| 5 | **L144-146** | `get_agent_channel()` | 删除整个函数 |
+| 6 | **L149-151** | `reset_agent_channel()` | 删除整个函数 |
 
-**报文格式：**
+- **连带删除引用：**
+  - `server/handler.py` 中所有 `persistence.get_agent_channel()` 调用（L205, L368, L5159, L640 等）
+  - `server/handler.py` 中所有 `persistence.set_agent_channel()` 调用（L393, L683, L5749 等）
+  - `server/handler.py` 中所有 `persistence.save_agent_channels()` 调用（L394, L684, L5760 等）
+  - `server/__main__.py` L397-399 引用
 
-```
-Bot → Server:
-{
-  "type": "message",
-  "channel": "_inbox:server",
-  "content": "!agent_card list",
-  "from_name": "架构师",
-  "agent_id": "ws_xxx",
-  "id": "...",
-  "ts": ...
-}
+#### 🅿️1-5: 新增工作室元数据持久化（R82-B）
 
-Server → Bot (回复到 Bot 的 inbox):
-{
-  "type": "broadcast",
-  "channel": "_inbox:ws_xxx",
-  "from_name": "系统",
-  "agent_id": "_system",
-  "content": "<查询结果文本>",
-  "ts": ...
-}
-```
+- **位置：** `server/persistence.py` — 新增 `workspace_store.py` 或追加到现有函数
 
-### 4.2 实现
-
+新增函数：
 ```python
-async def _handle_server_query(ws, sender_id: str, content: str) -> None:
-    """处理发往 _inbox:server 的查询命令。
-    
-    识别以 ! 开头的命令，执行后回复到发送者的 inbox。
-    不广播到 admin/其他 bot。
-    """
-    if not content.startswith("!"):
-        # 非命令消息 → 静默忽略（不做任何处理）
-        return
-    
-    sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-    reply_ch = persistence.get_inbox_channel(sender_id)
-    if not reply_ch:
-        logger.warning("R82: Cannot reply to %s — no inbox channel", sender_id[:12])
-        return
-    
-    # 解析命令
-    parts = content.strip().split(maxsplit=1)
-    cmd = parts[0].lower() if parts else ""
-    params_str = parts[1] if len(parts) > 1 else ""
-    
-    reply_text = ""
-    
-    if cmd == "!agent_card":
-        sub_parts = params_str.split(maxsplit=1)
-        sub_cmd = sub_parts[0] if sub_parts else ""
-        if sub_cmd == "list":
-            cards = ac_mod.get_all_cards()
-            lines = [f"📇 Agent Cards ({len(cards)}):"]
-            for aid, card in sorted(cards.items()):
-                name = card.get("display_name", aid[:12])
-                roles = ", ".join(card.get("pipeline_roles", []))
-                status = card.get("status", "offline")
-                lines.append(f"  {name} ({aid[:12]}...) [{status}] 角色: {roles}")
-            reply_text = "\n".join(lines)
-        else:
-            reply_text = f"❌ 未知子命令: !agent_card {sub_cmd}"
-    
-    elif cmd == "!pipeline_status":
-        round_name = params_str.strip()
-        if round_name:
-            mgr = _ensure_pipeline_manager()
-            ctx = mgr.get(round_name)
-            if ctx:
-                reply_text = _format_pipeline_context(ctx)
-            else:
-                reply_text = f"❌ 管线 {round_name} 不存在"
-        else:
-            mgr = _ensure_pipeline_manager()
-            active = mgr.get_all_active()
-            if active:
-                lines = ["📋 活跃管线:"]
-                for ctx in sorted(active, key=lambda c: c.round_name):
-                    lines.append(f"  {ctx.round_name} [{ctx.task_kind.value}] {ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
-                reply_text = "\n".join(lines)
-            else:
-                reply_text = "📋 当前无活跃管线"
-    
-    elif cmd == "!list_workspaces":
-        ws_list = ws_mod.get_all_workspaces()
-        if ws_list:
-            lines = [f"📋 工作区 ({len(ws_list)}):"]
-            for ws in ws_list:
-                state = ws.state.value
-                lines.append(f"  {ws.id} '{ws.name}' [{state}] members={len(ws.members)}")
-            reply_text = "\n".join(lines)
-        else:
-            reply_text = "📋 当前无工作区"
-    
-    elif cmd == "!my_id":
-        reply_text = f"🆔 你的 agent_id: {sender_id}"
-    
-    elif cmd == "!help":
-        reply_text = "📖 可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
-    
-    else:
-        reply_text = f"❌ 未知命令: {cmd}\n可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
-    
-    if not reply_text:
-        return
-    
-    # 回复到发送者的 inbox
-    try:
-        await _broadcast_to_channel(reply_ch, {
-            "type": "broadcast", "channel": reply_ch,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-            "content": reply_text, "ts": time.time(),
-        })
-        logger.info("R82: Replied to %s via %s for '%s'", sender_id[:12], reply_ch, content[:40])
-    except Exception as e:
-        logger.warning("R82: Failed to reply to %s: %s", sender_id[:12], e)
+# 工作室元数据存储（时间切片模型）
+_workspace_meta: dict[str, dict] = {}
+
+def save_workspace_meta(data_dir: Path, meta: dict) -> None:
+    """持久化工作室元数据。"""
+    ...
+
+def load_workspace_meta(data_dir: Path) -> dict:
+    """加载所有工作室元数据。"""
+    ...
+
+def get_workspace_meta(ws_id: str) -> dict | None:
+    """获取单个工作室元数据。"""
+    ...
 ```
-
-### 4.3 查询命令清单（v1）
-
-| 命令 | 参数 | 回复内容 |
-|:-----|:------|:---------|
-| `!agent_card list` | — | 所有 Agent Card（名字 + id + 角色 + 状态） |
-| `!pipeline_status` | [R{N}] | 无参数 → 活跃管线列表；有参数 → 指定管线详情 |
-| `!list_workspaces` | — | 活跃工作区列表 |
-| `!my_id` | — | 自己的 agent_id |
-| `!help` | — | 可用命令列表 |
 
 ---
 
-## 5. 工作室元数据模型
+### 1.3 protocol.py — 改动点
 
-### 5.1 Workspace dataclass 改造
+#### 🅿️0-5: 删除频道切换消息常量
+
+| # | 行号 | 常量 | 删除方式 |
+|:-:|:----:|:-----|:---------|
+| 1 | **L82-84** | `MSG_SET_ACTIVE_CHANNEL` | 删除 L82-84 整行 |
+| 2 | **L84** | `MSG_CHANNEL_UPDATED` | 删除该行 |
+| 3 | **L150** | `FIELD_ACTIVE_CHANNEL` | 删除该行 |
+
+- **删除后清理：**
+  - 检查 handler.py 和 __main__.py 中 `p.MSG_SET_ACTIVE_CHANNEL` 的所有引用（~10 处）并删除对应代码
+  - 检查 `p.FIELD_ACTIVE_CHANNEL` 的所有引用（L205, L264, L395 等）并删除对应代码
+
+---
+
+### 1.4 workspace.py — 改动点
+
+#### 🅿️1-6: 保留 Workspace 模型但标记部分字段 deprecated
+
+- **位置：** `server/workspace.py` L178-191
+- **当前模型：** Workspace 是频道模型（有 members, state, 活跃频道状态机）
+- **本轮改动：** 保留 Workspace 模型作为**元数据容器**。不删除 `Workspace` dataclass — 它仍然管理成员、管理员、生命周期状态。
+- **新增字段：** 为时间切片索引模型增加元数据字段
 
 ```python
 @dataclass
 class Workspace:
-    """R82: 工作区不再是频道，而是时间切片索引元数据。"""
+    id: str
+    name: str
+    owner_id: str
+    owner_name: str
     
-    id: str                              # "ws_R82_dev"（简短 ID，不含 agent_id 前缀）
-    name: str                            # 展示名 "R82-dev"
-    pipeline_round: str                  # 关联管线轮次 "R82"
-    workflow_url: str                    # WORK_PLAN URL
-    
-    owner_id: str                        # 创建者 agent_id
-    owner_name: str                      # 创建者显示名
-    
+    # ── 生命周期（保留） ──
     state: WorkspaceState = WorkspaceState.ACTIVE
+    created_at: float = 0.0
+    closed_at: float | None = None
+    
+    # ── 成员管理（保留） ──
     members: set[str] = field(default_factory=set)
+    admin_ids: set[str] = field(default_factory=set)
     
-    created_at: float = 0.0              # 创建时间戳
-    closed_at: float | None = None       # 关闭时间戳（归档标记）
-    last_active_at: float = 0.0
+    # ── R82 新增：时间切片索引元数据 ──
+    pipeline_id: str = ""                    # 关联管线 ID（如 "R82"）
+    roles: list[str] = field(default_factory=list)  # 角色清单
+    workflow_url: str = ""                   # WORK_PLAN URL
+    inbox_message_count: int = 0             # 该工作室内 inbox 消息总数（缓存）
     
-    # R82 新增：工作流元数据
-    roles: list[str] = field(default_factory=list)  # 该管线所需的角色列表
+    # ── Deprecated（保留字段但不再使用于频道切换） ──
+    token_ring: TokenRing = field(default_factory=TokenRing)  # 保留，历史兼容
+    last_active_at: float = 0.0              # 保留，用于闲置归档
+    closing_acks: set[str] = field(default_factory=set)  # 保留，关闭流程
 ```
 
-### 5.2 create_workspace 简化
+- **`create_workspace()` 行为变更：**
+  - 旧：创建频道（实际上 workspace 一直是元数据 + 消息路由标识）
+  - 新：创建时间切片标记 — 只记录元数据，不再关联频道路由
+  - 现有 `ws_mod.create_workspace()` 函数签名保持不变（只新增参数）
 
-```python
-async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
-    """R82: 创建工作室元数据（不再创建频道）。"""
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法: !create_workspace <name>"
-    
-    ws_name = positional[0]
-    round_name = params.get("round", "")
-    ws_id = f"ws_{ws_name[:20]}"  # 简短 ID
-    
-    users = auth.get_users()
-    sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
-    
-    # 创建元数据（不创建频道、不广播 MSG_SET_ACTIVE_CHANNEL）
-    result = ws_mod.create_workspace(
-        ws_id, ws_name, sender_id, sender_name,
-        pipeline_round=round_name,
-    )
-    if not result:
-        return f"❌ 创建失败：{ws_name} 可能已存在"
-    
-    return f"✅ 工作区 {ws_name} 已创建（ID: {ws_id}）"
-```
+#### 🅿️1-7: 新增 `!workspace view` 查询路由
 
-### 5.3 close_workspace 简化
-
-```python
-async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
-    """R82: 关闭工作室 = 标记 closed_at。"""
-    ws_id = params.get("_positional", [None])[0] or params.get("workspace")
-    if not ws_id:
-        return "❌ 用法: !close_workspace <ws_id>"
-    
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-    
-    # 简化为时间戳标记（不广播频道关闭通知）
-    ws.state = WorkspaceState.ARCHIVED
-    ws.closed_at = time.time()
-    ws_mod._save()
-    
-    _audit_logger.log(f"[R82] !close_workspace by {sender_id}: {ws_id}")
-    return f"✅ 工作区 {ws.name} 已归档"
-```
-
-### 5.4 workspace view — 时间切片查询
-
-```python
-async def _cmd_workspace_view(sender_id: str, params: dict) -> str:
-    """查看工作室历史消息（从 inbox 消息按时间区间筛选）。"""
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法: !workspace view <ws_id>"
-    
-    ws_id = positional[0]
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-    
-    # 从 message_store 按时间区间查询所有 inbox 消息
-    start = ws.created_at
-    end = ws.closed_at or time.time()
-    
-    try:
-        msgs = ms.get_messages_by_time_range(start, end, config.DATA_DIR)
-        # 筛选出 inbox 频道消息（_inbox:*）
-        inbox_msgs = [m for m in msgs if m.get("channel", "").startswith("_inbox:")]
-    except Exception:
-        inbox_msgs = []
-    
-    if not inbox_msgs:
-        return f"📋 工作区 {ws.name}: 该时间段内无 inbox 消息"
-    
-    lines = [f"📋 工作区 {ws.name} ({len(inbox_msgs)} 条 inbox 消息)"]
-    for m in inbox_msgs[-20:]:  # 最多显示 20 条
-        ts = m.get("ts", 0)
-        from_name = m.get("from_name", "?")
-        content = (m.get("content", "") or "")[:80]
-        lines.append(f"  [{format_timestamp(ts)}] {from_name}: {content}")
-    
-    return "\n".join(lines)
-```
+- **位置：** `server/handler.py` — 在 `_ADMIN_COMMANDS` 中新增或扩展现有命令
+- 工作室查看改为从 `message_store` 按时间区间 + inbox 通道前缀查询
 
 ---
 
-## 6. 配置与协议常量清理
+### 1.5 config.py — 改动点
 
-### 6.1 protocol.py 删除
+#### 🅿️2-1: 清理通道配置项
+
+- **位置：** `server/config.py`
+- **当前：** 无明确的"默认频道"配置项（系统默认使用 p.LOBBY）
+- **本轮：** 确认无需要删除的配置项。`BROADCAST_ADMINS`、`ADMIN_AGENTS` 保留不变。在注释中标注通道相关配置仅影响真人侧。
+- **净改动：** 0 行（只加注释）
+
+---
+
+## 2. 删除路径 / 保留路径决策树
+
+### 2.1 广播路由决策树
+
+```
+收到消息 → handle_broadcast()
+│
+├─ channel == REGISTRATION_CHANNEL?
+│   └─ ✅ 保留 — 新 bot 注册流程
+│
+├─ channel == _admin?
+│   ├─ ✅ 保留 — admin 继续接收 ! 命令（真人侧）
+│   └─ ❌ 删除 — bot 不再接收 _admin 消息
+│
+├─ channel startswith '_inbox:' ?
+│   └─ ✅ 保留核心逻辑 — INBOX-ONLY 主通道（L5277-5313 不动）
+│
+├─ channel startswith 'ws:' / WORKSPACE_ID_PREFIX?
+│   ├─ 发送者角色 == admin？
+│   │   └─ ✅ 保留 — admin 可在工作室发消息
+│   ├─ 发送者角色 == member（真人）？
+│   │   └─ ✅ 保留 — 真人可在工作室频道聊天
+│   └─ 发送者 == bot？
+│       └─ ❌ 删除广播 — bot 不应在工作室频道发消息
+│
+├─ channel == LOBBY?
+│   ├─ 大厅路由分类 📢/📋/@ 保留
+│   ├─ ✅ 保留 — 真人 admin 的公告/点名
+│   ├─ ✅ 保留 — @真人 的消息路由
+│   └─ ❌ 删除 — bot 不被路由到 lobby 消息（非 bot 通道）
+│
+└─ 未知频道回退？
+    └─ ❌ 删除 — 不再自动路由到活跃工作区
+```
+
+### 2.2 函数级别决策树
+
+| 函数 | 决策 | 理由 |
+|:-----|:----|:------|
+| `_broadcast_active_channel()` | **删除** 🅿️0 | inbox-only 不需要频道切换 |
+| `_channel_ack_timeout()` | **删除** 🅿️0 | 同上 |
+| `_resolve_ws_by_ack_task_id()` | **删除** 🅿️0 | 同上 |
+| `handle_broadcast()` | **简化** 🅿️0 | 删除bot路由分支，保留真人路由 |
+| `_cmd_create_workspace()` | **简化** 🅿️1 | 删除频道切换代码，保留创建逻辑 |
+| `_cmd_close_workspace()` | **保留** ✅ | 保留关闭流程，删除频道切换广播 |
+| `_cmd_rollcall()` | **简化** 🅿️1 | 删除 `_broadcast_active_channel` 调用 |
+| `_cmd_pipeline_start()` | **简化** 🅿️1 | 删除频道切换，改用 inbox 派活 |
+| `handle_agent_card_register()` | **简化** 🅿️1 | 删除注册后频道切换 |
+| `_broadcast_to_channel()` | **保留** ✅ | 用于 _admin 频道系统消息，不删除 |
+| `_is_nonsense()` | **保留** ✅ | 仅用于非-inbox 消息过滤 |
+| `_is_duplicate()` | **保留** ✅ | 同上 |
+| `_classify_lobby_message()` | **保留** ✅ | 大厅路由逻辑保留给真人 |
+| `set_agent_channel()` (persistence) | **删除** 🅿️0 | 不再需要活跃频道持久化 |
+| `get_agent_channel()` (persistence) | **删除** 🅿️0 | 同上 |
+| `save_agent_channels()` (persistence) | **删除** 🅿️0 | 同上 |
+| `load_agent_channels()` (persistence) | **删除** 🅿️0 | 同上 |
+| `reset_agent_channel()` (persistence) | **删除** 🅿️0 | 同上 |
+
+### 2.3 协议级别决策树
+
+| 协议常量 | 决策 | 理由 |
+|:---------|:----|:------|
+| `MSG_SET_ACTIVE_CHANNEL` | **删除** 🅿️0 | inbox-only 不需要 |
+| `MSG_CHANNEL_UPDATED` | **删除** 🅿️0 | 同上 |
+| `FIELD_ACTIVE_CHANNEL` | **删除** 🅿️0 | 同上 |
+| `FIELD_CHANNEL` | **保留** ✅ | 仍然用于标识消息目标通道 |
+| `MSG_MEMBER_CHANGED` | **保留** ✅ | 工作室成员变更通知保留 |
+| `MSG_TASK_ASSIGNMENT` | **保留** ✅ | 任务分配通过 inbox 进行 |
+| `MSG_TASK_ACK` | **保留** ✅ | 任务确认通过 inbox 进行 |
+| `MSG_BROADCAST` | **保留** ✅ | 通用广播类型保留 |
+
+---
+
+## 3. 工作室时间切片模型
+
+### 3.1 数据结构
 
 ```python
-# ── R7: Active Channel Messages ── ← 整个区块删除（L82-84）
-# MSG_SET_ACTIVE_CHANNEL = "set_active_channel"  ← 删除
-# MSG_CHANNEL_UPDATED = "channel_updated"        ← 删除
-
-# FIELD_ACTIVE_CHANNEL = "active_channel"  ← 删除（L150）
+# workspace.py — Workspace dataclass 新增字段
+@dataclass
+class Workspace:
+    # ... 现有字段 ...
+    
+    # ── R82 B: 时间切片索引元数据 ──
+    pipeline_id: str = ""                    # 管线 ID（如 "R82"）
+    roles: list[str] = field(default_factory=list)  # ["pm","architect","developer","reviewer","qa"]
+    workflow_url: str = ""                   # WORK_PLAN.md URL
+    inbox_message_count: int = 0             # 缓存的消息计数
 ```
 
-### 6.2 config.py 删除
+### 3.2 创建流程
 
-```python
-# BROADCAST_ADMINS ← 删除（不再需要区分 admin 广播目标）
+```
+!create_workspace R82 --members xxx
+  → _cmd_create_workspace()
+  → ws_mod.create_workspace()        # 保留原函数签名
+  → 补充元数据: workspace.pipeline_id = "R82"
+  → 不再调用 _broadcast_active_channel()  ❌
+  → 不再调用 persistence.set_agent_channel() ❌
+  → 返回: "✅ 工作室 R82 已创建（时间标记: <ts>）"
 ```
 
-### 6.3 persistence.py 删除
+### 3.3 查看流程
 
-```python
-# _agent_channels: dict[str, str] = {}  ← 删除模块级变量
-# def get_agent_channel(...)         ← 删除
-# def set_agent_channel(...)         ← 删除
-# def save_agent_channels(...)       ← 删除
-# def load_agent_channels(...)       ← 删除
 ```
+!workspace view ws:xxx
+  → 从 workspace 元数据获取 created_at / closed_at
+  → 从 message_store 按时间区间查询:
+    ms.query_by_time(channel_startswith="_inbox:", ts_from=created_at, ts_to=closed_at)
+  → 返回: 该工作室时间段内的 inbox 消息列表
+```
+
+### 3.4 工作室 = 索引而非频道
+
+- 旧：`ws:xxx` 是 bot 切换到的**频道**
+- 新：`ws:xxx` 是时间段**索引**，bot 不"进入"工作室
+- 创建时只需要 `!pipeline_start R82` 或 `!create_workspace` → 记录元数据
+- 管线 Step 任务通过 **inbox 消息派发**，不触发任何频道切换
 
 ---
 
-## 7. 改动汇总
+## 4. 兼容性分析
 
-### 7.1 文件清单
+### 4.1 对现有 bot 连接的影响
 
-| 文件 | 删除 | 新增/简化 | 净变 |
-|:-----|:----:|:----------:|:----:|
-| `server/handler.py` | ~-210 行 | ~+80 行 | **~-130 行** |
-| `shared/protocol.py` | ~-3 行 | ~0 行 | **~-3 行** |
-| `server/workspace.py` | ~-50 行 | ~+80 行 | **~+30 行** |
-| `server/persistence.py` | ~-20 行 | ~+20 行 | **~0 行** |
-| `server/config.py` | ~-5 行 | ~0 行 | **~-5 行** |
-| **合计** | **~-288 行** | **~+180 行** | **净删 ~-108 行** |
+| bot | 旧行为 | 新行为 | 是否兼容 |
+|:---|:-------|:-------|:--------|
+| **inbox 收消息** | 通过 `_inbox:xxx` 收 | 不变 | ✅ 完全兼容 |
+| **inbox 发消息** | 发到 `_inbox:xxx` | 不变 | ✅ 完全兼容 |
+| **lobby 收消息** | 收到大厅广播 | **不再收到** | ✅ 不破坏收发 inbox 消息 |
+| **workspace 收消息** | 收到工作室频道广播 | **不再收到** | ✅ 不破坏收发 inbox 消息 |
+| **admin 收消息** | 收到系统通知 | **不再收到** | ✅ 不破坏收发 inbox 消息 |
+| **查询命令** | 发到 admin 频道 | 发到 `_inbox:server` | ✅ 新方式工作，旧方式仍可用（admin 命令路由保留） |
+| **活跃频道** | 维护 active_channel | 不再维护 | ✅ 客户端忽略 set_active_channel 消息即可 |
 
-### 7.2 无改动项
+### 4.2 对旧客户端协议的影响
 
-| 模块 | 原因 |
-|:-----|:------|
-| `clients/` | 旧 ws_client.py 不需要改（inbox 收发协议不变） |
-| `server/web_viewer.py` | Web 端只看 lobby/admin/inbox，不受影响 |
-| `server/auth.py` | 认证体系不动 |
-| `server/agent_card.py` | 卡片注册不变 |
-| `server/gateway-plugin/` | Gateway 不受 server 端路由更改影响 |
+| 协议消息 | 旧客户端 | 新客户端 |
+|:---------|:---------|:---------|
+| `MSG_SET_ACTIVE_CHANNEL` | 需要处理频道切换 | **不再收到** — 删除该消息 |
+| `MSG_CHANNEL_UPDATED` | 需要返回确认 | **不再需要** — 删除该消息 |
+| `type: "broadcast"` — lobby 消息 | 收到大厅广播 | **不再收到** — 但客户端兼容 |
+| `type: "broadcast"` — inbox 消息 | 正常收 | **正常收** ✅ |
+
+### 4.3 对客户端代码的影响
+
+- **本轮不改 `clients/`** — 但注明 Step 3 可能需要的最小改动：
+  - 删除 `switch_channel()` 方法（如有）
+  - 删除 `current_channel` 属性（如有）
+  - 新增 `query(command)` 方法：发消息到 `_inbox:server` 并等待回复
+
+### 4.4 对 admin 频道的影响
+
+- 系统进度通知**继续发到 `_admin`**（L381-385 保留 ✅）
+- Bot 不读 `_admin`（bot 不再收到 `_admin` 消息 ✅）
+- Web 端 admin tab **正常工作** ✅
+
+### 4.5 对 message_store 的影响
+
+- inbox 消息继续写入 `message_store`（L5292, L5403-5414 保留 ✅）
+- 工作室时间切片查询从 message_store 按时间区间筛选（R76 已实现）
+
+### 4.6 对认证层的影响
+
+- **完全不动** — `auth.py`、`api_key` 体系不受影响 ✅
+- 现有 bot 无需改 apikey/注册流程 ✅
 
 ---
 
-## 8. 兼容性分析
+## 5. 风险与缓解
 
-### 8.1 Bot 连接兼容性
+| # | 风险 | 等级 | 影响 | 缓解措施 |
+|:-:|:-----|:----|:-----|:---------|
+| 1 | **Bot 连接兼容** — 旧 bot（小开/爱泰/泰虾/小爱）部署后收不到原本的 lobby/workspace 广播 | 🔴 | 低 — 这些广播不是必要功能 | 部署后验证 inbox 收发正常；旧 bot 忽略不工作正常的频道也不影响核心功能 |
+| 2 | **Pipeline 状态机依赖活跃频道** — `pipeline_start` 中调用了 `_broadcast_active_channel`，删除后可能漏掉角色通知 | 🔴 | 中 — 管线 Step 启动可能失效 | 改为通过 inbox 派活：`_send_to_inbox(agent_id, "【R82 Step N 任务】...")`，不需要频道切换 |
+| 3 | **`!` 命令入口变化** — 旧 bot 通过 admin 频道执行 `!` 命令，新 bot 通过 `_inbox:server` | 🟡 | 低 — 两条路由均可用 | Admin 频道 `!` 命令路由**保留**（L5253-5274 保留），`_inbox:server` 新增查询路由仅为补充 |
+| 4 | **删除 `FIELD_ACTIVE_CHANNEL` 影响 auth_ok 报文** — L205 在 auth 成功响应中包含了 `active_channel` | 🟡 | 低 | 从 auth_ok 报文中删除 `active_channel` 字段；旧客户端不使用该字段也可正常工作 |
+| 5 | **`_broadcast_active_channel` 在 R57 rollcall 中被依赖** — L1100/L1134 被点名流程调用 | 🟡 | 中 | 点名用 inbox 通知替代——`_send_to_inbox(member_id, "📋 {sender_name} 点名xxx")` |
+| 6 | **Web 端查看工作区历史** — Web 端看工作室消息改为从 inbox 筛选 | 🟡 | 低 | R76 已实现时间切片查询 |
+| 7 | **Workspace 删除时清理** — `_cmd_close_workspace` L5979 清理 `_channel_ack_state` | 🟢 | 低 | 删除关联代码即可 |
+| 8 | **`connections` 中非 bot 判定** — handler 中没有明确的"是否是 bot"标志 | 🟡 | 低 | 通过 role != admin + 不在 _r72_users 判断 |
 
-| 场景 | 旧行为 | 新行为 | 是否兼容 |
-|:-----|:-------|:-------|:---------|
-| Bot 连接后收 lobby 广播 | 收所有 lobby 消息 | 不收到 lobby 消息 | ⚠️ 行为改变（bot 不应依赖 lobby） |
-| Bot 连接后收 workspace 消息 | 收工作室消息 | 不收到 workspace 消息 | ⚠️ 行为改变 |
-| Bot 收发 inbox 消息 | 正常 | 正常 | ✅ 完全兼容 |
-| Bot 回复自动路由到发送者 inbox | 正常 | 正常 | ✅ 完全兼容 |
-| Bot 发送 `!` 命令到 admin | 经 admin 路由 | 仍可经 admin 路由（保留） | ✅ 兼容 |
-| Bot 发送 `!` 命令到 `_inbox:server` | 无此功能 | 新增查询回复 | ✅ 新增 |
-| Bot 发送消息到 lobby/workspace | 广播给所有人 | 只传给 Web viewer | ⚠️ 行为改变 |
+---
 
-**结论：** R82 属于 **clean break**——部署后立即生效。旧 bot 如果依赖 lobby/workspace 消息会察觉到变化，但不影响 inbox 收发。**server 部署即生效，bot 端无需任何更新。**
+## 6. 改动统计
 
-### 8.2 现有命令兼容性
+| 文件 | 删除行 | 新增行 | 净变化 |
+|:-----|:------:|:------:|:------:|
+| `server/handler.py` | ~160 行 | ~20 行 | **-140 行** |
+| `shared/protocol.py` | ~5 行 | 0 | **-5 行** |
+| `server/persistence.py` | ~30 行 | ~15 行 | **-15 行** |
+| `server/workspace.py` | ~10 行 | ~30 行 | **+20 行** |
+| `server/__main__.py` | ~15 行 | 0 | **-15 行** |
+| `server/config.py` | 0 | 注释 | **0 行** |
+| **合计** | **~220 行** | **~65 行** | **-155 行净删** |
 
-| 命令 | 旧行为 | 新行为 | 兼容性 |
-|:-----|:-------|:-------|:-------|
-| `!create_workspace` | 创建频道 + 广播 | 创建元数据 | ⚠️ 无广播（bot 不再依赖） |
-| `!close_workspace` | 关闭频道 + 广播 | 标记时间戳 | ✅ 语义等效 |
-| `!pipeline_start` | 创建 + 广播 ACK | 创建元数据 + inbox 派活 | ✅ 行为等效（bot 收到 inbox 任务） |
-| `!step_complete` | 推进 + 广播 | 推进 + 写 admin 通知 | ✅ 行为等效 |
-| `!agent_card list` | 从 admin 执行 | 从 admin 或 `_inbox:server` | ✅ 兼容 + 新增入口 |
-| `!workspace_join/leave/add/remove` | 操作频道成员 | 操作元数据成员 | ✅ 语义等效 |
+---
 
-### 8.3 Web 端兼容性
+## 附：术语对照
 
-| Web Tab | 数据源 | 影响 |
-|:--------|:-------|:------|
-| 🌐 大厅 | `GET /api/chat?channel=lobby` | ✅ 不变 |
-| 📋 活跃 | workspace channel 消息 | ⚠️ workspace 消息现在只从 inbox 中筛选 |
-| 🔧 管理员 | `_admin` 频道 | ✅ 不变 |
-| 📬 收件箱 | `GET /api/chat/inbox` | ✅ 不变 |
-| 🗂️ 历史查看器 | workspace archive API | ✅ 不变 |
+| 旧术语 | 新术语 | 说明 |
+|:-------|:-------|:------|
+| 活跃频道 (active_channel) | （废弃） | Bot 不再维护频道概念 |
+| 频道切换 (channel switch) | （废弃） | 不再需要切换 |
+| 工作室 = 频道 | 工作室 = 时间切片索引 | 仅是元数据 + 时间区间 |
+| inbox 消息 + admin 消息 | inbox 消息 | Bot 只看 inbox |
+| `MSG_SET_ACTIVE_CHANNEL` | （删除） | 不再需要 |
+| bot 收到大厅消息 | bot 只在 inbox | 其他人发 inbox 才收 |
 
-### 8.4 部署顺序
+---
+
+## 附：改动执行顺序（给 Step 3 开发者）
+
+**建议的执行顺序（按依赖关系）：**
 
 ```
-1. 修改 protocol.py 常量
-2. 修改 persistence.py（删除活跃频道，保留其余）
-3. 修改 config.py（清理 BROADCAST_ADMINS）
-4. 修改 workspace.py（元数据模型）
-5. 修改 handler.py（最核心改动）
-   a. 删除 _broadcast_active_channel()
-   b. 简化 handle_broadcast（inbox 快速通道 + lobby 简化）
-   c. 新增 _handle_server_query()
-   d. 删除所有 get/set_agent_channel 调用点
-   e. 删除 MSG_SET_ACTIVE_CHANNEL handler
-   f. !create/close_workspace 简化
-6. git push && build && deploy
-7. 验证 inbox 收发正常
+Phase 1 — 协议层清理（无运行时影响）
+  └── 1. protocol.py: 删除 MSG_SET_ACTIVE_CHANNEL / MSG_CHANNEL_UPDATED / FIELD_ACTIVE_CHANNEL
+
+Phase 2 — 持久化层清理 + 新增
+  └── 2. persistence.py: 删除活跃频道函数，新增 workspace 元数据函数
+
+Phase 3 — 核心路由重写（handle_broadcast 逻辑更改）
+  ├── 3. handler.py: 删除 _broadcast_active_channel() + 关联函数
+  ├── 4. handler.py: 删除 handle_broadcast 中 bot 的路由分支
+  ├── 5. handler.py: 删除 8 个 _broadcast_active_channel 调用点
+  └── 6. handler.py: 删除注册/创建中的频道切换代码
+
+Phase 4 — 边缘清理
+  ├── 7. __main__.py: 删除 set_active_channel handler
+  └── 8. workspace.py: 新增时间切片字段
+
+Phase 5 — 验证
+  └── 9. grep 零匹配验证：
+       grep -rn 'MSG_SET_ACTIVE_CHANNEL\|_broadcast_active_channel\|get_agent_channel\b\|set_agent_channel\b' server/ shared/ | grep -v '^Binary'
 ```
-
----
-
-## 9. 风险与缓解
-
-| 风险 | 概率 | 影响 | 缓解措施 |
-|:-----|:----:|:-----|:---------|
-| `persistence.get_agent_channel()` 被遗漏的引用点导致 import error | 中 | 高 | grep 全量确认 ~20 处引用全部替换后再删除函数 |
-| bot 连接后收不到任何消息（inbox 路由改了） | 低 | 🔴致命 | R82 中 inbox 投递逻辑不变，仅在入口处加了快速通道，原有 inbox handler 保留 |
-| 旧 bot 仍在发消息到 lobby/workspace | 高 | 低 | 消息仍被持久化（写日志），只是不广播给其他 bot，真人仍可在 Web 端看到 |
-| `_broadcast_active_channel` 删除后 pipeline_start 点名无 ACK | 中 | 中 | 用 inbox 消息替代 ACK — bot 收到 Step 任务 inbox 后等价于「点名」 |
-| `!create_workspace` 无频道广播后 bot 无法感知 | 中 | 中 | bot 通过 inbox 接收 Step 任务通知，不依赖 workspace 频道感知 |
-| 删除 `BROADCAST_ADMINS` 后 admin 通知逻辑变化 | 低 | 低 | admin 频道通知由 `_broadcast_to_channel(_ADMIN)` 直接控制，不依赖该环境变量 |
-| 工作室元数据模型改后旧 JSON 不兼容 | 低 | 中 | `from_dict()` 做兼容处理，缺失字段用默认值 |
-
----
-
-## 10. 变更记录
-
-| 版本 | 日期 | 变更 |
-|:----:|:----|:------|
-| v1.0 | 2026-07-10 | 初稿 — R82 Inbox-Only 架构重构：净删 ~108 行，简化 handle_broadcast，删除 _broadcast_active_channel + MSG_SET_ACTIVE_CHANNEL + 活跃频道持久化，新增 _inbox:server 查询路由 |
