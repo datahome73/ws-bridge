@@ -177,12 +177,15 @@ def _build_registration_welcome(agent_id: str, pipeline_roles: list[str]) -> str
 
 #### B4 — 触发条件
 
-仅当注册者 **不是已知 admin** 时才发通知。已知 admin 注册（agent_card 的 pipeline_roles 含 `admin` 或 name 在 `BROADCAST_ADMINS` 中）不触发审批通知，避免自注册自通知的循环。
+仅当注册者 **不是已知管理员** 时才发通知。已知管理员注册（`display_name` 在 `BROADCAST_ADMINS` 配置列表中）不触发审批通知，避免自注册自通知的循环。
+
+> **注意：** 当前角色体系中不存在 `admin` 角色（小爱 = operations）。管理员身份由 `BROADCAST_ADMINS` 环境变量定义，不依赖 pipeline_roles。
 
 ```python
-# 判断是否跳过 admin 通知
-if any(role == "admin" for role in pipeline_roles) or display_name in BROADCAST_ADMINS:
-    logger.info(f"Admin 注册跳过审批通知: {display_name}")
+# 判断是否跳过管理员通知
+# BROADCAST_ADMINS 是环境变量定义的超级管理员列表（如 ["小爱", "小谷"]）
+if display_name in BROADCAST_ADMINS:
+    logger.info(f"管理员注册跳过审批通知: {display_name}")
 else:
     await _send_admin_registration_notification(display_name, agent_id, pipeline_roles)
 ```
@@ -299,8 +302,8 @@ REGISTRATION_BROADCAST_ENABLED = False  # 默认关闭，可改为 True
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-5 | 非 admin 注册时 admin 频道收到通知 | `_admin` 频道出现「📢 新 bot 注册通知」消息，含 bot 名、agent_id、角色、时间 | grep Server 日志中的 admin 频道消息内容 |
-| ✅-6 | admin 自己注册不触发通知 | admin bot 注册后 `_admin` 频道无新增通知消息 | 模拟 admin 角色注册 → 确认 `_send_admin_registration_notification` 未被调用 |
+| ✅-5 | 非管理员注册时 `_admin` 频道收到通知 | `_admin` 频道出现「📢 新 bot 注册通知」消息，含 bot 名、agent_id、角色、时间 | grep Server 日志中的 admin 频道消息内容 |
+| ✅-6 | 管理员自己注册不触发通知 | 管理员 bot 注册后 `_admin` 频道无新增通知消息 | 模拟已知管理员 bot（display_name 在 BROADCAST_ADMINS 中）注册 → 确认 `_send_admin_registration_notification` 未被调用 |
 | ✅-7 | 通知包含可操作命令 | 通知消息含 `!approve` 和 `!agent_card set` 示例 | 检查消息内容包含命令模板 |
 
 ### 🎯 3.3 方向 C：自动切换频道
@@ -360,7 +363,7 @@ REGISTRATION_BROADCAST_ENABLED = False  # 默认关闭，可改为 True
 | 风险 | 影响 | 缓解 |
 |:-----|:------|:------|
 | 欢迎消息发送失败导致注册流程卡住 | 新 bot 注册被阻塞，无法正常加入 | `try/except` 包裹全部新代码，异常仅 log warning，不阻断原有注册流程 |
-| 管理员通知刷屏（大量 bot 同时注册） | `_admin` 频道被通知消息淹没 | 通知仅限非 admin 注册，当前内部团队场景最多几分钟注册一个 bot |
+| 管理员通知刷屏（大量 bot 同时注册） | `_admin` 频道被通知消息淹没 | 通知仅限非管理员注册（`BROADCAST_ADMINS` 过滤），当前内部团队场景最多几分钟注册一个 bot |
 | 频道切换与现有点名流程冲突 | bot 注册后被点名时频道再次被切换 | `MSG_SET_ACTIVE_CHANNEL` 是幂等的——切换到大堂不影响之后被点名切到工作室 |
 | `SYSTEM_AGENT_ID` 未配置 | 欢迎消息发送者 agent_id 为空 | 提供空字符串兜底值，使用 `from_name: "系统"` 作为主要标识 |
 
@@ -396,7 +399,7 @@ REGISTRATION_BROADCAST_ENABLED = False  # 默认关闭，可改为 True
 
 - [ ] docs/R79/*.md 零内部名残留
 - [ ] `grep -nE '内部名模式' docs/R79/*.md` 零匹配
-- [ ] 使用通用角色名（PM / arch / dev / review / QA / admin）
+- [ ] 使用通用角色名（PM / arch / dev / review / QA / operations）
 - [ ] 不包含真实 agent_id / token / URL
 - [ ] 不包含 `_agent_active_channels` 以外的新全局变量
 
