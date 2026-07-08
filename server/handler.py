@@ -6865,14 +6865,8 @@ async def handler(ws):
             elif msg_type == "approve_web" and agent_id:
                 users = auth.get_users()
                 if users.get(agent_id, {}).get("role") == "admin":
-                    code = msg.get("code", "").strip().upper()
-                    name = msg.get("name", "大宏")
-                    result = auth.approve_web_bind_code(code, name)
-                    if result.get("type") == "approve_ok":
-                        persistence.save_web_bind_codes(config.DATA_DIR)
-                        persistence.save_web_sessions(config.DATA_DIR)
-                        logger.info("Web viewer '%s' approved via WS", name)
-                    await _send(ws, result)
+                    logger.info("Web viewer bind code rejected: deprecated feature removed in R83")
+                    await _send(ws, {"type": "error", "error": "bind_code_deprecated"})
 
             elif msg_type == p.MSG_TOKEN_SET_MODE and agent_id:
                 # Admin only: set token/free mode

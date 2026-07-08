@@ -122,60 +122,6 @@ def set_workspace_admin(ws_id: str, agent_id: str, by_agent: str) -> bool:
     return True
 
 
-# ── Web viewer bind codes ──────────────────────────────
-
-WEB_CODE_PREFIX = "WEB-"
-
-
-def generate_web_bind_code() -> str:
-    """Generate a web viewer bind code (e.g. WEB-A1B2)."""
-    chars = string.ascii_uppercase + string.digits
-    return WEB_CODE_PREFIX + "".join(secrets.choice(chars) for _ in range(4))
-
-
-def create_web_bind_code(code: str) -> None:
-    """Create a bind code entry awaiting admin approval."""
-    codes = persistence.get_web_bind_codes()
-    codes[code] = {
-        "created_at": time.time(),
-        "approved": False,
-    }
-    persistence.set_web_bind_codes(codes)
-
-
-def approve_web_bind_code(code: str, name: str = "大宏") -> dict:
-    """Admin approves a web bind code. Returns a session token."""
-    import hashlib
-
-    codes = persistence.get_web_bind_codes()
-    if code not in codes:
-        return {"type": "error", "error": "Bind code not found"}
-    if codes[code].get("approved"):
-        return {"type": "error", "error": "Already approved"}
-    if _code_expired(codes[code]):
-        del codes[code]
-        persistence.set_web_bind_codes(codes)
-        return {"type": "error", "error": "Bind code expired"}
-
-    # Generate session token
-    raw = f"{code}:{name}:{time.time()}:{secrets.token_hex(8)}"
-    token = hashlib.sha256(raw.encode()).hexdigest()
-
-    sessions = persistence.get_web_sessions()
-    sessions[token] = {
-        "name": name,
-        "created_at": time.time(),
-    }
-    persistence.set_web_sessions(sessions)
-
-    codes[code]["approved"] = True
-    codes[code]["token"] = token
-    codes[code]["name"] = name
-    persistence.set_web_bind_codes(codes)
-
-    return {"type": "approve_ok", "token": token, "name": name}
-
-
 # ── R72: API Key 核心逻辑 ────────────────────────────────────────
 
 # 服务端签名密钥（从环境变量读取，保底用随机值）
