@@ -79,10 +79,6 @@ FIELD_ACTION = "action"
 MSG_SET_ADMIN = "workspace_set_admin"        # Set workspace admin
 MSG_ADMIN_SET = "workspace_admin_set"        # Confirm admin set
 MSG_MANAGE_MEMBER = "workspace_manage_member" # Add/remove member in workspace
-# ── R7: Active Channel Messages ──────────────────────────────────────────
-MSG_SET_ACTIVE_CHANNEL = "set_active_channel"  # Server → Bot: update active channel
-MSG_CHANNEL_UPDATED = "channel_updated"        # Server confirm channel updated
-
 # ── R15: Workspace admin request ─────────────────────────────────────────
 MSG_ADMIN_REQUEST = "workspace_admin_request"              # Member → Server: apply
 MSG_ADMIN_REQUEST_APPROVED = "workspace_admin_approved"    # Admin → Server → Member: approved
@@ -147,7 +143,6 @@ FIELD_TOKEN_REPLY_TO="***"            # str | None
 
 # ── Workspace / Channel Fields ────────────────────────────────────
 FIELD_CHANNEL = "channel"
-FIELD_ACTIVE_CHANNEL = "active_channel"
 FIELD_WORKSPACE_ID = "workspace_id"
 FIELD_DEADLINE_TS = "deadline_ts"
 FIELD_ACK_REQUIRED = "ack_required"
