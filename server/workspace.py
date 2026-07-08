@@ -6,6 +6,7 @@ automatic archival after inactivity.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
