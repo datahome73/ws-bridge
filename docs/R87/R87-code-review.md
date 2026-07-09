@@ -1,24 +1,29 @@
-# R87 Step 4 代码审查报告 — `_inbox:server` 中继架构 🚉
+# R87 代码审查报告 — `_inbox:server` 中继架构 🚉
 
-> **审查人：** 🔍 小周 (Review)
+> **版本：** v2.0（合并审查）
+> **状态：** 🟡 条件通过
+> **审查者：** 🔍 小周（Review）
 > **日期：** 2026-07-09
-> **Commit:** `f05b769`
-> **审查范围：** `server/config.py` · `server/handler.py` · `server/__main__.py`（3 个文件）
+> **审查基准：** `f05b769` (feat(R87): _inbox:server 中继架构)
 > **前置文档：** [产品需求](./R87-product-requirements.md) · [技术方案](./R87-tech-plan.md)
 
 ---
 
 ## 1. 审查结论
 
-| 维度 | 结论 |
-|:-----|:-----|
-| 🟢 核心逻辑（3 规则 + PM 守卫） | ✅ **通过** |
-| 🟢 入口集成位置 | ✅ **通过** |
-| 🟢 Step ⑤+⑥ 同时触发 | ✅ **通过** |
-| 🟢 Step ⑥ 确认发 `_inbox:<bot_id>` | ✅ **通过** |
-| 🟢 旧 bot 向后兼容 | ✅ **通过** |
-| **🔴 Scope creep** | ❌ **8 个文件，~125 行非审查范围代码** |
-| **🟡 凭据泄露** | ❌ **`query_pipeline.py` 含硬编码 API Key** |
+| 维度 | 评分 |
+|:-----|:----:|
+| 核心功能实现（3 规则 + 入口集成） | 🟢 **优秀** — 与技术方案完全一致 |
+| PM 安全守卫 | 🟢 **优秀** — 位置正确，行为合理 |
+| 路由安全 | 🟢 **完善** — 守卫矩阵全覆盖 |
+| 向后兼容 | 🟢 **完全兼容** — 旧 bot 不受影响 |
+| 代码质量 | 🟢 **优秀** — 函数职责单一，结构清晰 |
+| **! 指令透传** | 🟡 **W1** — `_handle_server_query` 被拦截 |
+| **Scope 控制** | ❌ **不合格** — 8 个非审查文件改动 |
+
+### 处理决定
+
+**核心 3 文件（`config.py` / `handler.py` / `__main__.py`）通过审查，修复 W1 后即可部署。Scope creep 文件需分离处理。**
 
 ---
 
@@ -33,8 +38,6 @@
 | 类型注解 | ✅ | `: str` |
 | Docstring | ✅ | 有简要说明 |
 | Scope creep | ✅ | 仅此 1 处新增，无多余改动 |
-
-**行级检查** (L169-173):
 
 ```python
 # ── R87: _inbox:server 中继通道 ────────────────────────────
@@ -52,15 +55,9 @@ SERVER_INBOX_CHANNEL: str = "_inbox:server"
 
 | 检查项 | 结果 |
 |:-------|:----:|
-| 位置 | ✅ 模块级常量区，`_SILENT_PREFIXES` 之后 |
+| 位置 | ✅ 模块级常量区 |
 | 判断逻辑 | ✅ `channel == SERVER_INBOX_CHANNEL` 精确相等 |
 | 返回类型 | ✅ `bool` |
-
-```python
-def is_server_inbox(channel: str) -> bool:
-    """判断 channel 是否为 server 中继通道。"""
-    return channel == SERVER_INBOX_CHANNEL
-```
 
 #### 2.2.2 `_handle_server_relay()` — ✅ 3 条规则
 
@@ -86,9 +83,8 @@ def is_server_inbox(channel: str) -> bool:
 | ⑥ 自动确认目标 | ✅ `_broadcast_to_channel(f"_inbox:{agent_id}", ...)` — bot 自己的 inbox |
 | ⑥ 确认内容 | ✅ `"✅ 确认，已收到你的完成通知。本轮任务完成。"` |
 | ⑥ 不走 `_inbox:server` | ✅ 确认发到 `_inbox:<bot_id>` |
-| ⑤+⑥ 同时触发 | ✅ 两个 `await` 顺序执行，`_broadcast_to_channel` 内部有 `try/except`，一个失败不影响另一个 |
+| ⑤+⑥ 同时触发 | ✅ 两个 `await` 顺序执行，`_broadcast_to_channel` 内部 `try/except`，一个失败不影响另一个 |
 | 匹配后 `return` | ✅ `return True` |
-| 日志 | ✅ `logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)` |
 
 **规则 3: 其他 → 沉默**
 
@@ -146,37 +142,82 @@ from .handler import handle_auth, handle_broadcast, handle_register, _connection
 
 ## 3. 审查清单逐项
 
-### 🎯 3.1 核心功能检查
+### 3.1 核心功能检查
 
 | # | 检查项 | 结果 | 证据 |
 |:-:|:-------|:----:|:-----|
 | ✅-1 | `_handle_server_relay()` 3 条规则正确 | ✅ | §2.2.2 — ACK / 完成 / 沉默 三条规则完整实现 |
 | ✅-2 | `_inbox:server` 拦截在 `handle_broadcast` 前 | ✅ | §2.2.4 — `if await _handle_server_relay(): continue` 在 `handle_broadcast` 之前 |
-| ✅-3 | Step ⑤+⑥ 同时触发（两个 `_send_to_agent` 顺序执行） | ✅ | 两个 `await _broadcast_to_channel()` 顺序执行，各自内部 try/except 隔离 |
-| ✅-4 | Step ⑥ 确认发 `_inbox:<bot_id>`（不是 `_inbox:server`） | ✅ | `_broadcast_to_channel(f"_inbox:{agent_id}", ...)` — `agent_id` 是发送 bot 的 ID |
-| ✅-5 | PM 安全守卫：agent_id==PM_AGENT_ID 拒绝+error | ✅ | §2.2.3 — 入口处检查，send error + return True |
-| ❌-6 | **零 scope creep** | ❌ | **§4.1** — 8 个非审查文件改动 |
-| ✅-7 | 旧 bot 用 `_inbox:<PM_id>` 回复不受影响 | ✅ | `is_server_inbox()` 只拦截 `channel == "_inbox:server"`，`_inbox:<PM_id>` 不走中继 |
+| ✅-3 | Step ⑤+⑥ 同时触发 | ✅ | 两个 `await _broadcast_to_channel()` 顺序执行，各自 `try/except` 隔离 |
+| ✅-4 | Step ⑥ 确认发 `_inbox:<bot_id>`（不是 `_inbox:server`） | ✅ | `_broadcast_to_channel(f"_inbox:{agent_id}", ...)` |
+| ✅-5 | PM 安全守卫：`agent_id==PM_AGENT_ID` 拒绝+error | ✅ | §2.2.3 |
+| ❌-6 | **零 scope creep** | ❌ | **§5.1** — 8 个非审查文件改动 |
+| ✅-7 | 旧 bot 用 `_inbox:<PM_id>` 回复不受影响 | ✅ | `is_server_inbox()` 只拦截 `_inbox:server` |
+| ❌-8 | **! 命令到 `_inbox:server` 正常处理** | ❌ | **§4** — W1: `_handle_server_query` 被拦截 |
 
-### 🎯 3.2 路由安全
+### 3.2 路由安全
 
-| # | 检查项 | 结果 | 确认方式 |
-|:-:|:-------|:----:|:---------|
-| ✅-6 | PM 误发 `_inbox:server` → 拒绝+error | ✅ | `agent_id == pm_agent_id` 守卫 |
-| ✅-7 | Step ⑥ 确认发 `_inbox:<bot_id>`（不走 `_inbox:server`） | ✅ | `f"_inbox:{agent_id}"` — bot 自己的 inbox |
-| ✅-8 | `ACK✅`（无空格）→ 不触发转发 | ✅ | `startswith("ACK ✅")` — 空格是匹配的一部分 |
-| ✅-9 | `✅完成`（无空格）→ 不触发完成转发 | ✅ | `startswith("✅ 完成")` — 空格是匹配的一部分 |
-| ✅-10 | 多个 bot 同时发 → 独立处理 | ✅ | 每个 `_handle_server_relay` 调用各自独立 |
-| ✅-11 | 未认证 bot → 不进中继 | ✅ | 外层 `msg_type == "message" and agent_id` 已过滤 |
-| ✅-12 | Step ⑥ 确认后 bot 再回复 → 中继沉默 | ✅ | 回复内容大概率不匹配 ACK ✅ / ✅ 完成 → 规则 3 沉默 |
+| # | 检查项 | 结果 |
+|:-:|:-------|:----:|
+| ✅-6 | PM 误发 `_inbox:server` → 拒绝+error | ✅ |
+| ✅-7 | Step ⑥ 确认发 `_inbox:<bot_id>`（不走 `_inbox:server`） | ✅ |
+| ✅-8 | `ACK✅`（无空格）→ 不触发转发 | ✅ |
+| ✅-9 | `✅完成`（无空格）→ 不触发完成转发 | ✅ |
+| ✅-10 | 多个 bot 同时发 → 独立处理 | ✅ |
+| ✅-11 | 未认证 bot → 不进中继 | ✅ |
+| ✅-12 | Step ⑥ 确认后 bot 再回复 → 中继沉默 | ✅ |
 
 ---
 
-## 4. 发现的问题
+## 4. 🟡 发现的问题
 
-### 🔴 4.1 Scope Creep（严重）
+### W1: `!` 指令到 `_inbox:server` 被沉默
 
-**提交包含 8 个非审查范围文件的改动（~125 行），是 3 个审查文件改动量的 2 倍+。**
+**严重度:** 🟡 中
+
+**发现者：** 🔍 小周（审查工程师）
+
+**现象：**
+现有 `_handle_server_query()` (handler.py L5763) 处理发给 `_inbox:server` 的 `!` 命令（如 `!agent_card list`、`!pipeline_status`、`!list_workspaces`），通过 `handle_broadcast` L5193 的 inbox fast path 调用。
+
+但新的 `_handle_server_relay()` 在 **`handle_broadcast` 之前** 拦截所有 `_inbox:server` 消息。`!` 命令不匹配规则 1/2，落入规则 3 沉默处理，永远不会到达 `_handle_server_query()`。
+
+**影响链路：**
+```
+_inbox:server 消息
+  │
+  ├─ R82: _handle_server_query (L5193)   ← 原有入口，被拦截
+  │    └─ !agent_card list → ✅ 正常（原行为）
+  │
+  └─ R87: _handle_server_relay (L6336)   ← 新拦截，先执行
+       ├─ ACK ✅ → 转发 PM ✅
+       ├─ ✅ 完成 → 转发+确认 ✅
+       └─ !agent_card list → ❌ 沉默！（应为正常处理）
+```
+
+**根因：** `_handle_server_relay` 缺少对 `!` 前缀的透传逻辑。
+
+**修复建议：**
+在 `_handle_server_relay` 规则 3 前增加 `!` 透传：
+
+```python
+    # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 _handle_server_query）═══
+    if content.startswith("!"):
+        logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
+        return False
+```
+
+这样 `!` 命令 `return False`，调用方不 `continue`，继续走到 `handle_broadcast` → `_handle_server_query`。
+
+---
+
+## 5. 🔴 发现的问题
+
+### 🔴 5.1 Scope Creep（严重）
+
+**发现者：** 🏗️ 小开（架构师）
+
+提交包含 **8 个非审查范围文件的改动（~125 行）**，是 3 个审查文件改动量的 2 倍+。
 
 | 文件 | 变动 | 行数 | 是否在审查范围 |
 |:-----|:-----|:----:|:------------:|
@@ -198,13 +239,13 @@ from .handler import handle_auth, handle_broadcast, handle_register, _connection
 - `join_ws.py` 和 `query_pipeline.py` 是调试工具，不应合入 dev 分支
 - 日志/PID 文件操作会影响后续排查
 
-**处理建议：** 将 scope creep 文件从该 commit 分离，`gateway-plugin/__init__.py` 的改动应归入独立 PR/commit 并经过独立的 Review 流程。
+**处理建议：** 将 scope creep 文件从该 commit 分离。`gateway-plugin/__init__.py` 的改动应归入独立 PR/commit 并经过独立的 Review 流程。
 
-### 🟡 4.2 `query_pipeline.py` 凭据泄露（中等）
+### 🟡 5.2 `query_pipeline.py` 凭据泄露（中等）
 
 **文件：** `query_pipeline.py`（新文件，38 行）
 
-```python
+```
 WS_URL = "wss://wsim.datahome73.cloud/ws"
 API_KEY = "sk_ws_...d000"
 AGENT_ID = "ws_0bb747d3ea2a"
@@ -212,56 +253,56 @@ AGENT_ID = "ws_0bb747d3ea2a"
 
 - 包含**生产环境** WebSocket URL 和 API Key
 - 无论 key 是否已吊销，硬编码凭据不应出现在 repo 中
-- 该文件本来就不应合入（见 §4.1 Scope Creep）
 
-**处理建议：** 从 commit 中移除该文件。
+**处理建议：** 从 commit 中移除该文件，并轮换泄露的 API Key。
 
 ---
 
-## 5. 兼容性分析
+## 6. 兼容性分析
 
 | 场景 | 旧行为 | R87 后 | 结论 |
 |:-----|:-------|:--------|:----:|
 | 旧 bot 用 `_inbox:<PM_id>` 回复 | 正常路由到 PM inbox | **不变** — `_inbox:<PM_id>` 不走中继 | ✅ 完全兼容 |
 | 旧 bot 不知 `_inbox:server` | N/A | 无影响 | ✅ |
-| 新旧 bot 混合部署 | — | 新 bot `_inbox:server`，旧 bot `_inbox:<PM_id>`，互不影响 | ✅ |
+| 新旧 bot 混合部署 | — | 新 bot `_inbox:server`，旧 bot `_inbox:<PM_id>` | ✅ |
 | 非 `_inbox:server` 的消息 | 正常路由 | **不变** — `is_server_inbox()` 返回 False → 走 `handle_broadcast` | ✅ |
 
 ---
 
-## 6. 风险与建议
+## 7. 风险与建议
 
-### 6.1 风险
+### 7.1 风险
 
 | # | 风险 | 等级 | 评估 |
 |:-:|:-----|:----:|:-----|
-| 1 | `PM_AGENT_ID` 为空的降级行为 | 🟢 低 | ACK/完成不转发 PM（仅自动确认 bot），日志会 warning。当前代码无 warning 日志但行为正确 |
-| 2 | `_broadcast_to_channel` ⑤ 失败不影响 ⑥ | 🟢 低 | 内部 try/except 已做隔离 |
-| 3 | Scope creep 文件合入后影响 | 🟡 中 | `gateway-plugin/__init__.py` 的 inbox 路由改动未经 Review，可能引入未预期的路由行为 |
+| 1 | `PM_AGENT_ID` 为空时 ACK/完成不转发 | 🟢 低 | 代码已处理，仅自动确认 bot |
+| 2 | `_broadcast_to_channel` ⑤ 失败不影响 ⑥ | 🟢 低 | 内部 `try/except` 已做隔离 |
+| 3 | Scope creep 文件合入后影响 | 🟡 中 | `gateway-plugin/__init__.py` 的 inbox 路由改动未经 Review |
 
-### 6.2 建议
+### 7.2 建议
 
 | # | 建议 | 优先级 |
 |:-:|:-----|:------:|
-| 1 | **将 scope creep 文件从 commit 分离** — 创建独立 commit/PR 处理 `gateway-plugin/__init__.py` 的 R82+ inbox 路由改进 | 🔴 高 |
-| 2 | **删除 `join_ws.py` 和 `query_pipeline.py`** — 调试工具不应合入 dev | 🟡 中 |
-| 3 | **轮换 `query_pipeline.py` 中泄露的 API Key** — `sk_ws_...d000` 已在 repo 中 | 🟡 中 |
+| 1 | **修复 W1：在 `_handle_server_relay` 增加 `!` 透传** | 🔴 高 |
+| 2 | **将 scope creep 文件从 dev 分离** — 创建独立 commit 处理 `gateway-plugin/__init__.py` | 🔴 高 |
+| 3 | **删除 `join_ws.py` 和 `query_pipeline.py`** — 调试工具不应合入 dev | 🟡 中 |
+| 4 | **轮换 `query_pipeline.py` 中泄露的 API Key** | 🟡 中 |
 
 ---
 
-## 7. 结论
+## 8. 最终结论
 
-| 维度 | 评分 |
-|:-----|:----:|
-| 核心功能实现（3 规则 + 入口集成） | 🟢 **优秀** — 与技术方案完全一致 |
-| PM 安全守卫 | 🟢 **优秀** — 位置正确，行为合理 |
-| 向后兼容 | 🟢 **完全兼容** — 旧 bot 不受影响 |
-| **Scope 控制** | 🔴 **不合格** — ~125 行 scope creep |
+| 维度 | 评分 | 说明 |
+|:-----|:----:|:------|
+| 核心功能实现（3 规则 + 入口集成） | 🟢 优秀 | 与技术方案完全一致 |
+| PM 安全守卫 | 🟢 优秀 | 位置正确，行为合理 |
+| 路由安全 | 🟢 完善 | 守卫矩阵全覆盖 |
+| 向后兼容 | 🟢 完全兼容 | 旧 bot 不受影响 |
+| **! 指令透传** | 🟡 W1 | `_handle_server_query` 被拦截 |
+| **Scope 控制** | 🔴 不合格 | 8 个非审查文件改动 |
 
-### 处理决定
-
-**核心 3 文件（config.py / handler.py / __main__.py）通过审查，scope creep 文件需分离处理。**
+**核心 3 文件（config.py / handler.py / __main__.py）通过审查。** 修复 W1 后核心功能即为 🟢 通过。Scope creep 文件需独立处理。
 
 ---
 
-*本文档由 🔍 小周（Review）编写，提交者：🏗️ 小开（Dev）。*
+*本文档由 🔍 审查工程师（小周）编写，待 Step 5 🦐 QA 测试验证。*
