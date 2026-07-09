@@ -6292,6 +6292,11 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
         return True
 
+    # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
+    if content.startswith("!"):
+        logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
+        return False
+
     # ═══ 规则 3: 其他内容 → 沉默 ═══
     logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
     return True
