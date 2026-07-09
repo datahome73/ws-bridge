@@ -4818,32 +4818,6 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "desc": "BLOCKED 状态下重新执行验证",
         "usage": "!step_verify <step_name> [--output <sha>]",
     },
-    # ── R81: Workspace self-management commands (min_role=2) ──
-    "workspace_join": {
-        "handler": _cmd_workspace_join, "min_role": 2,
-        "usage": "!workspace_join [--workspace <ws_id>]",
-    },
-    "workspace_leave": {
-        "handler": _cmd_workspace_leave, "min_role": 2,
-        "usage": "!workspace_leave [--workspace <ws_id>]",
-    },
-    "workspace_add": {
-        "handler": _cmd_workspace_add, "min_role": 2,
-        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_remove": {
-        "handler": _cmd_workspace_remove, "min_role": 2,
-        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_list_members": {
-        "handler": _cmd_workspace_list_members, "min_role": 2,
-        "usage": "!workspace_list_members [--workspace <ws_id>]",
-    },
-    # ── R86 C1: Revoke api_key ──
-    "revoke_api_key": {
-        "handler": _cmd_revoke_api_key, "min_role": 4,
-        "usage": "!revoke_api_key <agent_id>",
-    },
 }
 
 # ── R81: Workspace member self-management commands ──────────────
@@ -5058,6 +5032,36 @@ async def _cmd_revoke_api_key(sender_id: str, params: dict) -> str:
     _force_disconnect_revoked_agent(target_id)
 
     return f"✅ 已吊销 {target_id[:16]}... 的 api_key 并强制断连"
+
+
+# Register R81 + R86 admin commands (after function definitions)
+_ADMIN_COMMANDS.update({
+    "workspace_join": {
+        "handler": _cmd_workspace_join, "min_role": 2,
+        "usage": "!workspace_join [--workspace <ws_id>]",
+    },
+    "workspace_leave": {
+        "handler": _cmd_workspace_leave, "min_role": 2,
+        "usage": "!workspace_leave [--workspace <ws_id>]",
+    },
+    "workspace_add": {
+        "handler": _cmd_workspace_add, "min_role": 2,
+        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_remove": {
+        "handler": _cmd_workspace_remove, "min_role": 2,
+        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_list_members": {
+        "handler": _cmd_workspace_list_members, "min_role": 2,
+        "usage": "!workspace_list_members [--workspace <ws_id>]",
+    },
+    # ── R86 C1: Revoke api_key ──
+    "revoke_api_key": {
+        "handler": _cmd_revoke_api_key, "min_role": 4,
+        "usage": "!revoke_api_key <agent_id>",
+    },
+})
 
 
 async def _restore_pipeline_timers() -> None:
