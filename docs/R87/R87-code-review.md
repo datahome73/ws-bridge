@@ -23,7 +23,7 @@
 
 ### 处理决定
 
-**核心 3 文件（`config.py` / `handler.py` / `__main__.py`）通过审查，修复 W1 后即可部署。Scope creep 文件需分离处理。**
+**核心 3 文件（config.py / handler.py / __main__.py）通过审查。W1 已修复（`20139c2`）。Scope creep 文件需分离处理。**
 
 ---
 
@@ -301,7 +301,7 @@ AGENT_ID = "ws_0bb747d3ea2a"
 | **! 指令透传** | 🟡 W1 | `_handle_server_query` 被拦截 |
 | **Scope 控制** | 🔴 不合格 | 8 个非审查文件改动 |
 
-**核心 3 文件（config.py / handler.py / __main__.py）通过审查。** 修复 W1 后核心功能即为 🟢 通过。Scope creep 文件需独立处理。
+**核心 3 文件（config.py / handler.py / __main__.py）通过审查。W1 已修复（`20139c2`）。Scope creep 文件需分离处理。**
 
 ---
 
