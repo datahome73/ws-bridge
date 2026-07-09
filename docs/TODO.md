@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.51
+> **版本：** v2.52
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -131,7 +131,7 @@
 
 || 版本 | 日期 | 变更 |
 ||:---:|:----:|:----|
-||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
+||| v2.52 | 2026-07-08 | 🎯 **R86 完成 ✅** — Agent API Key 认证加固：一虾一注册+消息key验证。合并部署 main `9cade14`，ws-bridge:r86 镜像 |\n||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
 ||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |\n||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
 ||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅**
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
