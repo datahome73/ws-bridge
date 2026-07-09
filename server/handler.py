@@ -112,6 +112,21 @@ def get_delivery_status(msg_id: str) -> dict[str, str]:
     return _delivery_status.get(msg_id, {})
 
 
+# ── R86 C1: Force-disconnect a revoked agent ────────────────────────
+
+
+def _force_disconnect_revoked_agent(agent_id: str) -> None:
+    """吊销 api_key 后强制断连 agent 的所有连接。"""
+    conns = list(_connections.get(agent_id, set()))
+    for conn in conns:
+        try:
+            if hasattr(conn, "close"):
+                asyncio.create_task(conn.close())
+        except Exception:
+            pass
+    _connections.pop(agent_id, None)
+
+
 # ── R12 P0.3: Task ack tracking ────────────────────────────────────────
 _task_ack_timers: dict[str, asyncio.Task] = {}
 
@@ -226,6 +241,17 @@ def _update_agent_online_status(agent_id: str) -> None:
         ac_mod.update_card(agent_id, card)
 
 
+# ── R86 A1: display_name duplicate check ──────────────────────────
+
+
+def _find_agent_by_name(keys: dict, display_name: str) -> str | None:
+    """在 _api_keys 中按 display_name 查找已存在的 agent_id。返回 agent_id 或 None。"""
+    for agent_id, record in keys.items():
+        if record.get("display_name") == display_name:
+            return agent_id
+    return None
+
+
 async def handle_register(ws, msg: dict) -> str | None:
     """R72: 新 bot 注册。返回 agent_id + api_key，同一连接立即生效。"""
     display_name = msg.get("display_name", "").strip()
@@ -233,12 +259,22 @@ async def handle_register(ws, msg: dict) -> str | None:
         await _send(ws, {"type": "auth_error", "error": "Missing display_name"})
         return None
 
+    # ── R86 A1: display_name 重复检测 ──
+    keys = persistence.get_api_keys()
+    existing = _find_agent_by_name(keys, display_name)
+    if existing:
+        await _send(ws, {
+            "type": "auth_error",
+            "error": f"'{display_name}' 已存在，请使用 auth 或换一个 display_name。如遗忘 api_key 请联系管理员重置。",
+            "existing_agent_id": existing,
+        })
+        return None
+
     # 1. 生成 ws-bridge 自有 agent_id
     agent_id = auth.generate_agent_id()
     # 2. 生成 api_key
     api_key = auth.create_api_key(agent_id)
     # 3. 持久化到 _api_keys.json
-    keys = persistence.get_api_keys()
     keys[agent_id] = {
         "api_key": api_key,
         "display_name": display_name,
@@ -4782,6 +4818,32 @@ _ADMIN_COMMANDS: dict[str, dict] = {
         "desc": "BLOCKED 状态下重新执行验证",
         "usage": "!step_verify <step_name> [--output <sha>]",
     },
+    # ── R81: Workspace self-management commands (min_role=2) ──
+    "workspace_join": {
+        "handler": _cmd_workspace_join, "min_role": 2,
+        "usage": "!workspace_join [--workspace <ws_id>]",
+    },
+    "workspace_leave": {
+        "handler": _cmd_workspace_leave, "min_role": 2,
+        "usage": "!workspace_leave [--workspace <ws_id>]",
+    },
+    "workspace_add": {
+        "handler": _cmd_workspace_add, "min_role": 2,
+        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_remove": {
+        "handler": _cmd_workspace_remove, "min_role": 2,
+        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
+    },
+    "workspace_list_members": {
+        "handler": _cmd_workspace_list_members, "min_role": 2,
+        "usage": "!workspace_list_members [--workspace <ws_id>]",
+    },
+    # ── R86 C1: Revoke api_key ──
+    "revoke_api_key": {
+        "handler": _cmd_revoke_api_key, "min_role": 4,
+        "usage": "!revoke_api_key <agent_id>",
+    },
 }
 
 # ── R81: Workspace member self-management commands ──────────────
@@ -4974,32 +5036,29 @@ async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
     return "\n".join(lines)
 
 
+# ── R86 C1: revoke_api_key admin command ─────────────────────────
 
 
+async def _cmd_revoke_api_key(sender_id: str, params: dict) -> str:
+    """吊销指定的 agent 的 api_key 并断连。
 
-# Register R81 workspace commands
-_ADMIN_COMMANDS.update({
-    "workspace_join": {
-        "handler": _cmd_workspace_join, "min_role": 2,
-        "usage": "!workspace_join [--workspace <ws_id>]",
-    },
-    "workspace_leave": {
-        "handler": _cmd_workspace_leave, "min_role": 2,
-        "usage": "!workspace_leave [--workspace <ws_id>]",
-    },
-    "workspace_add": {
-        "handler": _cmd_workspace_add, "min_role": 2,
-        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_remove": {
-        "handler": _cmd_workspace_remove, "min_role": 2,
-        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_list_members": {
-        "handler": _cmd_workspace_list_members, "min_role": 2,
-        "usage": "!workspace_list_members [--workspace <ws_id>]",
-    },
-})
+    用法：!revoke_api_key <agent_id>
+    权限：L4 global admin
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!revoke_api_key <agent_id>"
+
+    target_id = positional[0]
+
+    if not auth.revoke_api_key(target_id):
+        return f"❌ agent {target_id[:16]}... 没有 api_key 或已被吊销"
+
+    # 断连
+    _force_disconnect_revoked_agent(target_id)
+
+    return f"✅ 已吊销 {target_id[:16]}... 的 api_key 并强制断连"
+
 
 async def _restore_pipeline_timers() -> None:
     """On server start, recover pipeline timeout timers from task store."""
@@ -6168,6 +6227,15 @@ async def handler(ws):
                     logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
             elif msg_type == "message" and agent_id:
+                # ── R86 B1: key 活性检查 ──
+                agent_keys = persistence.get_api_keys()
+                agent_key_record = agent_keys.get(agent_id)
+                if not agent_key_record or agent_key_record.get("status") == "revoked":
+                    await _send(ws, {
+                        "type": "error",
+                        "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
+                    })
+                    continue  # skip this message, keep connection alive
                 await handle_broadcast(ws, agent_id, msg)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增

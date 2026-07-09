@@ -20,6 +20,7 @@ from .persistence import (
     load_api_keys,
     save_pairing_codes, save_approved_users,
     save_web_sessions,
+    get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
 from .web_viewer import setup_routes, _ws_clients, write_chat_log
 import shared.protocol as p
@@ -102,6 +103,15 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
             elif msg_type == "message" and agent_id:
+                # ── R86 B1: key 活性检查 ──
+                _key_records = _get_api_keys()
+                _key_record = _key_records.get(agent_id)
+                if not _key_record or _key_record.get("status") == "revoked":
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
+                    })
+                    continue  # skip this message, keep connection alive
                 await handle_broadcast(ws, agent_id, data)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
