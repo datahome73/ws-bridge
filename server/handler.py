@@ -51,6 +51,14 @@ REGISTRATION_BROADCAST_ENABLED: bool = (
     os.environ.get("REGISTRATION_BROADCAST_ENABLED", "0") == "1"
 )
 
+# ── R87: _inbox:server 中继通道 ──────────────────────────
+SERVER_INBOX_CHANNEL = "_inbox:server"
+
+
+def is_server_inbox(channel: str) -> bool:
+    """判断 channel 是否为 server 中继通道。"""
+    return channel == SERVER_INBOX_CHANNEL
+
 # ── R42: Pipeline state ──────────────────────────────────────────
 _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
 
@@ -6205,6 +6213,98 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     return True, ""
 
 
+# ── R87: _inbox:server 中继转发 ─────────────────────────────
+
+
+async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
+    """R87: 处理发往 _inbox:server 的 bot 回复中继。
+
+    Args:
+        ws: WebSocket 连接
+        agent_id: 发送消息的 bot 的 agent_id（已认证）
+        msg: 消息 dict（必须含 channel/content 字段）
+
+    Returns:
+        True  — 消息已由中继处理（调用方应 continue，不继续路由）
+        False — 不是 _inbox:server 消息（调用方继续正常路由）
+    """
+    channel = msg.get("channel", "")
+    content = (msg.get("content") or "").strip()
+
+    # 非中继消息 → 走正常路由
+    if not is_server_inbox(channel):
+        return False
+
+    # ── 获取发送者信息 ──
+    sender_name = _r72_users.get(agent_id, {}).get("name", agent_id[:12])
+    pm_agent_id = config.PIPELINE_PM_AGENT_ID
+
+    # ═══ 安全守卫: PM 误发 _inbox:server ═══
+    if pm_agent_id and agent_id == pm_agent_id:
+        await _send(ws, {
+            "type": "error",
+            "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱。",
+        })
+        logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
+        return True
+
+    # ═══ 规则 1: ACK ✅ → 转发 PM（进度通知）═══
+    if content.startswith("ACK ✅"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统(中继)",
+                    "from_agent": "system",
+                    "content": f"📬 {sender_name} 已接活:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        logger.info("[Relay] ACK: %s → PM", sender_name)
+        return True
+
+    # ═══ 规则 2: ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
+    if content.startswith("✅ 完成"):
+        # ⑤ 转发给 PM
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统(中继)",
+                    "from_agent": "system",
+                    "content": f"✅ {sender_name} 任务完成:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # ⑥ 自动确认给 bot（发到 bot 的 inbox，不走 _inbox:server）
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统(中继)",
+                "from_agent": "system",
+                "content": "✅ 确认，已收到你的完成通知。本轮任务完成。",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
+        return True
+
+    # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
+    if content.startswith("!"):
+        logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
+        return False
+
+    # ═══ 规则 3: 其他内容 → 沉默 ═══
+    logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
+    return True
+
+
 async def handler(ws):
     """Per-connection WebSocket handler (legacy — used by websockets library)."""
     agent_id = None
@@ -6240,6 +6340,10 @@ async def handler(ws):
                         "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
                     })
                     continue  # skip this message, keep connection alive
+                # ═══ R87: _inbox:server 中继拦截 ═══
+                if await _handle_server_relay(ws, agent_id, msg):
+                    continue
+                # ════════════════════════════════════════
                 await handle_broadcast(ws, agent_id, msg)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增

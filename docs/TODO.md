@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.52
+> **版本：** v2.53
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -124,14 +124,126 @@
 |:-:|:----|:----:|:-----|
 | 📖 A2A | **[A2A 协议调研报告](A2A-Protocols-Research-Report.md)** | 🟢 已完成 | 调研 Google A2A、MCP、FIPA 等 Agent 协议，分析对 ws-bridge 可借鉴点。下一轮需求文档从本报告规划 |
 | 📖 A2A-v2 | **ws-bridge A2A 适配方案** （从调研报告延伸） | ⬜ 待规划 | 基于调研结论，输出具体适配方案（Task 状态机、Agent Card、Part 容器等） |
+| 📖 ECC | **[ECC multi-plan/multi-execute](https://github.com/datahome73/ECC) — 候选方向** | ⬜ 待排期 | 三个可借鉴点：① **并行分析** — 多个 bot 同时出方案再交叉验证，减少串行返工；② **结构化 Plan 交接** — bot 输出标准 Plan 文档供下个 bot 解析执行，减少自然语言沟通偏差；③ **多模型审计** — 实现后下一个 bot review 代码（已有 reviewer 轮，可强化）。后续切 ws-bridge 开发时讨论可行性 |\n|\n|---\n|\n|## 四、Roadmap — 分阶段演进规划\n|\n|> 本 roadmap 为 ws-bridge 中长期演进方向，基于「先夯实基础设施 → 再叠加智能编排 → 最后接入专业能力」的分层策略。\n|\n|### Phase 1 — 稳定 Inbox（当前阶段）\n|\n|**目标**：inbox 作为 ws-bridge 的核心通信机制，稳定可用，无死角\n|\n|**关键工作项**：\n|- ✅ R75—R83 已完成 inbox 化改造的基础\n|- 🔲 确认 inbox 在各种边缘场景下的稳定性（并发投递、消息丢失、超时重试）\n|- 🔲 各角色 bot 都能可靠地投递和消费 inbox 消息\n|- 🔲 补全 inbox 相关的监测和调试手段\n|\n|**完成标准**：inbox 通信链路在持续运行中无未预期丢消息、无积压死锁\n|\n|### Phase 2 — 自动化管线（Phase 1 完成后启动）
 
+**目标**：在 inbox 基础上，任务消息自动化流转，无需人工转发
+
+**核心通信架构：`_inbox:server` 中继模型**
+
+本 Phase 的基石是通信模式的升级——从"bot 直接回复 PM"改为"bot 统一回复到 `_inbox:server`，server 按前缀规则筛选后转发 PM"。
+
+**通道职责严格分离：**
+| 通道 | 用途 | 发送方 | 接收方 |
+|:-----|:------|:-------|:-------|
+| `_inbox:<bot_id>` | 任务派发 + 自动确认 | PM、Server | Bot |
+| `_inbox:<PM_id>` | 进度/结果转发通知 | Server | PM |
+| `_inbox:server` | **Bot 回复中继，仅用于此** | **仅限 Bot** | **Server 内部处理** |
+
+> ⚠️ `_inbox:server` 仅接受 bot 发来的消息。PM 和 server 都**不**往这个通道发消息，从根源上消除路由歧义。
+
+```
+PM                                Server                              Bot
+│                                  │                                  │
+│① 派活 ────────────────────────────────→ _inbox:<bot_id> ──────────→│
+│   PM直接发bot收件箱，不走server        │                              │
+│                                  │                                  │
+│                                  │←── ② ACK ✅ R{轮次} 收到！─────┤
+│                                  │     (_inbox:server)              │
+│←── ③ 转发 ACK（进度通知）──────────┤                                  │
+│                                  │                                  │
+│                                  │         [bot 干活中...]         │
+│                                  │                                  │
+│                                  │←── ④ ✅ 完成，已推 dev: xxx ───┤
+│                                  │     (_inbox:server) ← 唯一触发点 │
+│←── ⑤ 转发 完成 ──────────────────┤                                  │
+│         (通知PM)                  │── ⑥ 自动确认 ──────────────────→│
+│                                  │    (回复bot，_inbox:<bot_id>)     │
+│                                  │ ⑤+⑥ 同时触发，无先后顺序        │
+```
+
+| 步骤 | 动作 | 说明 |
+|:----|:------|:-----|
+| ① 派活 | **PM → _inbox:<bot_id>** | 跟现在一样，直接发目标 bot 收件箱 |
+| ③ 收 ACK 通知 | **收到 server 转发** | 知道 bot 已接活，看看就行 |
+| ⑤+⑥ | **server 同时发出** | 触发条件是 ④ bot 的 `✅ 完成` |
+| ⑤ 收完成通知 | **server → PM** | 看结果，闭环 |
+| ⑥ 自动确认 | **server → _inbox:<bot_id>** | 自动回复 bot，PM 不用管 |
+
+**前缀转发规则（server 端实现）：**
+- `ACK ✅` → Step 2 进度通知转发给 PM（`_inbox:<PM_id>`）
+- `✅ 完成` → 触发两条同步发出的消息（无先后顺序）：
+  - ⑤ 结果转发给 PM（`_inbox:<PM_id>`）
+  - ⑥ 自动确认回复 bot（`_inbox:<bot_id>`）
+- 其他内容 → server 沉默处理，不转发 PM
+- **关键：所有转发和确认都不走 `_inbox:server`，避免路由混淆**
+
+**三大收益：**
+| 维度 | 当前模式（点对点） | 改进模式（中继） |
+|:-----|:-----------------|:----------------|
+| 统一地址 | 每个 bot 要查 PM 的 agent_id | 所有 bot 统一回复 `_inbox:server` |
+| 消息筛选 | PM 收所有 bot 消息，包括啰嗦内容 | server 只按前缀转发关键消息，其余沉默 |
+| 扩展性 | 加新 bot 要同步通知 PM_id + 模板 | 加新 bot 零配置——统一遵守协议即可 |
+| PM 操作量 | 派活 + 逐一确认 | 派活 1 条，转发通知自动送达 |
+
+**核心设计问题**：
+- 管线拓扑如何定义（谁接谁，序列 vs 并行）
+- 消息格式标准化（方案文档、审查结论、编码需求各自的结构化 schema）
+- 并行 vs 串行决策路由
+- 异常流转（超时、驳回、跳步）的自动处理
+- 管线状态可观测（当前在第几步、谁在干活、下一步谁接）
+
+**关键工作项**：
+- 🔲 **`_inbox:server` 中继实现** — server 端识别特殊通道 `_inbox:server`，实现前缀匹配转发 + 自动确认（Step 4）
+- 🔲 **Bot 端适配** — 各 bot 回复目标从 `_inbox:<PM_id>` 改为 `_inbox:server`
+- 🔲 定义 Pipeline Topology 配置格式（YAML 或 JSON DSL 描述 Step 链 + 依赖关系）
+- 🔲 实现 AutoRouter — inbox 消息根据类型/来源自动派发到下一环节
+- 🔲 引入结构化 Task Card（替代自然语言描述）作为 bot 间交接的标准化文档载体
+- 🔲 异常处理机制：超时触发、驳回回退、跳过步骤
+- 🔲 管线监控可视化（`!pipeline_status` 增强，展示整条链路的进度）
+- 🔲 **更新 inbox-message-protocol.md** — §8 全流程协议改为 `_inbox:server` 中继模型
+
+**完成标准**：一次派活后全线自动执行完毕，无需人工介入转发消息
+### Phase 3 — Coder Agent 编码专精（Phase 1+2 完成后启动）
+**目标**：编码环节由专门的 Coder Agent 承担，与 Hermes（沟通/文档）角色分离
+**架构示意**：
+```
+ws-bridge (编排层)
+  ├── Hermes (沟通 + 文档)
+  │   └── 角色：小谷(方案)、小开(审查)、PM(确认)
+  │
+  ├── Coder Agent (编码)
+  │   └── 后端：OpenCode / Codex / Claude Code 等
+  │
+  └── 本地代码仓库（可注入到 dev 环境验证）
+```
+**关键工作项**：
+- 🔲 Coder Agent 服务封装 — 在 ws-bridge 中集成专门的编码 agent 后端（如 OpenCode / Claude Code），通过子进程或 API 调用
+- 🔲 编码任务标准化 — 定义「编码需求卡」结构化格式（接口定义、字段说明、参考文件、验收标准）
+- 🔲 Coder Agent 只写代码 + 跑测试，不处理文档/沟通
+- 🔲 输出产出自带验证（git diff + 测试结果 + lint 检查）
+- 🔲 爱泰（Hermes）角色升级为编码 PM — 写 prompt 给 Coder Agent，review 结果后整合输出
+- 🔲 本地代码仓库支持注入到 dev 环境做集成验证
+**完成标准**：编码任务从「爱泰亲自写」变为「爱泰写 prompt → Coder Agent 写代码 → 爱泰 review + 输出」，编码速度和质量显著提升
+### 依赖关系
+```
+Phase 1 (稳定 Inbox)
+       ↓
+Phase 2 (自动化管线)
+       ↓
+Phase 3 (Coder Agent)
+```
+下一阶段启动的前提：前一个阶段已完成 + 连续稳定运行 2 个开发轮次无回归
 ---
 
-## 四、变更记录
+## 五、变更记录
 
 || 版本 | 日期 | 变更 |
 ||:---:|:----:|:----|
-||| v2.52 | 2026-07-08 | 🎯 **R86 v2 完成 ✅** — Agent API Key 管理增强：display_name 去重 + key 活性检查 + 吊销断连。审查修复后加强版。修复 _ADMIN_COMMANDS 定义顺序 (NameError)。合并部署 main `045dbf2`，ws-bridge:r86 镜像 |\n||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
+|| v2.52 | 2026-07-09 | 🗺️ **Roadmap 规划上线** — 新增 §四 Roadmap，定义三阶段演进：Phase 1（稳定 Inbox）、Phase 2（自动化管线）、Phase 3（Coder Agent 编码专精）。来源于 OpenCode 调研 + ECC 候选方向 + 编码环节专业化讨论 |
+||:---:|:----:|:----|
+|| v2.53 | 2026-07-09 | 🎯 **Phase 2 架构设计上线** — 新增 `_inbox:server` 中继架构作为自动化管线基石。PM 仅需 1 条派活消息，bot 统一回复到 `_inbox:server`，server 按前缀匹配转发关键消息（ACK ✅ / ✅ 完成）并自动发 Step 4 确认。替换原 Phase 2 核心设计问题列表，新增通信架构图、前缀规则、收益对比表。源自 R86 后 inbox 通信模式升级讨论 |
+||:---:|:----:|:----|
+||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
 ||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |\n||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
 ||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅**
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |

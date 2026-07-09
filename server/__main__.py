@@ -10,7 +10,7 @@ import uuid
 from aiohttp import web
 
 from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS
-from .handler import handle_auth, handle_broadcast, handle_register, _connections
+from .handler import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
 from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
@@ -112,6 +112,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
                     })
                     continue  # skip this message, keep connection alive
+                # ═══ R87: _inbox:server 中继拦截 ═══
+                if await _handle_server_relay(ws, agent_id, data):
+                    continue
+                # ════════════════════════════════════════
                 await handle_broadcast(ws, agent_id, data)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增

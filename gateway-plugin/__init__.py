@@ -419,7 +419,9 @@ class WSBridgeAdapter(BasePlatformAdapter):
                 return
 
             # Mention mode: only respond when keyword present
-            if self._mention_mode and self._mention_keywords:
+            # R82+: inbox messages (_inbox:*) bypass mention filtering
+            broadcast_channel = msg.get(FIELD_CHANNEL, "lobby")
+            if self._mention_mode and self._mention_keywords                     and not broadcast_channel.startswith("_inbox:"):
                 if not any(kw in content for kw in self._mention_keywords):
                     logger.warning(
                         "[WSBridge] Silent: no mention keyword in %s",
@@ -492,7 +494,13 @@ class WSBridgeAdapter(BasePlatformAdapter):
                     )
 
     def _determine_channel(self, content: str, context_channel: str) -> str:
-        """Determine channel: @admin goes to lobby, others use active channel."""
+        """Determine channel: @admin goes to lobby, others use active channel.
+        
+        R82+: inbox messages use context_channel (the resolved sender's inbox)
+        as the reply target, not _active_channel.
+        """
+        if context_channel.startswith("_inbox:"):
+            return context_channel
         if any(f"@{kw}" in content for kw in self._mention_keywords):
             return "lobby"
         return self._active_channel or "lobby"
@@ -503,8 +511,18 @@ class WSBridgeAdapter(BasePlatformAdapter):
         from gateway.platforms.base import MessageEvent, MessageType
 
         broadcast_channel = raw_msg.get(FIELD_CHANNEL, "lobby")
-        if broadcast_channel != "lobby":
+        # R82+: don't update _active_channel for inbox — _determine_channel handles it
+        if broadcast_channel != "lobby" and not broadcast_channel.startswith("_inbox:"):
             self._active_channel = broadcast_channel
+
+        # R82+ inbox routing: redirect reply to sender's inbox
+        from_agent = raw_msg.get("from_agent") or raw_msg.get("agent_id") or ""
+        if broadcast_channel.startswith("_inbox:") and from_agent:
+            broadcast_channel = f"_inbox:{from_agent}"
+            logger.warning(
+                "[WSBridge] Inbox redirect: %s → %s (reply to sender's inbox)",
+                raw_msg.get(FIELD_CHANNEL, ""), broadcast_channel,
+            )
 
         source = self.build_source(
             chat_id=broadcast_channel,
@@ -549,12 +567,15 @@ def register(ctx) -> None:
         emoji="🌉",
         allow_update_command=False,
         platform_hint=(
-            "You are chatting via WS Bridge — a self-hosted broadcast group chat for bots. "
-            "STRICT RULES: "
-            "1. This is a shared channel — ALL connected bots see your messages. "
-            "2. Text-only — NO files, images, voice, or media. "
-            "3. Do NOT output internal thinking, reasoning traces, or tool calls. "
-            "4. Keep responses concise and conversational. "
-            "5. If the message doesn't start with your name, it may not be directed at you."
+            "You are a bot on WS Bridge inbox system. "
+            "RULES (strict — violate = warning): "
+            "1. Inbox = task communication, NOT a chat. "
+            "2. ONLY 2 messages per task: "
+            "   Message 1 (on receive): one line 「ACK ✅ R85 收到」 "
+            "   Message 2 (on done): one line 「✅ 完成，已推 dev: abc1234」 "
+            "3. PROHIBITED: thinking, reasoning, “我先…”, “现在…”, empty msgs, progress updates, analysis steps. "
+            "4. You NEVER explain what you are about to do or have done. You ONLY send the result line. "
+            "5. ONE message per step — never split. "
+            "6. After Message 2, STOP. No follow-ups."
         ),
     )

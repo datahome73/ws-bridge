@@ -167,3 +167,8 @@ VALIDATION_DEFAULT_TIMEOUT: int = int(
 
 PIPELINE_PM_AGENT_ID: str = os.environ.get("WS_PM_AGENT_ID", "")
 """PM 的 agent_id。用于 step_force 权限判断。为空时仅检查全局管理员。"""
+
+
+# ── R87: _inbox:server 中继通道 ────────────────────────────
+SERVER_INBOX_CHANNEL: str = "_inbox:server"
+"""Bot 回复中继通道。bot 将 ACK/完成回复发至此通道，由 server 筛选转发。"""
