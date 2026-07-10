@@ -225,8 +225,14 @@ class PipelineAutoRouter:
                 await self._on_step_complete(content)
                 return
 
-        # _admin 专有: 只响应管线启动信号，其他忽略
+        # _admin 专有: 响应管线停止信号，其他忽略
         if is_admin:
+            # ═══ 信号 4: 管线停止（_admin 广播） ═══
+            if "Pipeline" in content and "已停止" in content:
+                round_name = self._extract_round(content)
+                if round_name:
+                    await self._cancel_pipeline(round_name)
+                return
             return  # 不干扰 admin 频道正常通信
 
     async def _on_pipeline_ready(self, round_name: str) -> None:
@@ -416,6 +422,20 @@ class PipelineAutoRouter:
         self._step_dispatch_times.pop(round_name, None)
         self._step_timeout_notified.pop(round_name, None)
         logger.debug("[AR] ⏰ [%s] 全部计时器已清空", round_name)
+
+    # ── R95: 管线停止 ──
+
+    async def _cancel_pipeline(self, round_name: str) -> None:
+        """R95: 收到停止信号后取消管线调度。"""
+        progress = self._round_progress.pop(round_name, None)
+        if progress:
+            self._cleanup_all_dispatch(round_name)
+            logger.info("[AR] [%s] 🛑 管线已停止，清除进度", round_name)
+            await self._send_to_pm(
+                f"🛑 AutoRouter: {round_name} 管线已停止，自动调度已取消。"
+            )
+        else:
+            logger.debug("[AR] [%s] 收到停止信号但无活跃进度", round_name)
 
     async def _timeout_check_loop(self) -> None:
         """R89 🅱️: Step 超时检测后台循环。

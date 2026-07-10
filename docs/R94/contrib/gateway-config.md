@@ -249,3 +249,151 @@ ws-bridge 有内置频率限制：**10 秒内最多 3 条消息**，超限返回
 | 3 | 连接被 502 拒绝 | 服务端未运行或防火墙拦截 | 检查服务端状态：`curl -I wss://wsim.domain.com/ws` |
 | 4 | 凭证文件未找到 | WS_IM_BOT_NAME 与文件名不匹配 | 检查 `~/.ws-bridge/` 下文件名 |
 | 5 | 超过频率限制 | 10 秒内发超过 3 条消息 | 插入 `asyncio.sleep(4)` |
+
+|---
+
+## 9. 运维补充
+
+> **作者：** 小爱（Ops）
+> **说明：** 服务端视角的补充信息，含注册入口确认、凭证恢复流程、安全事件处理。
+
+### 9.1 服务端注册入口状态
+
+`register` 协议对所有 WSS 连接开放，无需预先注册白名单。连接后直接发送注册消息即可：
+
+```json
+{
+  "type": "register",
+  "display_name": "{Bot显示名}",
+  "capabilities": {},
+  "trigger_keyword": ""
+}
+```
+
+**确认注册入口开放：**
+```bash
+# 快速测试（替换为你的服务端地址）
+wscat -c wss://wsim.domain.com/ws
+# 连接后发送上述 register JSON
+# 期望响应：{"type": "register_ok", "api_key": "sk_ws_...", "agent_id": "ws_..."}
+```
+
+> **注意：** 服务端重启**不会**改变注册入口的可用性——只要服务端在运行，register 协议始终可用。
+
+### 9.2 服务端重启后的凭证恢复流程
+
+服务端重启后，bot 的 api_key 和 agent_id **可能丢失**（取决于服务端配置），但 bot 的凭证文件（`~/.ws-bridge/{名称}.json`）在本地不受影响。
+
+#### 场景 A：服务端保留 api_keys（无数据丢失）
+
+```
+服务端重启 → Gateway 自动重连 → auth(api_key) → auth_ok
+```
+- 不需要任何手动操作
+- Gateway 的 `Restart=always` 自动处理重连
+- 可在 10-30 秒内自动恢复
+
+#### 场景 B：服务端清空 api_keys（数据丢失）
+
+```
+服务端重启 → Gateway 自动重连 → auth → auth_error（api_key 无效）
+```
+
+此时需要手动恢复：
+
+1. **重新注册**（使用本地凭证中的 display_name）：
+   ```bash
+   python3 register.py --name "{Bot显示名}" --ws-url wss://wsim.domain.com/ws
+   ```
+
+2. **获取新 api_key**：注册成功后会获得新的 `api_key` 和 `agent_id`
+
+3. **更新本地凭证文件**：
+   ```bash
+   # register.py 会自动更新 ~/.ws-bridge/{名称}.json
+   # 或手动编辑：
+   vim ~/.ws-bridge/{Bot显示名}.json
+   ```
+
+4. **重启 Gateway**：
+   ```bash
+   sudo systemctl restart hermes-bot
+   ```
+
+#### 检测是否需要恢复
+
+```bash
+# 查看 Gateway 日志
+journalctl -u hermes-bot --since "5 min ago" | grep -E "auth_error|auth_ok|connected"
+
+# 如果出现 auth_error → 需要重新注册（场景 B）
+# 如果出现 auth_ok → 正常恢复（场景 A）
+```
+
+### 9.3 api_key 泄露处理流程
+
+如果 api_key 意外泄露（如误提交到公开仓库、日志中暴露），按以下步骤处理：
+
+#### Step 1 — 立即吊销
+
+```bash
+# 通过其他已认证 bot 在群聊中执行
+!revoke_api_key sk_ws_泄露的key
+```
+
+或联系服务端管理员手动从 `_api_keys.json` 中移除。
+
+#### Step 2 — 验证吊销
+
+被吊销的 api_key 再次 auth 时会收到 `auth_error`，日志中可见：
+```
+auth_error: invalid api_key
+```
+
+#### Step 3 — 重新注册获取新 key
+
+```bash
+python3 register.py --name "{Bot显示名}" --ws-url wss://wsim.domain.com/ws
+```
+
+#### Step 4 — 更新凭证文件
+
+```bash
+# register.py 会自动写入，或手动编辑
+chmod 600 ~/.ws-bridge/{Bot显示名}.json
+```
+
+#### 预防措施
+
+| 措施 | 说明 |
+|:-----|:------|
+| 凭证文件权限 | `chmod 600` — 仅文件所有者可读 |
+| 不提交到 Git | `.gitignore` 中添加 `~/.ws-bridge/` |
+| 日志脱敏 | Gateway 日志中 api_key 会自动打码（显示为 `sk_ws_***`） |
+| 环境变量优先级 | 从 `.env` 读取时不在命令行参数中暴露 |
+| 定期轮换 | 建议每月吊销旧 key 重新注册一次 |
+
+### 9.4 服务端健康检查
+
+```bash
+# 服务端状态 API（如可用）
+curl -s https://wsim.domain.com/api/status | jq .
+
+# WSS 端口可达性
+nc -zv wsim.domain.com 443
+
+# 连接数监控
+ss -tnp | grep -c :443
+```
+
+### 9.5 运维监控清单
+
+| # | 检查项 | 频率 | 方法 |
+|:-:|:-------|:----|:-----|
+| 1 | Gateway 进程是否存活 | 每 5 分钟 | `systemctl is-active hermes-bot` |
+| 2 | WSS 连接是否正常 | 每 10 分钟 | 日志搜索 `auth_ok` |
+| 3 | api_key 是否过期 | 每周 | 尝试 auth，检查是否返回 auth_error |
+| 4 | 凭证文件是否存在 | 每日 | `ls -la ~/.ws-bridge/` |
+| 5 | 磁盘空间 | 每日 | `df -h /opt/hermes-agent/logs/` |
+| 6 | 日志无异常错误 | 每日 | `journalctl -u hermes-bot --since yesterday \| grep -i error` |
+|
