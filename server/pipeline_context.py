@@ -519,7 +519,7 @@ class PipelineContextManager:
         path = self._data_dir / _PERSISTENT_FILE
         try:
             data = {
-                round_name: ctx.to_dict()
+                round_name: ctx.to_dict() if hasattr(ctx, "to_dict") else ctx
                 for round_name, ctx in self._contexts.items()
             }
             path.write_text(
