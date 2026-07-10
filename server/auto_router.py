@@ -18,6 +18,7 @@ import os
 import random
 import re
 import sys
+import time
 from typing import Any
 
 import yaml
@@ -32,6 +33,9 @@ class PipelineAutoRouter:
     _MAX_SEEN_IDS = 1000
     _RECONNECT_INITIAL_DELAY = 1  # 秒
     _RECONNECT_MAX_DELAY = 60  # 秒
+    # ── R89 🅱️: Step 超时检测 ──
+    _TIMEOUT_CHECK_INTERVAL = 300  # 5 分钟检查一次
+    _STEP_DEFAULT_TIMEOUT = 7200   # 2 小时默认超时
     _STANDARD_PIPELINE_ORDER = [
         "product_manager", "pm", "architect", "arch", "developer", "dev",
         "reviewer", "review", "qa", "test", "operations", "ops",
@@ -78,6 +82,12 @@ class PipelineAutoRouter:
         self._pipeline_config: dict = {}
         self._prev_sha: str = ""
 
+        # ── R89 🅱️: Step 超时检测 ──
+        # round_name → {step_key: {"dispatch_time": float, "role": str}}
+        self._step_dispatch_times: dict[str, dict[str, dict]] = {}
+        # round_name → set[step_key]  已通知超时的 step（防重复）
+        self._step_timeout_notified: dict[str, set[str]] = {}
+
     # ═══════════════ 生命周期 ═══════════════
 
     async def start(self) -> None:
@@ -117,38 +127,54 @@ class PipelineAutoRouter:
         logger.info("[AR] 🛑 AutoRouter 已停止")
 
     async def _connect_and_listen(self) -> None:
-        """建立 WS 连接 → 认证 → 恢复状态 → 主监听循环。"""
+        """建立 WS 连接 → 认证 → 恢复状态 → 主监听循环（含超时检测后台 task）。"""
         import websockets
 
-        async with websockets.connect(
-            self.ws_url,
-            max_size=2**20,
-            ping_interval=30,
-            ping_timeout=10,
-        ) as ws:
-            self.ws = ws
+        timeout_task: asyncio.Task | None = None  # 🅱️
 
-            # ① 认证
-            await ws.send(json.dumps({"type": "auth", "api_key": self.api_key}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-            if resp.get("type") != "auth_ok":
-                raise RuntimeError(f"认证失败: {resp}")
-            self.my_agent_id = resp.get("agent_id", "")
-            self.my_inbox = f"_inbox:{self.my_agent_id}"
-            logger.info("[AR] ✅ 已连接, agent_id=%s", self.my_agent_id[:16])
+        try:
+            async with websockets.connect(
+                self.ws_url,
+                max_size=2**20,
+                ping_interval=30,
+                ping_timeout=10,
+            ) as ws:
+                self.ws = ws
 
-            # ② 启动时重建已有管线状态（B5/B6/B8）
-            await self._restore_pipeline_state()
+                # ① 认证
+                await ws.send(json.dumps({"type": "auth", "api_key": self.api_key}))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if resp.get("type") != "auth_ok":
+                    raise RuntimeError(f"认证失败: {resp}")
+                self.my_agent_id = resp.get("agent_id", "")
+                self.my_inbox = f"_inbox:{self.my_agent_id}"
+                logger.info("[AR] ✅ 已连接, agent_id=%s", self.my_agent_id[:16])
 
-            # ③ 主监听循环
-            async for raw in ws:
+                # ── 🅱️ 启动超时检测后台 task ──
+                timeout_task = asyncio.create_task(self._timeout_check_loop())
+                logger.info("[AR] ⏰ 超时检测已启动 (interval=%ds, timeout=%ds)",
+                            self._TIMEOUT_CHECK_INTERVAL, self._STEP_DEFAULT_TIMEOUT)
+
+                # ② 启动时重建已有管线状态（B5/B6/B8）
+                await self._restore_pipeline_state()
+
+                # ③ 主监听循环
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                        await self._handle_message(msg)
+                    except json.JSONDecodeError:
+                        logger.debug("[AR] 无效 JSON: %s", raw[:80])
+                    except Exception as exc:
+                        logger.error("[AR] 消息处理异常: %s", exc)
+        finally:
+            # ── 🅱️ 取消超时 task ──
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
                 try:
-                    msg = json.loads(raw)
-                    await self._handle_message(msg)
-                except json.JSONDecodeError:
-                    logger.debug("[AR] 无效 JSON: %s", raw[:80])
-                except Exception as exc:
-                    logger.error("[AR] 消息处理异常: %s", exc)
+                    await timeout_task
+                except asyncio.CancelledError:
+                    pass
 
     # ═══════════════ 消息处理 ═══════════════
 
@@ -249,6 +275,11 @@ class PipelineAutoRouter:
         next_step = chain[next_idx]
         await self._dispatch_step(round_name, next_step, role, sha, chain)
 
+        # ── 🅱️ 完成时清理该 Step 的计时器 ──
+        step_key = chain[current_idx].get("step", "")
+        if step_key:
+            self._cleanup_dispatch(round_name, step_key)
+
         logger.info(
             "[AR] [%s] ✅ %s → 🎯 %s (SHA=%s)",
             round_name, role, next_step.get("role", "?"), sha or "?",
@@ -320,6 +351,13 @@ class PipelineAutoRouter:
         for attempt in range(2):
             try:
                 await self._send_inbox(target_id, task_content)
+                # ── 🅱️ 记录派活时间（确保 send 成功后再记录） ──
+                self._step_dispatch_times.setdefault(round_name, {})[step_key] = {
+                    "dispatch_time": time.time(),
+                    "role": role,
+                }
+                logger.info("[AR] ⏰ [%s] %s(%s) 已记录派活时间",
+                            round_name, step_key, role)
                 logger.info("[AR] 派活 %s → %s (%s)", round_name, role, target_id[:12])
                 return
             except Exception as e:
@@ -336,7 +374,71 @@ class PipelineAutoRouter:
     async def _notify_all_done(self, round_name: str) -> None:
         """全部完成通知 PM。"""
         await self._send_to_pm(f"🏁 {round_name} 全部 Step 已完成！管线自动闭环。")
+        # ── 🅱️ 清空该轮所有计时器 ──
+        self._cleanup_all_dispatch(round_name)
         logger.info("[AR] [%s] 🏁 全线闭环", round_name)
+
+    # ── 🅱️ 超时检测辅助方法 ──
+
+    def _cleanup_dispatch(self, round_name: str, step_key: str) -> None:
+        """R89 🅱️: 移除指定 Step 的超时计时器。"""
+        steps = self._step_dispatch_times.get(round_name)
+        if steps and step_key in steps:
+            del steps[step_key]
+            logger.debug("[AR] ⏰ [%s] %s 计时器已清理", round_name, step_key)
+        # 也清理已通知标记
+        notified = self._step_timeout_notified.get(round_name)
+        if notified and step_key in notified:
+            notified.discard(step_key)
+
+    def _cleanup_all_dispatch(self, round_name: str) -> None:
+        """R89 🅱️: 清空指定轮次的所有超时计时器。"""
+        self._step_dispatch_times.pop(round_name, None)
+        self._step_timeout_notified.pop(round_name, None)
+        logger.debug("[AR] ⏰ [%s] 全部计时器已清空", round_name)
+
+    async def _timeout_check_loop(self) -> None:
+        """R89 🅱️: Step 超时检测后台循环。
+
+        随 _connect_and_listen() 启动，周期检查所有活跃 Step 是否超时。
+        """
+        while self._running:
+            try:
+                await self._check_step_timeouts()
+            except Exception as e:
+                logger.error("[AR] ⏰ 超时检查异常: %s", e)
+            await asyncio.sleep(self._TIMEOUT_CHECK_INTERVAL)
+
+    async def _check_step_timeouts(self) -> None:
+        """R89 🅱️: 检查所有活跃 Step 是否超时。
+
+        遍历 _step_dispatch_times，超时 ≥ _STEP_DEFAULT_TIMEOUT 则通知 PM。
+        同一 Step 仅首次通知（_step_timeout_notified 防重复）。
+        """
+        now = time.time()
+        overdue_count = 0
+
+        for round_name, steps in list(self._step_dispatch_times.items()):
+            for step_key, info in list(steps.items()):
+                elapsed = now - info["dispatch_time"]
+                if elapsed > self._STEP_DEFAULT_TIMEOUT:
+                    overdue_count += 1
+                    notified = self._step_timeout_notified.setdefault(round_name, set())
+                    if step_key not in notified:
+                        notified.add(step_key)
+                        await self._send_to_pm(
+                            f"⏰ AutoRouter 超时告警: {round_name} {step_key} "
+                            f"({info['role']}) 已超过 {self._STEP_DEFAULT_TIMEOUT // 3600} 小时 "
+                            f"未完成，请检查 Bot 状态"
+                        )
+                        logger.warning(
+                            "[AR] ⏰ [%s] %s(%s) 超时: %.0fs",
+                            round_name, step_key, info["role"], elapsed,
+                        )
+
+        active_total = sum(len(v) for v in self._step_dispatch_times.values())
+        logger.debug("[AR] ⏰ 超时检查: %d/%d 活跃 Step 超时",
+                     overdue_count, active_total)
 
     async def _fetch_topology(self, round_name: str) -> dict | None:
         """从远程 WORK_PLAN.md 读取 frontmatter → pipeline topology。
@@ -566,13 +668,20 @@ class PipelineAutoRouter:
     # ═══════════════ 通信 ═══════════════
 
     async def _send_inbox(self, target_id: str, content: str) -> None:
-        """发送 inbox 消息到目标 bot。"""
+        """发送 inbox 消息到目标 bot。
+
+        R89 🅰️: payload 补全 — 增加 from_name/agent_id/id/ts 四个字段。
+        """
         if not self.ws:
             raise RuntimeError("WebSocket 未连接")
         payload = {
             "type": "message",
             "channel": f"_inbox:{target_id}",
             "content": content,
+            "from_name": "系统(管线)",
+            "agent_id": self.my_agent_id,
+            "id": f"auto-{int(time.time() * 1000)}",
+            "ts": time.time(),
         }
         await self.ws.send(json.dumps(payload))
 
