@@ -2892,6 +2892,69 @@ async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
     )
 
 
+# ── R95: Pipeline stop command ────────────────────────────────
+
+
+async def _cmd_pipeline_stop(sender_id: str, params: dict) -> str:
+    """停止 AutoRouter 管线调度。
+    用法：!pipeline_stop <R{N}>
+    """
+    positional = params.get("_positional", [])
+    if not positional:
+        return "❌ 用法：!pipeline_stop <R{N}>"
+    round_name = positional[0].upper()
+
+    # 1. 从 PipelineContextManager 查找
+    mgr = _ensure_pipeline_manager()
+    ctx = mgr.get(round_name)
+
+    # 2. 从 _PIPELINE_STATE 查找（旧系统）
+    pstate = _PIPELINE_STATE.get(round_name)
+
+    if not ctx and not pstate:
+        return f"❌ 管线 {round_name} 不存在"
+
+    # 3. 权限校验：仅发起者可 stop
+    creator = ""
+    if ctx:
+        creator = ctx.created_by
+    elif pstate:
+        creator = pstate.get("triggerer_id", "")
+    if creator and sender_id != creator:
+        return f"❌ 只有发起者可以 stop 此管线"
+
+    # 4. 状态检查
+    if ctx and ctx.status == PipelineStatus.STOPPED:
+        return f"✅ Pipeline {round_name} 已停止（无需操作）"
+    if pstate and not pstate.get("active", False):
+        # 旧系统中 inactive = 已结束/停止
+        return f"✅ Pipeline {round_name} 已停止（无需操作）"
+
+    # 5. 执行停止
+    if ctx:
+        ok = await mgr.transition_to(round_name, PipelineStatus.STOPPED)
+        if not ok:
+            return f"❌ 无法停止 {round_name}（状态转换失败）"
+    if pstate:
+        pstate["active"] = False
+        pstate["stopped_at"] = __import__("time").time()
+
+    # 6. 广播到 _admin
+    try:
+        await _broadcast_to_channel(p.ADMIN_CHANNEL, {
+            "type": "broadcast",
+            "channel": p.ADMIN_CHANNEL,
+            "from_name": "系统",
+            "from_agent": SYSTEM_AGENT_ID,
+            "content": f"🛑 Pipeline {round_name} 已停止（发起者: {sender_id[:12]}...）",
+            "ts": time.time(),
+        })
+    except Exception:
+        pass  # 不阻断 return
+
+    return f"🛑 Pipeline {round_name} 已停止"
+
+
 # ── R68 A3: Send inbox task assignment + workspace notification ──
 async def _send_inbox_task(
     target_agent_id: str,
@@ -4735,6 +4798,10 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "pipeline": {
         "handler": _handle_pipeline_command, "min_role": 2, "workspace_scope": False,
         "usage": "!pipeline <create|status|list|advance|block|archive|cancel> [args]",
+    },
+    "pipeline_stop": {
+        "handler": _cmd_pipeline_stop, "min_role": 2, "workspace_scope": False,
+        "usage": "!pipeline_stop <R{N}>",
     },
         # ── R49 B: Agent Card commands ──
     "agent_card": {

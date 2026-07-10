@@ -21,23 +21,25 @@ logger = logging.getLogger("ws-bridge.pipeline_context")
 
 
 class PipelineStatus(enum.StrEnum):
-    """管线状态机 — 6 个状态，5 条合法转换路径。"""
+    """管线状态机 — 7 个状态，6 条合法转换路径。"""
     INIT = "init"
     PLANNING = "planning"
     RUNNING = "running"
     BLOCKED = "blocked"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"  # R95: 通过 !pipeline_stop 命令手动停止
 
 
 # 合法转换矩阵
 _VALID_TRANSITIONS: dict[PipelineStatus, set[PipelineStatus]] = {
     PipelineStatus.INIT: {PipelineStatus.PLANNING, PipelineStatus.CANCELLED},
     PipelineStatus.PLANNING: {PipelineStatus.RUNNING, PipelineStatus.BLOCKED, PipelineStatus.CANCELLED},
-    PipelineStatus.RUNNING: {PipelineStatus.BLOCKED, PipelineStatus.COMPLETED, PipelineStatus.CANCELLED},
+    PipelineStatus.RUNNING: {PipelineStatus.BLOCKED, PipelineStatus.COMPLETED, PipelineStatus.CANCELLED, PipelineStatus.STOPPED},
     PipelineStatus.BLOCKED: {PipelineStatus.RUNNING, PipelineStatus.CANCELLED},
     PipelineStatus.COMPLETED: set(),
     PipelineStatus.CANCELLED: set(),
+    PipelineStatus.STOPPED: set(),
 }
 
 
