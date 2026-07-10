@@ -38,7 +38,7 @@ pipeline:
 
 # R97 WORK_PLAN — AutoRouter 稳定化：PipelineContext 驱动
 
-> **状态：** 📋 需求已审核通过 ✅
+> **状态：** 📋 需求已审核通过 ✅ | WORK_PLAN 已审核通过 ✅
 > **需求文档:** https://raw.githubusercontent.com/datahome73/ws-bridge/refs/heads/main/docs/R97/R97-product-requirements.md
 > **基线:** `main` latest
 
