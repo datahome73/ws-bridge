@@ -52,6 +52,9 @@ class PipelineAutoRouter:
             os.path.dirname(__file__), "..", "data"
         )
         self._pipeline_contexts_path = os.path.join(self.data_dir, "pipeline_contexts.json")
+        self.agent_card_path = os.path.join(
+            os.path.dirname(__file__), "..", "config", "agent_cards.json"
+        )
 
         # ── WebSocket 状态 ──
         self.ws: Any = None  # websockets.WebSocketClientProtocol
@@ -533,12 +536,13 @@ class PipelineAutoRouter:
 
         # ③ 角色名缩写匹配
         short_map = {
+            "pm": ["product-manager", "product_manager", "product"],
             "arch": ["architect", "architecture"],
             "dev": ["developer", "development"],
             "review": ["reviewer", "code_review"],
             "qa": ["test", "tester", "quality"],
+            "operations": ["admin", "ops", "devops", "infra"],
             "ops": ["operations", "devops", "infra"],
-            "pm": ["product_manager", "product"],
         }
         for short, expanded in short_map.items():
             if role == short:
@@ -553,28 +557,38 @@ class PipelineAutoRouter:
         return None
 
     async def _refresh_role_map(self) -> None:
-        """R97: 通过 !agent_card list 刷新角色映射缓存（60s TTL）。"""
+        """R97: 从 config/agent_cards.json 读取角色映射（60s TTL 缓存）。"""
         now = time.time()
         if now - self._last_role_refresh < self._role_map_ttl:
             return
-        if not self.ws:
+
+        if not os.path.exists(self.agent_card_path):
+            logger.warning("[AR] Agent Card 文件不存在: %s", self.agent_card_path)
+            self._last_role_refresh = now
             return
 
         try:
-            qid = f"role-q-{int(now * 1000)}"
-            await self.ws.send(json.dumps({
-                "type": "message",
-                "channel": "_admin",
-                "content": "!agent_card list",
-                "from_name": "系统(管线)",
-                "agent_id": self.my_agent_id,
-                "id": qid,
-                "ts": now,
-            }))
+            with open(self.agent_card_path, encoding="utf-8") as f:
+                cards = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("[AR] Agent Card 读取失败: %s", e)
             self._last_role_refresh = now
-            logger.debug("[AR] 角色映射刷新请求已发送")
-        except Exception as e:
-            logger.warning("[AR] 角色映射刷新失败: %s", e)
+            return
+
+        role_index: dict[str, list[str]] = {}
+        for agent_id, card in cards.items():
+            roles: list[str] = []
+            if "pipeline_roles" in card and isinstance(card["pipeline_roles"], list):
+                roles = card["pipeline_roles"]
+            elif "role" in card:
+                roles = [card["role"]]
+            for role in roles:
+                role_index.setdefault(role, []).append(agent_id)
+
+        self._role_index = role_index
+        self._last_role_refresh = now
+        logger.info("[AR] 角色映射已刷新: %d 角色, %d agent(s)",
+                     len(role_index), sum(len(v) for v in role_index.values()))
 
     # ═══════════════ 解析工具 ═══════════════
 
