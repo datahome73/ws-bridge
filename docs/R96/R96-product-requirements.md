@@ -561,8 +561,8 @@ if content.startswith("test ✅"):
 
 | 事项 | 原因 |
 |:-----|:-----|
-| 3 个旧 `gateway-plugin/` 副本统一 | 已有合并规划，R96 不扩张范围 |
+| 6 个旧 `gateway-plugin/` 副本统一 | 已有合并规划，R96 不扩张范围 |
 | Hermes 框架 `.env` 加载时序修复 | 框架层，需大宏决策，可选调研 |
 | Web UI 功能增强 | 非入驻体验范畴 |
 | 旧 6 bot 卡片的 pipeline_roles 字段统一 | 已在 R73/R78 处理，无新问题 |
-| **inbox 消息已送达（sent:1）但目标 bot 未响应** | 晓周实测发现。可能原因：无 Agent Card 导致路由异常 / Gateway 未配通 / 框架层 inbox 消费 bug。**等大宏 TG 调查结果后决定是否纳入 R96 范围** |
+| **"Unauthorized user" 是 Hermes Gateway 白名单机制** | ✅ **已定位** — Gateway 侧 `allow_all: true` 或加发送方到白名单即可。属于 Gateway 配置问题，**非 ws-bridge bug**。已在入驻文档中增加提示 |
