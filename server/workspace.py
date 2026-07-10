@@ -264,7 +264,8 @@ def create_workspace(
         1 for w in _workspaces.values()
         if w.owner_id == owner_id and w.state == WorkspaceState.ACTIVE
     )
-    max_per_person = 1  # configurable later
+    # R91 🅰️: 从环境变量读取，默认 3 个活跃工作室
+    max_per_person = int(os.environ.get("MAX_ACTIVE_WORKSPACES", "3"))
     if active_count >= max_per_person:
         logger.warning(
             "Owner %s already has %d active workspaces (max %d)",
@@ -404,7 +405,7 @@ def check_idle(ws_id: str) -> bool:
     return False
 
 
-def can_create_for(owner_id: str, max_active: int = 1) -> bool:
+def can_create_for(owner_id: str, max_active: int = 3) -> bool:
     """Check if owner can create a new workspace."""
     active_count = sum(
         1 for w in _workspaces.values()

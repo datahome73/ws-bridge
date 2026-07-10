@@ -690,7 +690,22 @@ async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
     
     result = ws_mod.create_workspace(ws_id, ws_name, sender_id, sender_name)
     if not result:
-        return f"❌ 创建失败：{ws_name} 可能已存在，或管理员名下活跃工作区过多"
+        # R91 🅱️: 区分重名 vs 超限
+        existing_ws = ws_mod.get_workspace(ws_id)
+        if existing_ws:
+            return (
+                f"❌ 创建失败：工作室「{ws_name}」已存在。\n"
+                f"  使用 --workspace-id {ws_id} 附着，或先 !close_workspace {ws_id}"
+            )
+        active_count = sum(
+            1 for w in ws_mod.get_all_workspaces()
+            if w.owner_id == sender_id and w.state == ws_mod.WorkspaceState.ACTIVE
+        )
+        max_ws = int(os.environ.get("MAX_ACTIVE_WORKSPACES", "3"))
+        return (
+            f"❌ 创建失败：管理者名下已有 {active_count}/{max_ws} 活跃工作室。\n"
+            f"  请先 !close_workspace 关闭旧工作室后再创建"
+        )
     for mid_raw in member_ids:
         resolved = _resolve_member(mid_raw)
         if resolved:
