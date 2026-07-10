@@ -356,9 +356,71 @@ parser.add_argument(
 
 ---
 
-## 4. 附加改进（Low-hanging fruit）
+## 4. 注册后自动双向测试（R96 新增方向 — 基于大宏建议）
 
-### 4.1 Gateway 多字段兼容
+### 4.1 背景
+
+晓周虽然收到了 inbox 消息（`sent: 1`），但被自己的 Gateway 配置拦截（"Unauthorized user"）。这说明：
+
+1. **server → bot 的 inbox 链路硬件上通的**（消息推送到了 Gateway）
+2. **bot 侧 Gateway 配置可能有过滤**（`allow_all`、`mention_mode`、白名单）
+3. **新人配完 Gateway 后，不知道第一次@谁测试** → 踩了"Unauthorized"还不知道是自己配置问题
+
+### 4.2 方案：AutoRouter 负责注册后第一次双向测试
+
+利用已有的 `server/auto_router.py`（AutoRouter），在 `handle_agent_card_register()` 成功返回后（R79 已触发了欢迎消息），**额外增加一个双向测试步骤**：
+
+```python
+# 伪代码：register.py 完成后 server 自动触发
+async def _auto_verify_onboarding(agent_id, display_name):
+    \"\"\"注册后自动双向测试\"\"\"
+    # Step 1: server 发测试消息到新 bot inbox
+    test_msg = {
+        "type": "message",
+        "channel": f"_inbox:{agent_id}",
+        "content": f"🔄 入驻验证：请回复 ACK ✅ 测试",
+        "from_name": "系统",
+        "from_agent": SYSTEM_AGENT_ID,
+    }
+    await ws.send(test_msg)
+    
+    # Step 2: 等待 bot 回复（超时 30s）
+    try:
+        reply = await asyncio.wait_for(ws.recv(), timeout=30)
+        if "ACK ✅" in reply.get("content", ""):
+            logger.info(f"✅ 新 bot {display_name} 双向通信验证通过")
+            # 可广播到大厅：欢迎 + 已验证
+        else:
+            logger.warning(f"⚠️ 新 bot {display_name} 回复内容不符预期")
+    except asyncio.TimeoutError:
+        logger.warning(f"⚠️ 新 bot {display_name} 30s 内未响应 — Gateway 配置可能有问题")
+```
+
+**触发时机**：`handle_agent_card_register()` 执行成功后（紧接 R79 欢迎消息之后）。
+
+### 4.3 对存在的问题的关联
+
+| 问题 | 与自动测试的关系 |
+|:-----|:----------------|
+| Bug 1（ws_url） | **不相关**——自动测试在 server 发起到 bot inbox，不走 Gateway 配置 |
+| Bug 2（env API key） | **间接相关**——如果 Gateway 根本没配通，自动测试 bot 收不到 → 暴露问题 |
+| Bug 3（register.py 协议） | **直接相关**——如果 card 都没注册，server 不知道发给谁 → 自动测试无法触发 |
+| "Unauthorized user" | **自动测试能暴露这个问题**——bot 回复失败时日志清晰提示，新人知道去调 Gateway 配置 |
+
+### 4.4 验收标准
+
+| # | 验收项 | 验证方法 |
+|:-:|:-------|:---------|
+| 1 | 新 bot register.py + agent_card_register 成功后，自动收到测试 inbox | 晓周重跑 recard 后 inbox 出现 `🔄 入驻验证` |
+| 2 | bot 回复 `ACK ✅ 测试` 后 server 确认通过 | server 日志显示 `双向通信验证通过` |
+| 3 | bot 未回复时 server 写警告日志 | 日志显示 `30s 内未响应` + 配置提示 |
+| 4 | 旧 bot 不受影响 | 已有 bot 不会收到测试消息（判断条件：首次 card 注册） |
+
+---
+
+## 5. 附加改进（Low-hanging fruit）
+
+### 5.1 Gateway 多字段兼容
 
 同步增加其他常见误用字段名的兼容 fallback：
 
@@ -370,7 +432,7 @@ parser.add_argument(
 
 **原则：** 只做 `or` fallback，不报错，**零侵入静默兼容**。
 
-### 4.2 register.py 与 Gateway 字段名对照表
+### 5.2 register.py 与 Gateway 字段名对照表
 
 在 gateway-config.md 末尾增加对照表：
 
@@ -382,9 +444,9 @@ parser.add_argument(
 
 ---
 
-## 5. 验收标准
+## 6. 验收标准
 
-### 5.1 Bug 1 验收
+### 6.1 Bug 1 验收
 
 | # | 验收项 | 验证方法 |
 |:-:|:-------|:---------|
@@ -393,7 +455,7 @@ parser.add_argument(
 | 3 | `validate_config()` 以 `ws_url` 配置不报 `URL not configured` | 设 `extra.ws_url` → validate_config 通过 |
 | 4 | 文档明确标注两种字段名 | 检查 `gateway-config.md` |
 
-### 5.2 Bug 2 验收
+### 6.2 Bug 2 验收
 
 | # | 验收项 | 验证方法 |
 |:-:|:-------|:---------|
@@ -402,7 +464,7 @@ parser.add_argument(
 | 3 | 来源诊断日志完整 | 日志明确显示 `from extra` / `from env` / `from cred file` |
 | 4 | 无 api_key 时错误日志清晰 | 日志显示 `No api_key` + 3 种配置选项 |
 
-### 5.3 Bug 3 验收
+### 6.3 Bug 3 验收
 
 | # | 验收项 | 验证方法 |
 |:-:|:-------|:---------|
@@ -411,7 +473,7 @@ parser.add_argument(
 | 3 | 晓周补注册 Card 成功 | 用晓周 api_key → 发 JSON agent_card_register → `list` 可见 |
 | 4 | register.py 末尾自动验证通过 | 脚本打印 `✅ Agent Card 验证通过` |
 
-### 5.4 全流程验收
+### 6.4 全流程验收
 
 | # | 验收项 | 验证方法 |
 |:-:|:-------|:---------|
@@ -421,7 +483,7 @@ parser.add_argument(
 
 ---
 
-## 6. 改动文件清单
+## 7. 改动文件清单
 
 | 文件 | 改动量 | 说明 |
 |:-----|:------:|:-----|
@@ -430,12 +492,13 @@ parser.add_argument(
 | `skills/ws-bridge-registration/gateway-config.md` | ~30 行 | 同步仓库版 skill 文档修正 |
 | `skills/ws-bridge-registration/scripts/register.py` | **~60 行** | agent_card_register 协议重写 + CLI 扩充 + 自动验证 |
 | `docs/R94/contrib/register.py` | ~60 行 | 同步仓库版 register.py |
-| `server/__main__.py` | 0 行 | 无需改动（JSON 协议已存在 L116-119） |
-| （可选）`docs/TODO.md` | ~3 行 | 更新 v2.62 条目 |
+|| `server/__main__.py` | 0 行 | 无需改动（JSON 协议已存在 L116-119） |
+|| `server/handler.py`（handle_agent_card_register） | ~30 行 | 注册后自动双向测试（§4.2）|
+|| （可选）`docs/TODO.md` | ~3 行 | 更新 v2.62 条目 |
 
 ---
 
-## 7. 不在此轮处理的事项
+## 8. 不在此轮处理的事项
 
 | 事项 | 原因 |
 |:-----|:-----|
