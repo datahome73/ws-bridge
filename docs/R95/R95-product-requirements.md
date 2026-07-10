@@ -1,8 +1,8 @@
-# R95 — Auto Pipeline 停止 & 断点续跑命令
+# R95 — Auto Pipeline 停止命令
 
-> **版本：** v1.0 初稿
+> **版本：** v2.0 根据大宏反馈修正
 > **日期：** 2026-07-10
-> **作者：** 大宏（项目负责人）
+> **作者：** 大宏（项目负责人）→ 小谷（整理）
 > **状态：** 📝 待评审
 
 ---
@@ -16,40 +16,25 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 ### 当前痛点
 
 ```
-!pipeline_start R94 → 创建了旧 config 的管线
+!pipeline_start R94 → 创建管线
   ↓
   Step 2 (arch) 卡死 ⛔️
   ↓
   没有 pipeline_stop 命令
   ↓
-  不能 restart --from step4
-  ↓
-  只能干等或手动清理工作区（不可控）
+  无法终止 → 工作区被占用 → 新管线不能启动
 ```
-
-| 问题 | 后果 |
-|:-----|:------|
-| 管线卡死后无法终止 | 工作区被占用，新管线不能启动 |
-| 不能指定起始步骤重跑 | 必须从 Step 1 重来，浪费 bot 时间 |
-| 无主动停止命令 | 只能等超时或人工干预清理数据 |
 
 ---
 
-## 2. 目标
+## 2. 设计思路（大宏确认）
 
-新增两条命令，让 auto pipeline **可停、可调**：
-
-```
-!pipeline_stop R<N>              # 停掉卡死的 auto 管线
-!pipeline_start R<N> --from step<N>  # 从指定步骤重新开始
-```
-
-### 核心原则
-
-1. **谁启动谁停止** — 发起者有权 stop 自己启动的管线
-2. **断点续跑是继续，不是重来** — `--from step4` 表示跳过 step1-3，直接执行 step4+ 的 handler
-3. **状态可查询** — stop 后 `!pipeline_status R<N>` 应显示 `stopped` 状态
-4. **幂等安全** — 已完成的步骤不会因为 stop+restart 被重复执行
+| 要点 | 决策 |
+|:-----|:------|
+| 新增命令 | **仅一个**：`!pipeline_stop R<N>` |
+| 权限 | **仅发起者**可 stop（已无 workspace 管理员概念） |
+| 断点续跑 | **不加 `--from` 参数** — PM 手工给对应 bot 的 inbox 派活下一 step，该 step 完成后 AutoRouter 自动接管后续步骤 |
+| 工作区清理 | 使用已有的**关闭工作区**功能，发起者手动关闭即可（已支持多活跃工作区，不存在冲突） |
 
 ---
 
@@ -60,7 +45,7 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 | 属性 | 值 |
 |:-----|:----|
 | 命令 | `!pipeline_stop R<N>` |
-| 权限 | 管线的发起者（谁发的 `!pipeline_start`）、admin 频道 |
+| 权限 | **仅发起者**（谁发的 `!pipeline_start`） |
 | 行为 | 标记管线为 `stopped` → 取消当前 step 的超时等待 → 清理 AutoRouter 的任务队列 |
 | 效果 | 工作区保留（数据不丢失），管线状态变 `stopped` |
 | 响应 | `🛑 Pipeline R<N> 已停止` |
@@ -69,26 +54,41 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 - stop 后工作区**不删除**，保留现场供排查
 - stop 不会影响其他正在运行的管线
 - 重复 stop 同一管线 → 幂等，返回 `✅ Pipeline R<N> 已停止（无需操作）`
+- 非发起者执行 stop → 权限拒绝 `❌ 只有发起者可以 stop 此管线`
+- 对 idle（未启动）管线执行 stop → 报错 `❌ Pipeline R<N> 不在运行状态`
 
-### 3.2 `!pipeline_start R<N> --from step<N>`
+### 3.2 断点续跑（不新增命令）
 
-| 属性 | 值 |
-|:-----|:----|
-| 命令 | `!pipeline_start R<N> --from step<N>` |
-| 参数 | `step<N>` 是 WORK_PLAN 中的步骤号（如 `step4`, `step2`） |
-| 行为 | 跳过 `<stepN` 的所有步骤，从 `step<N>` 开始执行 |
-| 前置条件 | 管线存在且状态为 `stopped` 或 `failed` |
-| 响应 | `🚂 Pipeline R<N> 从 Step N 重新启动` |
+管线 stop 后，恢复流程如下：
 
-**注意点：**
-- `--from step1` = 等同于不带 `--from` 的正常启动
-- `--from` 只能用在已停止/失败的管线上，不能中断正在运行的管线
-- 如果指定的 step 编号 > WORK_PLAN 总步骤数 → 报错 `❌ step<N> 超出范围`
-- 如果管线状态为 `running` → 报错 `❌ Pipeline R<N> 正在运行，请先 !pipeline_stop`
+```
+管线 R<N> 在 Step 2 卡死
+  ↓
+!pipeline_stop R<N>                    # ① 发起者停止管线
+  ↓
+发起者手工给 step4 的负责 bot 派活        # ② PM 通过 inbox 派活
+  ↓
+该 bot 完成 step4 → 回复 ✅ 完成         # ③ 正常 inbox 流程
+  ↓
+AutoRouter 收到 step4 完成               # ④ Server 自动接管
+  ↓
+自动触发 step5 → step6 → ... 后续步骤     # ⑤ 后续自动化
+```
+
+**要点：**
+- PM 知道哪些 step 已完成（`!pipeline_status` 可查），跳过已完成步骤，直接给下一步的负责 bot 发 inbox
+- AutoRouter 收到 step N 的完成通知后，自动检查 WORK_PLAN 推进 step N+1
+- 不需要额外的 `--from` 参数或新命令
+
+### 3.3 工作区清理（不新增功能）
+
+- 使用已有的 `!close_workspace` 或关闭工作区功能
+- 已支持多活跃工作区，不存在旧版「一个工作区被占就无法启动新管线」的问题
+- 发起者手动关闭即可，无需自动清理机制
 
 ---
 
-## 4. 状态变更流程
+## 4. 状态变更
 
 ```
         new
@@ -103,23 +103,14 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
                               ▼              ▼              ▼
                         ┌─────────┐   ┌─────────┐   ┌─────────┐
                         │ success │   │ failed  │   │ stopped │
-                        └─────────┘   └────┬────┘   └────┬────┘
-                                           │              │
-                                           └──────┬───────┘
-                                                  │
-                                                  ▼
-                                        ┌──────────────────┐
-                                        │ !pipeline_start  │
-                                        │ --from step<N>   │  →  running
-                                        └──────────────────┘
+                        └─────────┘   └─────────┘   └─────────┘
 ```
 
 **新状态说明：**
 
-| 状态 | 含义 | 可操作 |
-|:-----|:-----|:-------|
-| `stopped` | 用户主动停止 | 可 `--from step<N>` 重启，可 `!pipeline_stop` 再次确认（幂等） |
-| `failed` | AutoRouter 检测到步骤超时/错误 | 可 `--from step<N>` 重启 |
+| 状态 | 含义 | 后续操作 |
+|:-----|:-----|:---------|
+| `stopped` | 用户主动停止 | PM 手工派活续跑，或关闭工作区结束 |
 
 ---
 
@@ -127,11 +118,12 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 
 | 功能 | 说明 |
 |:-----|:------|
-| `!pipeline_start R<N>`（无 `--from`） | 行为不变，创建新管线 |
+| `!pipeline_start R<N>` | 行为不变 |
 | `!pipeline_status R<N>` | 新增显示 `stopped` 状态 |
 | `!list_workspaces` | 不受影响 |
 | AutoRouter 自动推进 | 不受影响，stop 仅中断当前管线 |
 | 多管线并发 | stop 只影响指定管线 |
+| 关闭工作区 | 已有功能，用于清理 stop 后的工作区 |
 
 ---
 
@@ -139,27 +131,25 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 
 ### 6.1 `!pipeline_stop` 验证
 
-- [ ] 对一个 running 管线执行 stop → 状态变 `stopped`
+- [ ] 对 running 管线执行 stop → 状态变 `stopped`
 - [ ] 对 idle 管线执行 stop → 报错 `❌ Pipeline R<N> 不在运行状态`
 - [ ] 对已 stopped 管线重复 stop → 幂等提示 `✅ 已停止（无需操作）`
 - [ ] stop 后工作区保留，可用 `!list_workspaces` 看到
 - [ ] stop 后其他管线不受影响
-- [ ] 非发起者执行 stop → 权限拒绝 `❌ 只有发起者可以 stop 此管线`
+- [ ] 非发起者执行 stop → 权限拒绝 `❌ 只有发起者可以 stop`
 
-### 6.2 `!pipeline_start --from` 验证
+### 6.2 断点续跑验证
 
-- [ ] 对 stopped 管线执行 `--from step4` → 从 step4 开始，跳过 step1-3
-- [ ] 对 failed 管线执行 `--from step2` → 从 step2 开始
-- [ ] 对 running 管线执行 `--from` → 报错 `❌ 请先 !pipeline_stop`
-- [ ] `--from step1` = 等同于正常启动
-- [ ] `--from step99`（超出范围）→ 报错 `❌ step99 超出范围`
-- [ ] 跳过的步骤不被标记为 "已完成"（保持 `skipped` 或 `not_run`）
-- [ ] 从 stepN 恢复后，AutoRouter 正常接管后续步骤
+- [ ] stop 后 PM 通过 inbox 派活下一步 → 该 bot 收到并回复 ✅ 完成
+- [ ] AutoRouter 收到 step N 完成通知后，自动推进 step N+1
+- [ ] 后续步骤全部自动化完成（同正常管线）
+- [ ] `!pipeline_status R<N>` 显示已完成步骤和当前步骤
 
-### 6.3 查询验证
+### 6.3 工作区验证
 
-- [ ] `!pipeline_status R<N>` 能正确显示 `stopped`
-- [ ] stop 前的已完成步骤状态保留（不丢失）
+- [ ] 关闭 stopped 管线的工作区 → 正常释放
+- [ ] 关闭后不影响其他活跃工作区
+- [ ] 关闭后可重新 `!pipeline_start` 同名管线
 
 ---
 
@@ -167,9 +157,9 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 
 | 阶段 | 内容 | 预计耗时 |
 |:----|:-----|:---------|
-| 1 | 需求文档评审 | 1 天 |
+| 1 | 需求文档评审（此文档） | 1 天 |
 | 2 | 架构设计方案 | 1-2 天 |
-| 3 | 开发 | 2-3 天 |
+| 3 | 开发 | 1-2 天 |
 | 4 | 测试 | 1 天 |
 | 5 | 部署 | 完成 |
 
@@ -177,6 +167,5 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 
 ## 8. 评审问题
 
-1. `!pipeline_stop` 的权限范围是否需要放宽到 workspace 管理员？还是保持仅发起者？
-2. `--from step<N>` 跳过前置步骤后，`step<N>` 能否独立运作（不依赖前置输出的变量）？
-3. 是否需要定时自动清理长期 `stopped` 的工作区（如超过 24 小时）？
+1. `!pipeline_stop` 在 Step 正在执行中（AutoRouter 已发出 inbox）时 stop，是否需要等当前步骤完成/超时才真正停止？还是立即取消？
+2. stop 后 AutoRouter 的任务队列清理到什么程度？仅清理当前待发送的 inbox，还是同时清理 server 端的 pending 状态？
