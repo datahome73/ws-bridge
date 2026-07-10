@@ -6188,7 +6188,8 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     """Check if agent can broadcast in the given channel.
     Returns (allowed: bool, reason: str).
     """
-    if agent_id in auth.get_users():
+    # L4 global admin: any channel
+    if auth.is_global_admin(agent_id):
         return True, ""
 
     # R35: _admin channel — only admins (P3/P4) can send
