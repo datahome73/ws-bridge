@@ -2856,6 +2856,27 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         except Exception as e:
             logger.warning("R90 🅱️: PM 通知发送失败: %s", e)
 
+    # ── R92: 广播管线启动通知到 _admin（让 AutoRouter 等监听者收到） ──
+    try:
+        await _broadcast_to_channel(p.ADMIN_CHANNEL, {
+            "type": "broadcast",
+            "channel": p.ADMIN_CHANNEL,
+            "from_name": "系统",
+            "from_agent": SYSTEM_AGENT_ID,
+            "content": (
+                f"🚀 **{round_name} 管线已启动**\n"
+                f"  Step: {start_step} → {target_role}\n"
+                f"  工作室: {ws_id}\n"
+                f"  {create_result}\n"
+                f"  {rollcall_result}\n"
+                f"  {task_result}"
+            ),
+            "ts": time.time(),
+        })
+        logger.info("R92: 已广播 %s 管线启动通知到 _admin", round_name)
+    except Exception as e:
+        logger.warning("R92: _admin 广播失败: %s", e)
+
     return (
         f"🚀 **{round_name} 管线已启动**\n"
         f"  Step: {start_step} → {target_role}\n"
