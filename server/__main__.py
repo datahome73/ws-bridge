@@ -15,10 +15,10 @@ from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
 from .persistence import (
-    load_pairing_codes, load_approved_users,
+    load_approved_users,
     load_web_sessions,
     load_api_keys,
-    save_pairing_codes, save_approved_users,
+    save_approved_users,
     save_web_sessions,
     get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
@@ -47,11 +47,6 @@ async def _periodic_cleanup():
     global _start_time
     while True:
         await asyncio.sleep(60)
-        from . import auth as _auth
-        removed = _auth.cleanup_expired_codes()
-        if removed:
-            logger.info("Cleaned up %d expired pairing codes", removed)
-            save_pairing_codes(DATA_DIR)
         # Message store cleanup (every ~10 min)
         if int(asyncio.get_event_loop().time()) % 600 < 60:
             from . import message_store as _ms
@@ -794,7 +789,6 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load persisted data
-    load_pairing_codes(DATA_DIR)
     load_approved_users(DATA_DIR)
     load_web_sessions(DATA_DIR)
     # R82: removed load_agent_channels

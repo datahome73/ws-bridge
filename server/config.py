@@ -140,14 +140,6 @@ GIT_SYNC_FALLBACK: bool = os.environ.get("R65_GIT_SYNC_FALLBACK", "1") == "1"
 REPO_PATH: str = os.environ.get("R65_REPO_PATH", "/opt/data/ws-bridge")
 
 
-# ── R63 Phase 5: Feature toggle switches ──────────────────────────
-# Environment variables to enable/disable R63 features independently.
-# Default: all enabled ("1").
-R63_ENABLE_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
-R63_ENABLE_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
-R63_ENABLE_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
-
-
 # ── R80: Validation hook system ────────────────────────────────
 ENABLE_VALIDATION_HOOK: bool = (
     os.environ.get("R80_ENABLE_VALIDATION", "0") == "1"
