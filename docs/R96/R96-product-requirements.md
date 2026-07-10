@@ -366,55 +366,114 @@ parser.add_argument(
 2. **bot 侧 Gateway 配置可能有过滤**（`allow_all`、`mention_mode`、白名单）
 3. **新人配完 Gateway 后，不知道第一次@谁测试** → 踩了"Unauthorized"还不知道是自己配置问题
 
-### 4.2 方案：AutoRouter 负责注册后第一次双向测试
+### 4.2 方案：register.py 末尾主动发 `test ✅` 回路测试
 
-利用已有的 `server/auto_router.py`（AutoRouter），在 `handle_agent_card_register()` 成功返回后（R79 已触发了欢迎消息），**额外增加一个双向测试步骤**：
+**核心设计：** 不让 server 主动找 bot，而是新 bot 在 register.py 末尾（已 auth 状态），主动向 `_inbox:server` 发一条带 `test ✅` 前缀的消息。server 识别到 `test ✅` 后自动回复确认，形成 **bot→server→bot 回路**。
 
-```python
-# 伪代码：register.py 完成后 server 自动触发
-async def _auto_verify_onboarding(agent_id, display_name):
-    \"\"\"注册后自动双向测试\"\"\"
-    # Step 1: server 发测试消息到新 bot inbox
-    test_msg = {
-        "type": "message",
-        "channel": f"_inbox:{agent_id}",
-        "content": f"🔄 入驻验证：请回复 ACK ✅ 测试",
-        "from_name": "系统",
-        "from_agent": SYSTEM_AGENT_ID,
-    }
-    await ws.send(test_msg)
-    
-    # Step 2: 等待 bot 回复（超时 30s）
-    try:
-        reply = await asyncio.wait_for(ws.recv(), timeout=30)
-        if "ACK ✅" in reply.get("content", ""):
-            logger.info(f"✅ 新 bot {display_name} 双向通信验证通过")
-            # 可广播到大厅：欢迎 + 已验证
-        else:
-            logger.warning(f"⚠️ 新 bot {display_name} 回复内容不符预期")
-    except asyncio.TimeoutError:
-        logger.warning(f"⚠️ 新 bot {display_name} 30s 内未响应 — Gateway 配置可能有问题")
+```
+register.py（已 auth 连接）
+  │
+  ├─ ① register → register_ok（获得 api_key + agent_id）
+  ├─ ② 保存凭证
+  ├─ ③ agent_card_register → agent_card_register_ok（Card 上线）
+  │
+  └─ ④ 回路测试 ──────────────────────→ _inbox:server
+        "test ✅ R96 入驻验证"
+                                           │
+        ←── server 回复确认 ───────────────┘
+            "_inbox:<bot_id>"
+            "✅ test 确认 — 双向通信正常"
 ```
 
-**触发时机**：`handle_agent_card_register()` 执行成功后（紧接 R79 欢迎消息之后）。
+**bot 端（register.py `register_full_flow()` 末尾）：**
+
+```python
+async def _loopback_test(ws, name: str, agent_id: str, timeout: float = 15) -> bool:
+    \"\"\"已 auth 连接上发 test 到 _inbox:server，等 server 确认回复。\"\"\"
+    import time
+    test_id = f"test-{agent_id[:8]}-{int(time.time())}"
+    
+    await ws.send(json.dumps({
+        "type": "message",
+        "channel": "_inbox:server",
+        "content": f"test ✅ R96 入驻验证 — {name} 双向通信测试",
+        "from_name": name,
+        "agent_id": agent_id,
+        "id": test_id,
+        "ts": time.time(),
+    }))
+    print("  📤 已发送 test → _inbox:server，等待确认...")
+
+    try:
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            msg = json.loads(raw)
+            content = msg.get("content", "")
+            channel = msg.get("channel", "")
+            # server 确认回复格式
+            if "✅ test 确认" in content:
+                return True
+    except asyncio.TimeoutError:
+        return False
+```
+
+在 `register_full_flow()` 末尾调用：
+
+```python
+# 回路测试（利用当前已 auth 的连接）
+print(f"\\n  ⏳ 回路测试中... (向 _inbox:server 发 test ✅)")
+test_ok = await _loopback_test(ws, name, agent_id)
+if test_ok:
+    print(f"  ✅ 双向通信验证通过！🎉")
+else:
+    print(f"  ⚠️  回路测试超时（非致命）")
+    print(f"      配好 Gateway 后自然能通，后续可手动发 `test ✅` 验证")
+```
+
+**server 端（handler.py `_handle_server_relay`）：**
+
+```python
+# R87 relay 旁增加 test 前缀拦截
+if content.startswith("test ✅"):
+    logger.info(f"🔄 Loopback test from {from_name} ({agent_id[:16]})")
+    await _send(ws, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": SYSTEM_AGENT_ID,
+        "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
+        "ts": time.time(),
+    })
+    return True  # 拦截，不继续转发 / 不通知 PM
+```
+
+**关键设计决策：**
+
+| 决策 | 选择 | 原因 |
+|:-----|:-----|:------|
+| 谁主动发 | **bot 主动** | 和 `✅ 完成` 模式一致，bot 回复到 `_inbox:server` |
+| 前缀 | `test ✅` | 与 `ACK ✅` / `✅ 完成` 同体系，server 可识别 |
+| 触发时机 | register.py 末尾 | 利用已 auth 连接，零额外连接开销 |
+| 回路上报 | 仅 server 日志 | 不广播到大厅、不通知 PM |
+| 失败处理 | **非阻塞** — 超时只打 warning | 回路测试不是入驻必须条件，日后 Gateway 配通就行 |
 
 ### 4.3 对存在的问题的关联
 
-| 问题 | 与自动测试的关系 |
+| 问题 | 与回路测试的关系 |
 |:-----|:----------------|
-| Bug 1（ws_url） | **不相关**——自动测试在 server 发起到 bot inbox，不走 Gateway 配置 |
-| Bug 2（env API key） | **间接相关**——如果 Gateway 根本没配通，自动测试 bot 收不到 → 暴露问题 |
-| Bug 3（register.py 协议） | **直接相关**——如果 card 都没注册，server 不知道发给谁 → 自动测试无法触发 |
-| "Unauthorized user" | **自动测试能暴露这个问题**——bot 回复失败时日志清晰提示，新人知道去调 Gateway 配置 |
+| Bug 1（ws_url） | **不相关**——回路测试在 register.py 末尾的 WSS 直连中完成，不走 Gateway 配置 |
+| Bug 2（env API key） | **间接相关**——如果 Gateway 没配通，回路测试超时但 register.py 不阻塞 ✅ |
+| Bug 3（register.py 协议） | **直接相关**——Card 注册成功后才触发回路测试，否则 skips |
+| "Unauthorized user" | **回路测试能绕过这个问题**——测试在原始 WSS 连接上完成，不经过 Gateway 过滤 |
 
 ### 4.4 验收标准
 
 | # | 验收项 | 验证方法 |
 |:-:|:-------|:---------|
-| 1 | 新 bot register.py + agent_card_register 成功后，自动收到测试 inbox | 晓周重跑 recard 后 inbox 出现 `🔄 入驻验证` |
-| 2 | bot 回复 `ACK ✅ 测试` 后 server 确认通过 | server 日志显示 `双向通信验证通过` |
-| 3 | bot 未回复时 server 写警告日志 | 日志显示 `30s 内未响应` + 配置提示 |
-| 4 | 旧 bot 不受影响 | 已有 bot 不会收到测试消息（判断条件：首次 card 注册） |
+| 1 | register.py 末尾自动发 `test ✅` 到 `_inbox:server` | 脚本输出 `📤 已发送 test → _inbox:server，等待确认...` |
+| 2 | server 收到后回复 `✅ test 确认` | bot 收到回复 → 脚本打印 `✅ 双向通信验证通过！🎉` |
+| 3 | server 日志记录回路测试 | 日志出现 `🔄 Loopback test from 晓周 (ws_df77...)` |
+| 4 | 回路测试超时不阻塞注册流程 | 超时后脚本打印 `⚠️ 回路测试超时（非致命）`，exit 0 |
 
 ---
 
@@ -493,7 +552,7 @@ async def _auto_verify_onboarding(agent_id, display_name):
 | `skills/ws-bridge-registration/scripts/register.py` | **~60 行** | agent_card_register 协议重写 + CLI 扩充 + 自动验证 |
 | `docs/R94/contrib/register.py` | ~60 行 | 同步仓库版 register.py |
 || `server/__main__.py` | 0 行 | 无需改动（JSON 协议已存在 L116-119） |
-|| `server/handler.py`（handle_agent_card_register） | ~30 行 | 注册后自动双向测试（§4.2）|
+||| `server/handler.py`（_handle_server_relay 加 test 前缀拦截） | ~15 行 | 回路测试 server 端回复确认（§4.2）|
 || （可选）`docs/TODO.md` | ~3 行 | 更新 v2.62 条目 |
 
 ---
