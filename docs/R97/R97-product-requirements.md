@@ -39,8 +39,34 @@
 | Workspace 成员匹配影响派活 | **Workspace = 时间切片**，无成员概念，不影响派活 |
 | `!pipeline_start` 依赖 frontmatter 完整性 | `!pipeline_start` 创建 PipelineContext，不依赖 frontmatter |
 | 任务消息需拼接上下文 | **从 context 组装**，机械拼接不靠 LLM |
+| **PM 站在管线外协调** | **PM 是 Step 1 执行者**，和其他 bot 完全一样 |
 
-### 1.2 新数据流
+### 1.2 授权模型
+
+`!pipeline_start` 不是 PM 的"启动动作"，而是**项目负责人（大宏）的授权按钮**。
+
+```
+我写 WORK_PLAN 初稿
+      ↓
+你审核通过 → 你按 !pipeline_start（授权按钮）
+                   ↓
+          AutoRouter 派活 step1 → PM（我）
+          "标注 WORK_PLAN 已审核通过，推 git"
+                   ↓
+          我标注 + 推 git → ✅ 完成
+                   ↓
+          AutoRouter 继续 step2→step3→...→step6
+                   ↓
+          🏁 全部完成
+```
+
+**为什么这样设计？**
+
+> 你们要执行命令，会先产生一个授权按钮给我，我点授权按钮一个道理。 — 大宏
+
+PM 写初稿、大宏审核、大宏按授权按钮（`!pipeline_start`）→ AutoRouter 启动 → 派活 step1 给 PM 做"标注审核通过"的收尾工作。PM 的行为就和其他 bot 完全统一了：**收 inbox → 干活 → 推 git → `✅ 完成`**。
+
+### 1.3 新数据流
 
 ```
 PM                              Server                              AutoRouter
