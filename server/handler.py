@@ -6309,6 +6309,26 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     channel = msg.get("channel", "")
     content = (msg.get("content") or "").strip()
 
+    # ── R96: 回路测试拦截 ──
+    if content.startswith("test ✅"):
+        from_name = msg.get("from_name", "?")
+        logger.info(
+            "🔄 Loopback test from %s (%s)", from_name, agent_id[:16]
+        )
+        try:
+            await _send(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": SYSTEM_AGENT_ID,
+                "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
+                "ts": time.time(),
+            })
+        except Exception as e:
+            logger.warning("R96: 回路测试回复失败: %s", e)
+        return True
+    # ═══════════════════════════════════════════
+
     # 非中继消息 → 走正常路由
     if not is_server_inbox(channel):
         return False

@@ -149,25 +149,28 @@ async def agent_card_register(
     name: str,
     capabilities: dict | None = None,
     trigger_keyword: str = "",
+    pipeline_roles: list | None = None,
+    skills: list | None = None,
 ) -> dict:
     """
-    第 ② 步：用 api_key 认证后，注册 Agent Card 上线。
+    第 ② 步：用 api_key 认证后，通过 JSON 协议注册 Agent Card。
+
+    R96: 改用 JSON 协议 msg 替代 !agent_card register 命令，
+    新 bot 无需 admin 权限即可注册上线。
 
     请求流程:
         1. {"type": "auth", "api_key": "sk_ws_..."}
         2. 收到 auth_ok → 获得 agent_id
-        3. {"type": "message",
-           "channel": "_admin",
-           "content": "!agent_card register --display-name ... --capabilities ..."}
+        3. {"type": "agent_card_register",
+           "agent_id": "ws_xxxx",
+           "display_name": "MyBot",
+           "capabilities": {...},
+           "pipeline_roles": ["reviewer"],
+           "skills": ["code-review"],
+           "trigger_keyword": "@MyBot"}
 
     响应格式（成功）:
-        {"type": "auth_ok", "agent_id": "ws_xxxx", ...}
-        之后收到命令响应: status=online
-
-    注意:
-        - capabilities 必须是 dict，例如 {"tasks": ["coding", "qa"]}
-        - trigger_keyword 是顶层字符串字段，不是 capabilities 的子字段
-        - 已注册过的 agent_id 再次 register 会更新字段
+        {"type": "agent_card_register_ok", "agent_id": "ws_xxxx", ...}
     """
     async with websockets.connect(ws_url, max_size=2**20, ping_interval=20, ping_timeout=10) as ws:
         # 1. 认证
@@ -176,31 +179,22 @@ async def agent_card_register(
             raise RuntimeError(f"认证失败: {resp}")
         agent_id = resp.get("agent_id", "?")
 
-        # 2. 构造 !agent_card register 命令
-        caps_json = json.dumps(capabilities or {}, ensure_ascii=False)
-        cmd_parts = [
-            "!agent_card register",
-            f"--display-name {name}",
-            f"--capabilities '{caps_json}'",
-        ]
-        if trigger_keyword:
-            cmd_parts.append(f"--trigger-keyword {trigger_keyword}")
+        # 2. 发送 JSON 协议 agent_card_register
+        register_payload = {
+            "type": "agent_card_register",
+            "agent_id": agent_id,
+            "display_name": name,
+            "capabilities": capabilities or {},
+            "pipeline_roles": pipeline_roles or [],
+            "skills": skills or [],
+            "trigger_keyword": trigger_keyword or "",
+        }
+        resp = await send_and_wait(ws, register_payload, REGISTER_TIMEOUT)
 
-        # 3. 发送命令到 _admin 频道
-        cmd_content = " ".join(cmd_parts)
-        await ws.send(json.dumps({
-            "type": "message",
-            "channel": "_admin",
-            "content": cmd_content,
-        }))
-
-        # 4. 等待响应
-        response = await asyncio.wait_for(ws.recv(), timeout=10)
-        result = json.loads(response)
         return {
             "agent_id": agent_id,
             "status": "registered",
-            "response": result.get("content", str(result)[:200]),
+            "response": resp.get("content", str(resp)[:200]),
         }
 
 
@@ -214,6 +208,9 @@ async def register_full_flow(
     description: str = "",
     capabilities: dict | None = None,
     trigger_keyword: str = "",
+    pipeline_roles: list | None = None,
+    skills: list | None = None,
+    loopback_test: bool = True,
 ) -> dict:
     """
     完整入驻流程：register → 存凭证 → agent_card_register。
@@ -282,7 +279,9 @@ async def register_full_flow(
     print(f"\n  ⏳ 正在注册 Agent Card... (auth → agent_card_register)")
     try:
         card_result = await agent_card_register(
-            ws_url, api_key, name, capabilities, trigger_keyword
+            ws_url, api_key, name, capabilities, trigger_keyword,
+            pipeline_roles=pipeline_roles,
+            skills=skills,
         )
         print(f"  ✅ Agent Card 注册完成！agent_id={card_result['agent_id']}")
         print(f"     响应: {card_result['response'][:100]}")
@@ -303,6 +302,34 @@ async def register_full_flow(
     print(f"     凭证文件:    ~/.ws-bridge/{name}.json")
     print(f"     状态:        online")
     print()
+
+    # ── Loopback Test ──
+    if loopback_test:
+        print(f"  ⏳ 正在执行回路测试... (向 _inbox:server 发送 test ✅)")
+        try:
+            async with websockets.connect(
+                ws_url, max_size=2**20, ping_interval=20, ping_timeout=10
+            ) as test_ws:
+                # 先认证
+                auth_resp = await send_and_wait(
+                    test_ws, {"type": "auth", "api_key": api_key}, AUTH_TIMEOUT
+                )
+                if auth_resp.get("type") == "auth_ok":
+                    loopback_ok = await _loopback_test(
+                        test_ws, name, card_result["agent_id"]
+                    )
+                    if loopback_ok:
+                        print(f"  ✅ 回路测试通过！🎉 双向通信正常")
+                    else:
+                        print(f"  ⚠️ 回路测试超时（server 未在 15s 内确认）")
+                        print(f"  ℹ️  不影响注册，稍后可手动验证")
+                else:
+                    print(f"  ⚠️ 回路测试认证失败，跳过")
+        except Exception as e:
+            print(f"  ⚠️ 回路测试异常: {e}")
+            print(f"  ℹ️  不影响注册，稍后可手动验证")
+
+    # ── 后续说明 ──
     print(f"  📌 下一步: 配置 Hermes Gateway 实现持续连接")
     print(f"     参考: gateway-config.md")
     print(f"{'='*50}")
@@ -314,6 +341,36 @@ async def register_full_flow(
         "status": "online",
         "credential_path": str(CREDENTIALS_DIR / f"{name}.json"),
     }
+
+
+# ═══════════════════════════════════════════════════
+# 回路测试（Loopback Test）
+# ═══════════════════════════════════════════════════
+
+
+async def _loopback_test(
+    ws, name: str, agent_id: str, timeout: int = 15
+) -> bool:
+    """向 _inbox:server 发 test ✅ 消息，等待 server 回路确认。"""
+    test_id = f"test-{agent_id[:8]}-{int(time.time())}"
+    payload = {
+        "type": "message",
+        "channel": "_inbox:server",
+        "content": f"test ✅ R96 入驻验证 — {name} 双向通信测试",
+        "from_name": name,
+        "agent_id": agent_id,
+        "id": test_id,
+        "ts": time.time(),
+    }
+    await ws.send(json.dumps(payload))
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+        resp = json.loads(raw)
+        if "✅ test 确认" in resp.get("content", ""):
+            return True
+    return False
 
 
 # ═══════════════════════════════════════════════════
@@ -343,7 +400,23 @@ def main():
         "--trigger-keyword", default="",
         help="触发关键词，如 @MyBot（可选，顶层字符串字段）",
     )
+    parser.add_argument(
+        "--pipeline-roles", default="[]",
+        help='管线角色列表 JSON，如 \'["reviewer", "qa"]\'（可选）',
+    )
+    parser.add_argument(
+        "--skills", default="[]",
+        help='技能列表 JSON，如 \'["code-review", "quality-check"]\'（可选）',
+    )
     parser.add_argument("--ws-url", default=DEFAULT_WS_URL, help=f"WebSocket 地址（默认: {DEFAULT_WS_URL}）")
+    parser.add_argument(
+        "--loopback-test", action="store_true", default=True,
+        help="注册完成后执行回路测试（默认开启）",
+    )
+    parser.add_argument(
+        "--no-loopback-test", dest="loopback_test", action="store_false",
+        help="跳过回路测试",
+    )
 
     args = parser.parse_args()
 
@@ -353,16 +426,37 @@ def main():
     except json.JSONDecodeError as e:
         print(f"❌ capabilities JSON 解析失败: {e}")
         print(f"   传入值: {args.capabilities}")
-        print(f"   正确格式: --capabilities '{{\"tasks\": [\"coding\"]}}'")
+        print(f"   正确格式: --capabilities '{{\\\"tasks\\\": [\\\"coding\\\"]}}'")
+        sys.exit(1)
+
+    # 解析 pipeline_roles JSON
+    try:
+        pipeline_roles = json.loads(args.pipeline_roles) if args.pipeline_roles else []
+    except json.JSONDecodeError as e:
+        print(f"❌ pipeline-roles JSON 解析失败: {e}")
+        print(f"   传入值: {args.pipeline_roles}")
+        print(f"   正确格式: --pipeline-roles '[\"reviewer\"]'")
+        sys.exit(1)
+
+    # 解析 skills JSON
+    try:
+        skills = json.loads(args.skills) if args.skills else []
+    except json.JSONDecodeError as e:
+        print(f"❌ skills JSON 解析失败: {e}")
+        print(f"   传入值: {args.skills}")
+        print(f"   正确格式: --skills '[\"code-review\"]'")
         sys.exit(1)
 
     # 运行全流程
-    asyncio.run(register_full_flow(
+    result = asyncio.run(register_full_flow(
         ws_url=args.ws_url,
         name=args.name,
         description=args.description,
         capabilities=capabilities,
         trigger_keyword=args.trigger_keyword,
+        pipeline_roles=pipeline_roles,
+        skills=skills,
+        loopback_test=args.loopback_test,
     ))
 
 

@@ -87,7 +87,7 @@ def check_requirements() -> bool:
 
 def validate_config(config: PlatformConfig) -> bool:
     extra = config.extra or {}
-    url = extra.get("url") or _env("URL")
+    url = extra.get("url") or extra.get("ws_url") or _env("URL")
     if not url:
         logger.warning("[WSBridge] URL not configured")
         return False
@@ -164,7 +164,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
         extra = config.extra or {}
 
         self._url = normalize_ws_url(
-            extra.get("url") or _env("URL") or ""
+            extra.get("url") or extra.get("ws_url") or _env("URL") or ""
         )
         self._bot_name = extra.get("bot_name") or _env("BOT_NAME") or "bot"
         self._role = extra.get("role") or "member"
@@ -192,6 +192,28 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
         self._api_key = api_key
         self._agent_id = agent_id
+
+        # ── R96: API key 来源诊断日志 ──
+        if api_key:
+            source = "unknown"
+            if extra.get("api_key"):
+                source = "extra (config.yaml)"
+            elif _env("API_KEY"):
+                source = "env (WS_IM_API_KEY)"
+            else:
+                source = f"cred file (~/.ws-bridge/{self._bot_name}.json)"
+            logger.warning(
+                "[WSBridge] API key resolved from %s (len=%d)", source, len(api_key)
+            )
+        else:
+            logger.error(
+                "[WSBridge] No api_key for '%s'. Options: "
+                "(1) config.yaml extra.api_key, "
+                "(2) env WS_IM_API_KEY, "
+                "(3) ~/.ws-bridge/%s.json",
+                self._bot_name, self._bot_name,
+            )
+        # ═══════════════════════════════════════════
 
         # If we didn't get api_key yet, fail gracefully at connect time
         self._last_msg_ts: float = 0.0
