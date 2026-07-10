@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.56
+> **版本：** v2.57
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -11,7 +11,7 @@
 
 | # | 事项 | 严重度 | 轮次 | 状态 |
 |:-:|:----|:-----:|:----:|:----:|
-| F-3 | **P3 角色体系** — `workspace_admin` 角色在 ws-bridge 中缺失，当前降级为 P1/P2 限速 | 🟡 P2 | 待分配 | ⬜ 待启动 |
+|| F-3 | **P3 角色体系** — `workspace_admin` 角色在 ws-bridge 中缺失，当前降级为 P1/P2 限速。R81: workspace member self-management (join/leave/add/remove/list_members) | 🟡 P2 | R81 | 🟢 已完成 ✅ |
 | F-4 | **测试标签与前缀匹配冲突** — `[R{N}测试]` 在 `📢` 之前破坏 startswith | 🟢 P3 | R45 | 🟢 已完成 ✅ |
 | F-5 | **P3 工作室管理能力增强** — 增加管理工作室的权限/功能（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
 | F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
@@ -193,11 +193,11 @@ PM                                Server                              Bot
 - 管线状态可观测（当前在第几步、谁在干活、下一步谁接）
 
 **关键工作项**：
-- ✅ **`_inbox:server` 中继实现** — server 端 `_handle_server_relay` 前缀匹配转发 + 自动确认（R87 ✅）
+- ✅ **`_inbox:server` 中继实现** — server 端识别特殊通道 `_inbox:server`，实现前缀匹配转发 + 自动确认（Step 4）（R87 ✅）
 - ✅ **Bot 端适配** — 各 bot 回复目标从 `_inbox:<PM_id>` 改为 `_inbox:server`（R87 ✅）
-- ✅ 定义 Pipeline Topology 配置格式 — YAML frontmatter `topology.chain`（R88 ✅）
-- ✅ 实现 AutoRouter — 独立服务 `server/auto_router.py`，监听 PM 收件箱自动派活（R88 ✅）
-- ✅ AutoRouter 增强 — `_send_inbox()` payload 补全 + Step 超时检测告警 PM（R89 ✅）
+- ✅ **定义 Pipeline Topology 配置格式** — YAML frontmatter `topology.chain` 定义 Step 链 + 依赖关系（R88 ✅）
+- ✅ **实现 AutoRouter** — 独立服务 `server/auto_router.py`，监听 PM 收件箱，检测 `✅ 完成` 后自动派发下一 Step（R88 ✅）
+- ✅ AutoRouter 增强 — payload 补全 + Step 超时检测告警 PM（R89 ✅）
 - 🔲 引入结构化 Task Card（替代自然语言描述）作为 bot 间交接的标准化文档载体
 - 🔲 异常处理机制完善：跳步、驳回回退、超时自动换人
 - 🔲 管线监控可视化（`!pipeline_status` 增强，展示整条链路的进度）
@@ -240,16 +240,19 @@ Phase 3 (Coder Agent)
 
 || 版本 | 日期 | 变更 |
 ||:---:|:----:|:----|
-|| v2.56 | 2026-07-10 | 🎯 **R90 完成 ✅** — AutoRouter 边角修复：🅰️ `_handle_message()` 白名单（PM inbox + _admin 双通道），🅱️ 工作区创建失败通知 PM，🅲 `AR_STEP_TIMEOUT` 环境变量 + `<=0` 守卫。2 文件 +67/-17 行，零回归修改。审查 4/4 🟢，测试 54/54 🟢。合并部署 main `6dbaad6`，ws-bridge:r90 镜像 |
+||| v2.56 | 2026-07-10 | 🎯 **R90 完成 ✅** — AutoRouter 坑位修补 🅰️🅱️🅲。改 2 文件 +67 行。审查 5/5 🟢，测试 61/61 ALL GREEN 🟢。合并部署 main `6dbaad6`，ws-bridge:r90 镜像 |
+||| v2.57 | 2026-07-10 | 🎯 **R91 完成 ✅** — 工作室阻塞修复：🅰️ `max_per_person` 1→3 可配置化（`MAX_ACTIVE_WORKSPACES` 环境变量），🅱️ 错误信息细化（重名/超限精确区分 + 操作建议）。改 2 文件 +19 行。审查 3/3 🟢，测试 31/31 ALL GREEN 🟢。合并部署 main → 推 dev |
 || v2.55 | 2026-07-10 | 🎯 **R89 完成 ✅** — AutoRouter 增强：`_send_inbox()` payload 补全（from_name/agent_id/id/ts）+ Step 超时检测（2h 超时告警 PM，防重复通知）。仅改 `server/auto_router.py`（+139/-30 行），零 handler.py 修改。审查 5/5 🟢，测试 61/61 ALL GREEN 🟢。合并部署 main `4f9bac0`，ws-bridge:r89 镜像，8 agents 在线 ✅ |
 || v2.54 | 2026-07-10 | 🎯 **R88 完成 ✅** — Pipeline AutoRouter 独立服务部署。PM = Step 1, `!pipeline_start` 即 Step 1 完成信号，server 自动检测 `✅ 完成` 并派活下一棒。新增 `server/auto_router.py`（667 行），零 handler.py 修改。19 项验收 72/72 ALL GREEN 🟢。合并部署 main `1910a55` |
 || v2.52 | 2026-07-09 | 🗺️ **Roadmap 规划上线** — 新增 §四 Roadmap，定义三阶段演进：Phase 1（稳定 Inbox）、Phase 2（自动化管线）、Phase 3（Coder Agent 编码专精）。来源于 OpenCode 调研 + ECC 候选方向 + 编码环节专业化讨论 |
 ||:---:|:----:|:----|
-|| v2.53 | 2026-07-09 | 🎯 **Phase 2 架构设计上线** — 新增 `_inbox:server` 中继架构作为自动化管线基石。PM 仅需 1 条派活消息，bot 统一回复到 `_inbox:server`，server 按前缀匹配转发关键消息（ACK ✅ / ✅ 完成）并自动发 Step 4 确认。替换原 Phase 2 核心设计问题列表，新增通信架构图、前缀规则、收益对比表。源自 R86 后 inbox 通信模式升级讨论 |
+||| v2.55 | 2026-07-10 | 🎯 **R89 完成 ✅** — AutoRouter 消息完善与 Step 超时检测 🔧。`server/auto_router.py` 增强（+169/-30 行）：payload completion + step timeout detection。19 项验收 61/61 ALL GREEN 🟢。合并部署 main `4f9bac0`，ws-bridge:r89 镜像，8 agents 在线 |
+||| v2.54 | 2026-07-10 | 🎯 **R88 完成 ✅** — Pipeline AutoRouter 独立服务部署。PM = Step 1, `!pipeline_start` 即 Step 1 完成信号，server 自动检测 `✅ 完成` 并派活下一棒。新增 `server/auto_router.py`（667 行），零 handler.py 修改。19 项验收 72/72 ALL GREEN 🟢。合并部署 main `1910a55` |
 ||:---:|:----:|:----|
 ||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
 ||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |\n||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
-||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅** — 验证钩子系统：step auto-verify gate + verify_default.py。审查 🟢 通过。17/17 45/45 ALL GREEN 🟢。合并部署 main `49a345b`，ws-bridge:latest（r80）镜像 |
+||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅**
+|| v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
 ||| v2.46 | 2026-07-07 | 🎯 **R79 完成 ✅** — 新虾注册流程完善：欢迎消息 + 审批通知 + 自动切频道 + 大厅广播 + scripts/ 清理。审查 🟢 通过。12/12 37/37 ALL GREEN 🟢。合并部署 main `63b2e0d`，ws-bridge:latest（r79）镜像 |\n||| | 2026-07-08 | ➕ **R79 follow-up** — 小谷 `_cmd_close_workspace` 归档通知：遍历成员通知归档上下文。合并部署 main `0475ede`，ws-bridge:latest |
 ||| v2.45 | 2026-07-07 | 🎯 **R78 完成 ✅** — 全局变量迁移补完：角色映射 + ACK 状态统一管理 + 小谷守护进程。审查 🟢 通过，B-1 已修复。10/10 验收 38/38 ALL GREEN 🟢。合并部署 main `a1bd8e8`，ws-bridge:latest（r78）镜像 |
 ||| v2.44 | 2026-07-07 | 🎯 **R77 完成 ✅** — PipelineContext：统一管线上下文对象。PipelineContext 类 + 上下文注入 + 历史消息追溯。7/7 验收 ALL GREEN 🟢。合并部署 main `2df79c0`，ws-bridge:latest（r77）镜像 |
