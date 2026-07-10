@@ -358,13 +358,25 @@ parser.add_argument(
 
 ## 4. 注册后自动双向测试（R96 新增方向 — 基于大宏建议）
 
-### 4.1 背景
+### 4.1 背景 — 晓周入驻全链路踩坑记录
 
-晓周虽然收到了 inbox 消息（`sent: 1`），但被自己的 Gateway 配置拦截（"Unauthorized user"）。这说明：
+晓周入驻共经历了 **5 轮排查**才最终打通：
 
-1. **server → bot 的 inbox 链路硬件上通的**（消息推送到了 Gateway）
-2. **bot 侧 Gateway 配置可能有过滤**（`allow_all`、`mention_mode`、白名单）
-3. **新人配完 Gateway 后，不知道第一次@谁测试** → 踩了"Unauthorized"还不知道是自己配置问题
+| 轮次 | 问题 | 发现方式 | 消耗 |
+|:----:|:-----|:---------|:----:|
+| 1 | Gateway 配不上（ws_url vs url） | 手动排查日志 | ~20min |
+| 2 | .env API key 不生效 | 手动排查配置 | ~15min |
+| 3 | Agent Card 注册静默失败（协议错误） | `!agent_card list` 发现缺人 | ~10min |
+| 4 | inbox 消息 "Unauthorized user" 拦截 | 排查 Gateway 日志 | ~15min |
+| 5 | 重新发送 recard 教程 | 人工转发 | ~5min |
+
+**合计：~1 小时的人工排查，涉及 4 个人（晓周、大宏、小谷、TG 调查）。**
+
+**问题根源：register.py 跑完后没有任何「双向通了」的确认信号。** 新人不知道：
+- 注册成功没有？（✅ register_ok，这步是有的）
+- Agent Card 在线没有？（❌ 无声失败）
+- Gateway 配对了没有？（❌ 无声失败）
+- 双向通信通了没有？（❌ 根本没测）
 
 ### 4.2 方案：register.py 末尾主动发 `test ✅` 回路测试
 
