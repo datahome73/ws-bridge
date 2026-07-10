@@ -2633,15 +2633,19 @@ async def _cmd_pipeline_stop(sender_id: str, params: dict) -> str:
     # 3. 权限校验：仅发起者可 stop
     creator = ""
     if ctx:
-        creator = ctx.created_by
+        creator = ctx.created_by if hasattr(ctx, "created_by") else ctx.get("created_by", "")
     elif pstate:
         creator = pstate.get("triggerer_id", "")
     if creator and sender_id != creator:
         return f"❌ 只有发起者可以 stop 此管线"
 
     # 4. 状态检查
-    if ctx and ctx.status == PipelineStatus.STOPPED:
-        return f"✅ Pipeline {round_name} 已停止（无需操作）"
+    if ctx:
+        _ctx_status = ctx.status.value if hasattr(ctx, "status") and hasattr(ctx.status, "value") else \
+                      ctx.status if hasattr(ctx, "status") else \
+                      ctx.get("status", "")
+        if _ctx_status in ("stopped", "done"):
+            return f"✅ Pipeline {round_name} 已停止（无需操作）"
     if pstate and not pstate.get("active", False):
         # 旧系统中 inactive = 已结束/停止
         return f"✅ Pipeline {round_name} 已停止（无需操作）"
