@@ -1,288 +1,377 @@
+---
+pipeline:
+  name: "R93 做减法 — 清理等级体系/配对码/R63 toggles/旧注册路径 🧹"
+  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R93/WORK_PLAN.md"
+  requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R93/R93-product-requirements.md"
+  topology:
+    auto_chain: true
+    chain:
+      - step: step2
+        role: architect
+        title: 技术方案
+      - step: step3
+        role: developer
+        title: 编码清理
+      - step: step4
+        role: reviewer
+        title: 代码审查
+      - step: step5
+        role: qa
+        title: 测试验证
+      - step: step6
+        role: operations
+        title: 合并部署归档
+  steps:
+    step2:  { role: architect,    title: 技术方案 }
+    step3:  { role: developer,    title: 编码清理 }
+    step4:  { role: reviewer,     title: 代码审查 }
+    step5:  { role: qa,           title: 测试验证 }
+    step6:  { role: operations,   title: 合并部署归档 }
+  workspace:
+    members:
+      architect: { mention_keyword: "architect;架构师" }
+      developer: { mention_keyword: "developer;开发" }
+      reviewer:  { mention_keyword: "reviewer;审查" }
+      qa:        { mention_keyword: "qa;测试" }
+      operations: { mention_keyword: "operations;运维" }
+---
+
 # R93 技术方案 — 做减法 🧹
 
 > **版本：** v1.0
 > **作者：** 🏗️ 架构师
 > **日期：** 2026-07-11
-> **基于需求：** `docs/R93/R93-product-requirements.md` v1.0
-> **前置条件：** R92 AutoRouter 全信号路径闭环已部署 ✅ (main `0333fef`)
-> **改动文件：** `server/auth.py` / `server/persistence.py` / `server/handler.py` / `server/__main__.py` / `shared/protocol.py` / `server/config.py`
-> **总行数：** 纯删除 ~-181 行 · 零新增 ✅
+> **基于需求文档：** `docs/R93/R93-product-requirements.md` v1.0
+> **改动文件：** `server/auth.py` · `server/persistence.py` · `server/handler.py` · `server/__main__.py` · `shared/protocol.py` · `server/config.py`
+> **净变化：** -181 行，零新增
 
 ---
 
 ## 目录
 
-1. [验证方法：四步安全删除法](#1-验证方法四步安全删除法)
-2. [🅰️ L1-L4 等级体系 — `role_level()` 删除](#️-l1-l4-等级体系--role_level-删除)
-3. [🅱️ 配对码系统 — 5 文件删除](#️-配对码系统--5-文件删除)
-4. [🅲 R63 Feature Toggles — 3 变量赋值 + 6 处守卫移除](#️-r63-feature-toggles--3-变量赋值--6-处守卫移除)
-5. [🅳 MSG_REGISTER_AGENT 旧路径 — handler.py 分支删除](#️-msg_register_agent-旧路径--handlerpy-分支删除)
-6. [改动总览表](#6-改动总览表)
-7. [风险与边界检查](#7-风险与边界检查)
-8. [编码预检表](#8-编码预检表)
+1. [改动总览](#1-改动总览)
+2. [🅰️ 等级体系 `role_level()` 删除分析](#️-等级体系-role_level-删除分析)
+3. [🅱️ 配对码系统删除分析](#️-配对码系统删除分析)
+4. [🅲 R63 Feature Toggles 清理分析](#️-r63-feature-toggles-清理分析)
+5. [🅳 MSG_REGISTER_AGENT 旧路径删除分析](#️-msg_register_agent-旧路径删除分析)
+6. [异常情况与边界分析](#6-异常情况与边界分析)
+7. [删除安全矩阵](#7-删除安全矩阵)
+8. [开发者指引](#8-开发者指引)
 9. [验收清单](#9-验收清单)
 
 ---
 
-## 1. 验证方法：四步安全删除法
+## 1. 改动总览
 
-每一类清理都遵循以下四步：
+### 1.1 四项删除汇总
 
-| 步骤 | 操作 | 验证 |
-|:----:|:-----|:-----|
-| ① grep 基线 | `grep -rn <func_name> server/` 统计引用数 | 基线数字确保删除后归零 |
-| ② 删除定义 | 删除函数/变量定义 | — |
-| ③ grep 零残留 | 再次 `grep -rn <func_name> server/` | 返回 0 |
-| ④ import 清理 | 检查 import 行是否因删除而变空 | 移除孤立 import |
+| # | 类别 | 文件 | 净行数 | 优先级 |
+|:-:|:-----|:-----|:------:|:------:|
+| 🅰️ | L1-L4 等级体系 | auth.py, handler.py | **-15** | 🔴 零调用者 |
+| 🅱️ | 配对码系统 | auth.py, persistence.py, handler.py, __main__.py, protocol.py | **-125** | 🔴 已全替代 |
+| 🅲 | R63 toggles | handler.py, config.py | **-11** | 🟡 永远为真 |
+| 🅳 | MSG_REGISTER_AGENT | handler.py | **-30** | 🔴 已标 DEPRECATED |
+| | **合计** | **6 文件** | **-181** | **纯删除** |
 
-**⚠️ 特别警告：** 配对码系统跨 5 文件，grep 必须覆盖全部文件（`server/` + `shared/`），且要 grep 每个被删函数名（而非只用一个大词 grep "pairing"）。
+### 1.2 安全前提
 
----
-
-## 2. 🅰️ L1-L4 等级体系 — `role_level()` 删除
-
-### 2.1 改动坐标
-
-| # | 文件 | 内容 | 删除方式 |
-|:-:|:-----|:-----|:---------|
-| A-1 | `server/auth.py` L80-L105 | `role_level()` 函数定义 + `# ── R6: Role Level System` 注释 | 整块删除 |
-| A-2 | `server/handler.py` 全文件 | 7 处 `L2 member` / `L4 global admin` 纯注释 | 逐行删除 |
-
-### 2.2 A-1 删除范围 (auth.py)
-
-```python
-# ── R6: Role Level System  ← 删整段
-def role_level(agent_id: str) -> int:
-    """Return role level: 4=global_admin, 3=workspace_admin, 2=member, 1=observer."""
-    users = get_users()
-    user = users.get(agent_id, {})
-    if user.get("role") == "admin":
-        return 4
-    return 2
-```
-
-**验证：** `grep -rn "role_level" server/auth.py` → 0 匹配
-
-### 2.3 A-2 删除范围 (handler.py)
-
-`grep -n "L2\|L4.*global\|等级" server/handler.py` 定位所有纯注释行，确认不在代码逻辑中。
+每一项删除的共同前提：
+1. ✅ `grep -rn` 确认零引用（无 import、无调用、无执行路径）
+2. ✅ 已有替代方案（R72 api_key、Agent Cards、register 协议）
+3. ✅ 代码自身标注废弃（DEPRECATED 注释、R6/R63 时代标记）
 
 ---
 
-## 3. 🅱️ 配对码系统 — 5 文件删除
+## 2. 🅰️ 等级体系 `role_level()` 删除分析
 
-### 3.1 改动总览
+### 2.1 删除对象
 
-| # | 文件 | 删除内容 | 预估行数 |
-|:-:|:-----|:---------|:--------:|
-| B-1 | `server/auth.py:10-65` | `PAIRING_CODE_TTL`, `generate_code()`, `create_pairing_code()`, `approve()`, `cleanup_expired_codes()`, `_code_expired()` | -55 |
-| B-2 | `server/persistence.py:10,33-61` | `_pairing_codes` 变量 + `load_pairing_codes()`, `save_pairing_codes()`, `get_pairing_codes()`, `set_pairing_codes()` | -28 |
-| B-3 | `server/handler.py` | `handle_approve()` 函数 + `_cmd_approve_pairing()` 函数 | -29 |
-| B-4 | `server/handler.py` | 命令注册表 `"approve_pairing"` 条目 + approve 提示代码 | -8 |
-| B-5 | `server/__main__.py` | `load_pairing_codes` / `save_pairing_codes` import + 调用 + 清理循环 | -8 |
-| B-6 | `shared/protocol.py` | `MSG_PAIRING_CODE`, `PAIRING_CODE_TTL` | -2 |
-| **合计** | | | **~-125** |
+| 位置 | 函数/注释 | 删除方式 |
+|:-----|:---------|:---------|
+| `auth.py:81-105` | `role_level()` 函数 + R6 注释块 | 整块删除 |
+| `handler.py:4 处` | `# L2 member` 注释 | 逐行删除 |
+| `handler.py:2 处` | `# L4 global admin` 注释 | 逐行删除 |
+| `handler.py:1 处` | `# L3` 等残余 | 逐行删除 |
 
-### 3.2 精确坐标
+### 2.2 引用追踪
 
-#### B-1: auth.py 配对码函数
-
-`grep -n "def generate_code\|def create_pairing_code\|def approve\b\|def cleanup_expired\|def _code_expired\|PAIRING_CODE_TTL" server/auth.py`
-
-删除后检查：`grep -n "pairing\|PAIRING\|generate_code\|approve(" server/auth.py` → 0 匹配
-
-**⚠️ 注意：** `is_approved()` / `is_global_admin()` **不能删** — 它们依赖 `_approved_users` 系统，配对码的 `approve()` 只是写入 `_approved_users` 的路径之一。
-
-#### B-2: persistence.py 配对码存储
-
-`grep -n "_pairing_codes\|def load_pairing\|def save_pairing\|def get_pairing\|def set_pairing" server/persistence.py`
-
-删除后检查：`grep -n "pairing" server/persistence.py` → 0 匹配
-
-#### B-3: handler.py handle_approve + _cmd_approve_pairing
-
-```python
-# ── R23: WS approve handler — 配对码审批 (DEPRECATED R72)
-async def handle_approve(ws, msg_data):
-    ...
-```
-
-以及：
-
-```python
-# ── R6: Approve pairing code
-async def _cmd_approve_pairing(...):
-    ...
-```
-
-**删除后验证：**
 ```bash
-grep -n "def handle_approve\|def _cmd_approve_pairing" server/handler.py  # → 0
-grep -n "pairing\|approve_code\|approve_pairing" server/handler.py      # → 0（命令注册表已清理）
+# 确认零调用
+grep -rn 'role_level' server/ --include='*.py'
+# 输出应为空
 ```
 
-#### B-4: handler.py 命令注册表
+### 2.3 B1: 注释删除后代码可读性
 
-在 `_ADMIN_COMMANDS` dict 中找到 `"approve_pairing"` 条目，整行删除。
-
-#### B-5: __main__.py
+删除纯注释行不会影响代码逻辑。但需注意：
 
 ```python
-from persistence import load_pairing_codes, save_pairing_codes  # ← 删
+# 当前:
+# ── R6 check: only L4+ can approve
+if not is_global_admin(agent_id):
+    return "权限不足"
 
-# main() 中
-await persistence.load_pairing_codes()        # ← 删
-await persistence.save_pairing_codes()         # ← 删（如有）
-asyncio.create_task(pairing_code_cleanup())    # ← 删
+# 清理后:
+if not is_global_admin(agent_id):
+    return "权限不足"
 ```
 
-#### B-6: protocol.py
-
-```python
-MSG_PAIRING_CODE = "pairing_code"          # ← 删（DEPRECATED 注释也删）
-PAIRING_CODE_TTL = 300                     # ← 删
-```
+**结论：** 注释删除 → 代码逻辑完全不受影响 ✅
 
 ---
 
-## 4. 🅲 R63 Feature Toggles — 3 变量赋值 + 6 处守卫移除
+## 3. 🅱️ 配对码系统删除分析
 
-### 4.1 改动坐标
+### 3.1 删除范围
 
-| # | 文件 | 内容 | 操作 |
-|:-:|:-----|:-----|:-----|
-| C-1 | `server/handler.py` L86-88 | `_ENABLE_R63_*` 3 个变量定义 | 删除整行 |
-| C-2 | `server/handler.py` L1819 | `if _ENABLE_R63_TIMEOUT:` | 移除 if 守卫，保留内部 `_task_timeout = ...` |
-| C-3 | `server/handler.py` L1863 | `if _ENABLE_R63_TIMEOUT:` | 同上 |
-| C-4 | `server/handler.py` L3536 | `if _ENABLE_R63_TIMEOUT:` | 同上 |
-| C-5 | `server/handler.py` L4355 | `if current and _ENABLE_R63_TIMEOUT:` | 改为 `if current:` |
-| C-6 | `server/handler.py` | `if _ENABLE_R63_ACK:` 2 处 | 移除 if 守卫，保留内部代码 |
-| C-7 | `server/config.py` | `R63_ENABLE_*` 3 个配置项 | 删除配置定义 |
+| 文件 | 删除内容 | 行数 | 注意 |
+|:-----|:---------|:----:|:-----|
+| `auth.py` | `PAIRING_CODE_TTL`, `generate_code()`, `create_pairing_code()`, `approve()`, `cleanup_expired_codes()`, `_code_expired()` | -50 | 整块删除，保留 `approved_users` 相关函数 |
+| `persistence.py` | `_pairing_codes`, `load_pairing_codes()`, `save_pairing_codes()`, `get_pairing_codes()`, `set_pairing_codes()` | -28 | 确认 `_approved_users` 函数不受影响 |
+| `handler.py` | `handle_approve()`, `_cmd_approve_pairing()`, 注册表条目, approve 提示代码 | -34 | 确认无其他路径调用 |
+| `__main__.py` | `load_pairing_codes`/`save_pairing_codes` import 和调用 + cleanup loop | -8 | 确认 `load_approved_users`/`save_approved_users` 不受影响 |
+| `protocol.py` | `MSG_PAIRING_CODE`, `PAIRING_CODE_TTL` 常量 | -2 | DEPRECATED 标记同删 |
 
-### 4.2 精确坐标
+### 3.2 引用追踪
 
-**C-2 ~ C-5 模式（`_ENABLE_R63_TIMEOUT` 的 4 处 if）：**
+```bash
+# 确认无残留引用
+grep -rn 'generate_code\|create_pairing_code\|approve(\|cleanup_expired_codes\|pairing_codes\|MSG_PAIRING_CODE' server/ shared/ --include='*.py'
+```
+
+### 3.3 B2: approved_users 与 pairing_codes 的分离
+
+**关键确认：** `approved_users` 和 `pairing_codes` 是独立的数据结构和函数，不存在交叉引用。
 
 ```python
-# 旧代码
+# persistence.py 中两者完全分离:
+_approved_users: dict = {}       # 保留 ✅
+_pairing_codes: dict = {}        # 删除 🗑️
+
+def load_approved_users(...)     # 保留 ✅
+def save_approved_users(...)     # 保留 ✅
+def get_approved_users(...)      # 保留 ✅
+def set_approved_users(...)      # 保留 ✅
+
+def load_pairing_codes(...)      # 删除 🗑️
+def save_pairing_codes(...)      # 删除 🗑️
+def get_pairing_codes(...)       # 删除 🗑️
+def set_pairing_codes(...)       # 删除 🗑️
+```
+
+### 3.4 B3: `_pairing_codes.json` 文件残留
+
+```python
+# 当前:
+PAIRING_CODES_FILE = os.path.join(data_dir, "_pairing_codes.json")
+
+# 删除后:
+# 文件仍可留在磁盘上，服务不再加载
+# 安全地手动删除（Ops 步骤）
+```
+
+**风险：** 无。文件存在但不再被读取。
+
+---
+
+## 4. 🅲 R63 Feature Toggles 清理分析
+
+### 4.1 删除范围
+
+| 位置 | 删除内容 | 操作 |
+|:-----|:---------|:-----|
+| `handler.py:86-88` | `_ENABLE_R63_TIMEOUT`, `_ENABLE_R63_AGENT_MAP`, `_ENABLE_R63_ACK` 定义 | 删除 3 行 |
+| `handler.py:1819` | `if _ENABLE_R63_TIMEOUT:` | 移除 if，保留内部代码 |
+| `handler.py:1863` | `if _ENABLE_R63_TIMEOUT:` | 移除 if，保留内部代码 |
+| `handler.py:3536` | `if _ENABLE_R63_TIMEOUT:` | 移除 if，保留内部代码 |
+| `handler.py:4355` | `if current and _ENABLE_R63_TIMEOUT:` → `if current:` | 移除后半 |
+| `handler.py:3 处` | `if _ENABLE_R63_ACK:` | 移除 if，保留内部代码 |
+| `config.py` | `R63_ENABLE_*` 3 个配置项 | 删除 |
+
+### 4.2 B4: `if _ENABLE_R63_TIMEOUT:` 守卫移除
+
+所有 `if _ENABLE_R63_TIMEOUT:` 守卫的内部代码在 toggle 为 `"1"` 时都会执行。删除 if 后，内部代码变成无条件执行——与当前生产行为一致。
+
+**示例：**
+
+```python
+# 当前:
 if _ENABLE_R63_TIMEOUT:
     _task_timeout = int(params.get("timeout", 7200))
+# else: timeout 为 None → 默认无超时
 
-# 新代码（移除 if，直接保留赋值）
+# 删除后:
 _task_timeout = int(params.get("timeout", 7200))
 ```
 
-**⚠️ 注意：** 移除 if → 内部代码必须保持原格式对齐。验证：
+### 4.3 B5: `_ENABLE_R63_ACK` 守卫移除
+
+同 B4，删除 `if _ENABLE_R63_ACK:` 后内部代码无条件执行，与当前生产行为一致。
+
+### 4.4 B6: `_ENABLE_R63_AGENT_MAP` 引用确认
+
 ```bash
-grep -n "ENABLE_R63" server/handler.py  # → 0 匹配
-grep -n "ENABLE_R63" server/config.py   # → 0 匹配
+# 预期输出：仅定义行，无使用行
+grep -rn 'R63_AGENT_MAP\|ENABLE_AGENT_MAP' server/ shared/ --include='*.py'
 ```
 
+_Note: 需求文档已确认该变量定义后从未在任何 `if` 判断中使用。_
+
 ---
 
-## 5. 🅳 MSG_REGISTER_AGENT 旧路径 — handler.py 分支删除
+## 5. 🅳 MSG_REGISTER_AGENT 旧路径删除分析
 
-### 5.1 改动坐标
+### 5.1 删除范围
 
-| # | 文件 | 行号范围 | 内容 |
-|:-:|:-----|:--------:|:-----|
-| D-1 | `server/handler.py` | ~L7039-7070 | `elif msg_type == p.MSG_REGISTER_AGENT and agent_id: ...` 整段删除 |
+| 位置 | 删除内容 | 行数 |
+|:-----|:---------|:----:|
+| `handler.py:7039-7070` | `elif msg_type == p.MSG_REGISTER_AGENT:` 处理分支（约 30 行含注释） | -30 |
 
-### 5.2 删除边界
+### 5.2 B7: 条件判断链完整性
 
-从 `# DEPRECATED — R72 新体系使用 register 协议` 注释开始，到该 elif 分支的 `# end of MSG_REGISTER_AGENT` 或下一个 `elif` / 缩进返回处结束。
+`MSG_REGISTER_AGENT` 处理分支位于 `if-elif` 链中。删除该分支后，需要确保相邻的 `elif` / `else` 不受影响。
 
-**确认 grep 基线：**
-```bash
-grep -n "MSG_REGISTER_AGENT" server/handler.py  # 记录当前位置
-# 删除后检查
-grep -n "MSG_REGISTER_AGENT" server/handler.py  # → 0
+```python
+# 当前结构（简化）:
+if msg_type == ADMIN_MSG:          # ← 保A留
+    ...
+elif msg_type == MSG_COMMAND:      # ← 保留
+    ...
+elif msg_type == MSG_REGISTER_AGENT:  # ← 删除 🗑️
+    ...
+elif msg_type == MSG_BROADCAST:    # ← 保留
+    ...
+
+# 删除后:
+if msg_type == ADMIN_MSG:
+    ...
+elif msg_type == MSG_COMMAND:
+    ...
+elif msg_type == MSG_BROADCAST:    # ← 自动衔接
+    ...
 ```
 
+**注意：** 删除的是整个 `elif` 块（包括条件、body、注释），不能留下空的 `elif` 或破损的 `if` 链。开发者需要确认修改后的 `if-elif` 语法完整。
+
+### 5.3 B8: protocol.py `MSG_REGISTER_AGENT` 常量
+
+```python
+# protocol.py — 是否还需保留该常量？
+MSG_REGISTER_AGENT = "register_agent"
+```
+
+**分析：** 如果 `handler.py` 是该常量的唯一引用处，则删除 handler.py 引用后，`protocol.py` 中可同时删除。但该常量可能被外部客户端使用（理论上）。**建议只删除 handler.py 中的使用，保留 protocol.py 定义**（如同已标 DEPRECATED 的 `MSG_PAIRING_CODE`，待后续轮单独清理）。
+
 ---
 
-## 6. 改动总览表
+## 6. 异常情况与边界分析
 
-| 类别 | 文件 | 删除行 | 净变化 |
-|:-----|:-----|:------:|:------:|
-| 🅰️ 等级体系 | auth.py + handler.py | -15 | **-15** |
-| 🅱️ 配对码系统 | 5 文件 | -125 | **-125** |
-| 🅲 R63 toggles | handler.py + config.py | -11 | **-11** |
-| 🅳 旧注册路径 | handler.py | -30 | **-30** |
-| **总计** | **6 文件** | **-181** | **-181** |
+### 6.1 风险矩阵
 
----
+| # | 风险场景 | 等级 | 缓解措施 |
+|:-:|:---------|:----:|:---------|
+| R1 | `handle_approve()` 被外部队列或定时器引用 | 🟢 | `grep -rn 'handle_approve'` 确认零引用 |
+| R2 | `__main__.py` cleanup 循环删除后 asyncio 循环结构变化 | 🟡 | 确认 asyncio 循环中其他 task 不受影响 |
+| R3 | 删除 `if _ENABLE_R63_TIMEOUT:` 后缩进错误 | 🟡 | 开发者注意缩进对齐，`ast.parse` 验证 |
+| R4 | `_cmd_approve_pairing` 命令注册表删除后 Web 前端报错 | 🟢 | 前端不依赖服务端命令注册表条目 |
+| R5 | `is_global_admin()` 间接依赖 `approved_users` 但删除配对码相关代码 | 🟢 | `approved_users` 函数完全保留 |
+| R6 | 客户端发送旧的 `MSG_PAIRING_CODE` 或 `MSG_REGISTER_AGENT` | 🟢 | 客户端使用 R72 register，旧消息类型被忽略（switch 默认分支） |
 
-## 7. 风险与边界检查
+### 6.2 asyncio 循环完整性
 
-### 7.1 双入口同步
+`__main__.py` 中有一个 60s 间隔的配对码清理循环：
 
-| 检查项 | 🅱️ 配对码 | 🅳 注册路径 | 说明 |
-|:-------|:---------:|:----------:|:-----|
-| `handler.py` (websockets) | `handle_approve()` + `_cmd_approve_pairing()` | `MSG_REGISTER_AGENT` 分支 | 这些全在 handler.py·不在 `__main__.py` |
-| `__main__.py` (aiohttp) | 仅配对码加载/保存/清理循环 | ❌ 没有 `MSG_REGISTER_AGENT` 分支 | 旧注册路径只在 websockets 入口 |
+```python
+# 当前:
+async def periodic_cleanup():
+    while True:
+        await asyncio.sleep(60)
+        cleanup_expired_codes()
 
-**结论：** 🟠 `__main__.py` 的配对码加载/保存/清理需在两边同步删除。`MSG_REGISTER_AGENT` 只在 handler.py 中有分支，无需双入口同步。
+# 或是在 main() 中作为 asyncio.create_task 启动
+```
 
-### 7.2 import 依赖检查
+**删除方案：** 直接删除整个 `periodic_cleanup()` 函数（如存在）+ 其启动调用。不影响其他 `asyncio.create_task`（如 ping 保活、消息处理循环）。
 
-| 文件 | 删除后可能变空的 import | 处理 |
-|:-----|:-----------------------|:-----|
-| `persistence.py` | 删除 `_pairing_codes` 和配对码函数 — 检查 import | 无外部 import，安全 |
-| `__main__.py` | `from persistence import load_pairing_codes, save_pairing_codes` | **必须删除** import 行，否则 NameError |
+### 6.3 文件残留
 
-### 7.3 留存检查
+删除代码后以下文件不再被访问：
 
-**⚠️ 以下内容不应被删除（非本轮 scope）：**
-
-| 内容 | 位置 | 原因 |
+| 文件 | 状态 | 操作 |
 |:-----|:-----|:-----|
-| `is_global_admin()` / `is_approved()` | auth.py | 仍在多处使用（命令权限检查） |
-| `approved_users` / `load_approved_users()` / `save_approved_users()` | persistence.py | 全局管理员系统依赖它 |
-| `handle_broadcast()` | handler.py | 核心消息路由 |
-| `_parse_command()` / `_ADMIN_COMMANDS` 其他条目 | handler.py | 其他命令仍需使用 |
-| 其他 `MSG_*` 常量 | protocol.py | 仅删 `MSG_PAIRING_CODE` |
+| `_pairing_codes.json` | 不再加载/写入 | 可安全删除（Ops 步骤） |
+| `_approved_users.json` | 继续使用 | **保留不动** ✅ |
 
 ---
 
-## 8. 编码预检表
+## 7. 删除安全矩阵
 
-| 改动 | 文件 | 精确坐标 | 操作 | 预估行数 |
-|:----|:-----|:--------:|:----:|:--------:|
-| A-1 | `auth.py` | `role_level()` 定义行 | 删除函数+注释 | -8 |
-| A-2 | `handler.py` | 7 处 L2/L4 注释行 | 逐行删除 | -7 |
-| B-1 | `auth.py` | `generate_code` ~ `PAIRING_CODE_TTL` 块 | 整段删除 | -55 |
-| B-2 | `persistence.py` | `_pairing_codes` + 4 个函数 | 删除 | -28 |
-| B-3 | `handler.py` | `handle_approve()` 函数 | 删除 | -14 |
-| B-3 | `handler.py` | `_cmd_approve_pairing()` 函数 | 删除 | -15 |
-| B-4 | `handler.py` | `_ADMIN_COMMANDS["approve_pairing"]` | 删除 | -8 |
-| B-5 | `__main__.py` | import + 调用 + `create_task(cleanup)` | 删除 | -8 |
-| B-6 | `protocol.py` | `MSG_PAIRING_CODE`, `PAIRING_CODE_TTL` | 删除 | -2 |
-| C-1 | `handler.py` | 3 个 `_ENABLE_R63_*` 定义 | 删除 | -3 |
-| C-2~5 | `handler.py` | 4 处 `_ENABLE_R63_TIMEOUT` if | 移除守卫 | -4 |
-| C-6 | `handler.py` | 2 处 `_ENABLE_R63_ACK` if | 移除守卫 | -2 |
-| C-7 | `config.py` | 3 个 `R63_ENABLE_*` | 删除 | -3 |
-| D-1 | `handler.py` | `MSG_REGISTER_AGENT` 分支 | 整段删除 | -30 |
+| 删除项 | 零调用确认 | 替代方案 | 标注废弃 | 回归风险 |
+|:-------|:----------:|:--------:|:--------:|:--------:|
+| 🅰️ `role_level()` | ✅ grep=0 | L2/L4 区分已不用 | ✅ R6 时代 | 🟢 零 |
+| 🅱️ 配对码系统 | ✅ grep=0 | R72 api_key | ✅ DEPRECATED | 🟢 零 |
+| 🅲 R63 toggles | ✅ grep=0（AGENT_MAP）+ 永远为真 | 无需 toggle | ✅ R63 时代 | 🟢 零 |
+| 🅳 MSG_REGISTER_AGENT | ✅ 仅 DEPRECATED 标 | R72 register | ✅ 注释说明 | 🟢 零 |
+
+---
+
+## 8. 开发者指引
+
+### 8.1 操作顺序（建议）
+
+```
+1. 先清理 🅲 (R63 toggles) — 改动最小，最安全
+2. 再清理 🅳 (MSG_REGISTER_AGENT) — 单文件单分支
+3. 再清理 🅰️ (role_level) — 跨文件但改动浅
+4. 最后清理 🅱️ (pairing codes) — 最复杂，跨 5 文件
+```
+
+### 8.2 每一步后执行
+
+```bash
+# 语法检查
+python3 -c "import ast; ast.parse(open('server/handler.py').read()); print('OK')"
+for f in server/auth.py server/persistence.py server/__main__.py shared/protocol.py server/config.py; do
+    python3 -c "import ast; ast.parse(open('$f').read()); print('$f: OK')" || echo "$f: FAIL"
+done
+
+# 残留检查
+grep -rn 'role_level\|generate_code\|pairing_code\|R63_ENABLE\|MSG_REGISTER_AGENT' server/ shared/ --include='*.py' | grep -v 'R93:'
+```
+
+### 8.3 提交格式
+
+```
+feat(R93): 🧹 做减法 — delete role_level/pairing_codes/R63_toggles/MSG_REGISTER_AGENT
+```
+
+或分 4 个子提交（需确认 pipeline 是否接受多 commit）：
+
+```
+feat(R93-A): delete role_level() + L2/L4 comments
+feat(R93-B): delete pairing code system (5 files)
+feat(R93-C): delete R63_ENABLE_* feature toggles
+feat(R93-D): delete MSG_REGISTER_AGENT handling path
+```
 
 ---
 
 ## 9. 验收清单
 
-| # | 内容 | 验证命令 | 预期 |
-|:-:|:-----|:---------|:-----|
-| ✅-1 | `role_level()` 已删除 | `grep -rn "role_level" server/auth.py` | 0 匹配 |
-| ✅-2 | handler.py L2/L4 注释已清理 | `grep -n "L2 member\|L4 global" server/handler.py` | 0 匹配 |
-| ✅-3 | auth.py 配对码函数已删除 | `grep -rn "generate_code\|create_pairing\|def approve\|cleanup_expired" server/auth.py` | 0 匹配 |
-| ✅-4 | persistence.py 配对码已删除 | `grep -rn "pairing" server/persistence.py` | 0 匹配 |
-| ✅-5 | handler.py pairing 关联已删除 | `grep -rn "def handle_approve\|def _cmd_approve_pairing\|approve_pairing" server/handler.py` | 0 匹配 |
-| ✅-6 | __main__.py 配对码已删除 | `grep -n "pairing" server/__main__.py` | 0 匹配 |
-| ✅-7 | protocol.py 配对码已删除 | `grep -n "PAIRING\|pairing" shared/protocol.py` | 0 匹配 |
-| ✅-8 | `_ENABLE_R63_*` 已删除 | `grep -n "ENABLE_R63" server/handler.py server/config.py` | 0 匹配 |
-| ✅-9 | `_ENABLE_R63_TIMEOUT` if 已移除 | `grep -n "ENABLE_R63" server/handler.py` | 0 匹配 |
-| ✅-10 | `MSG_REGISTER_AGENT` 已删除 | `grep -n "MSG_REGISTER_AGENT" server/handler.py` | 0 匹配 |
-| ✅-11 | 总删除行数 ≥ 180 | `git diff --stat HEAD~1..HEAD` | 净删除 ≥ 180 |
-| ✅-12 | 编译检查通过 | `python3 -c "compile(open('server/handler.py').read(),'handler.py','exec');print('OK')"` | OK |
-
----
-
-*技术方案编写: 🏗️ 架构师 · 2026-07-11*
+| # | 验收项 | 验证方式 | 期望 |
+|:-:|:-------|:---------|:-----|
+| 🅰️-1 | `role_level()` 从 auth.py 删除 | `grep -rn 'role_level'` | 空 |
+| 🅰️-2 | handler.py L2/L4 注释清理 | `grep 'L[0-9] member\|L[0-9] global\|L[0-9] observer'` | 空 |
+| 🅱️-1 | auth.py 配对码函数删除 | `grep 'generate_code\|create_pairing_code\|approve('` | 空 |
+| 🅱️-2 | persistence.py 配对码函数删除 | `grep 'pairing_codes'` | 空 |
+| 🅱️-3 | handler.py handle_approve/approve_pairing 删除 | `grep 'handle_approve\|approve_pairing'` | 空 |
+| 🅱️-4 | __main__.py 配对码加载/清理删除 | `grep 'pairing_codes\|cleanup_expired'` | 空 |
+| 🅱️-5 | protocol.py MSG_PAIRING_CODE/PAIRING_CODE_TTL 删除 | `grep 'MSG_PAIRING_CODE\|PAIRING_CODE_TTL'` | 空 |
+| 🅲-1 | handler.py `_ENABLE_R63_*` 定义删除 | `grep 'ENABLE_R63'` | 空 |
+| 🅲-2 | config.py R63_ENABLE 配置项删除 | `grep 'R63_ENABLE'` | 空 |
+| 🅲-3 | 4 处 `if _ENABLE_R63_TIMEOUT:` 守卫移除 | 代码审查 | 内部代码无条件 |
+| 🅲-4 | 2 处 `if _ENABLE_R63_ACK:` 守卫移除 | 代码审查 | 内部代码无条件 |
+| 🅳-1 | handler.py `MSG_REGISTER_AGENT` 分支删除 | `grep 'MSG_REGISTER_AGENT'` | 仅 protocol.py |
+| ✅-1 | 总删除 ≥ 180 行 | `git diff --stat` | ≥ -180 |
+| ✅-2 | 零新增行 | `git diff --stat` | 0 新增 |
+| ✅-3 | 全部文件 ast.parse 通过 | `python3 -c "import ast; ast.parse(...)"` | 均 OK |
