@@ -21,8 +21,6 @@ import sys
 import time
 from typing import Any
 
-import yaml
-
 logger = logging.getLogger("auto-router")
 
 
@@ -38,23 +36,23 @@ class PipelineAutoRouter:
     # R90 🅲: 从环境变量读取，支持 <=0 禁用
     _STEP_DEFAULT_TIMEOUT = int(os.environ.get("AR_STEP_TIMEOUT", "7200"))
     _STEP_TIMEOUT_ENABLED  = _STEP_DEFAULT_TIMEOUT > 0
-    _STANDARD_PIPELINE_ORDER = [
-        "product_manager", "pm", "architect", "arch", "developer", "dev",
-        "reviewer", "review", "qa", "test", "operations", "ops",
-    ]
 
     def __init__(
         self,
         api_key: str,
         ws_url: str = "wss://wsim.datahome73.cloud/ws",
         pm_agent_id: str = "",
-        agent_card_path: str = "",
+        data_dir: str = "",
     ) -> None:
         # ── 连接参数 ──
         self.api_key = api_key
         self.ws_url = ws_url
         self.pm_agent_id = pm_agent_id
-        self.agent_card_path = agent_card_path or os.path.join(
+        self.data_dir = data_dir or os.path.join(
+            os.path.dirname(__file__), "..", "data"
+        )
+        self._pipeline_contexts_path = os.path.join(self.data_dir, "pipeline_contexts.json")
+        self.agent_card_path = os.path.join(
             os.path.dirname(__file__), "..", "config", "agent_cards.json"
         )
 
@@ -65,24 +63,16 @@ class PipelineAutoRouter:
         self._running = False
         self._pm_inbox_channel: str = ""
 
-        # ── 管线拓扑缓存 ──
-        # Key: round_name → {"chain": [...], "auto_chain": bool, "pipeline": {...}}
-        self._topologies: dict[str, dict] = {}
-
-        # ── Step 进度追踪 ──
-        # Key: round_name → {"current_step_idx": int, "completed_steps": set[int],
-        #                      "chain": list, "topology": dict}
+        # ── Step 进度追踪（R97: 通过 PipelineContext JSON 管理，原地保留字典兼容）──
         self._round_progress: dict[str, dict] = {}
 
         # ── 已处理的 msg_id（去重滑动窗口） ──
         self._seen_ids: set[str] = set()
 
-        # ── 角色→agent_id 索引 ──
+        # ── 角色→agent_id 索引（R97: 实时查询缓存）──
         self._role_index: dict[str, list[str]] = {}
-
-        # ── 模板渲染用 ──
-        self._pipeline_config: dict = {}
-        self._prev_sha: str = ""
+        self._role_map_ttl = 60  # 缓存 TTL（秒）
+        self._last_role_refresh: float = 0.0
 
         # ── R89 🅱️: Step 超时检测 ──
         # round_name → {step_key: {"dispatch_time": float, "role": str}}
@@ -102,7 +92,6 @@ class PipelineAutoRouter:
     async def start(self) -> None:
         """启动 AutoRouter 并保持连接（含断线重连）。"""
         self._running = True
-        self._build_role_index()
         self._pm_inbox_channel = f"_inbox:{self.pm_agent_id}" if self.pm_agent_id else ""
         logger.info("[AR] 🚂 AutoRouter 启动, pm=%s", self.pm_agent_id[:16] if self.pm_agent_id else "N/A")
 
@@ -236,173 +225,186 @@ class PipelineAutoRouter:
             return  # 不干扰 admin 频道正常通信
 
     async def _on_pipeline_ready(self, round_name: str) -> None:
-        """管线就绪 → 加载拓扑 → 记录进度（B1/B8）。"""
-        topology = await self._fetch_topology(round_name)
-        if not topology:
-            # E1/E2: 拓扑加载失败，通知 PM
+        """R97: 管线就绪 → 读 PipelineContext → 激活第一 Step。"""
+        ctx = self._load_pipeline_context(round_name)
+        if not ctx:
             await self._send_to_pm(
-                f"⚠️ AutoRouter: {round_name} 拓扑解析失败，请确认 WORK_PLAN.md 格式"
+                f"⚠️ AutoRouter: {round_name} PipelineContext 未找到，"
+                f"请确认 !pipeline_start 已成功执行"
             )
             return
 
-        chain = topology.get("chain", [])
-        auto_chain = topology.get("auto_chain", False)
-
-        if not chain and not auto_chain:
-            # E3: 无自动管线标记，跳过
-            logger.info("[AR] [%s] 未启用 auto_chain，跳过自动接力", round_name)
+        if ctx.get("status") != "running":
+            logger.info("[AR] [%s] 管线状态=%s，跳过自动接力", round_name, ctx.get("status"))
             return
 
-        self._round_progress[round_name] = {
-            "current_step_idx": -1,
-            "completed_steps": set(),
-            "chain": chain,
-            "topology": topology,
-        }
-        logger.info("[AR] [%s] 🟢 管线就绪, chain=%d steps", round_name, len(chain))
+        # 找第一个 pending step
+        step_order = ctx.get("step_order", [])
+        steps = ctx.get("steps", {})
+        first_pending = None
+        for sk in step_order:
+            si = steps.get(sk, {})
+            if si.get("status") == "pending":
+                first_pending = si
+                break
+
+        if not first_pending:
+            logger.info("[AR] [%s] 无 pending Step，跳过", round_name)
+            return
+
+        # 解析 role → agent_id
+        role = first_pending.get("role", "")
+        agent_id = await self._resolve_agent_by_role(role)
+        if not agent_id:
+            await self._send_to_pm(
+                f"❌ AutoRouter: {round_name} Step {first_pending['step_key']}({role}) "
+                f"未找到对应 bot"
+            )
+            return
+
+        # 标记 active
+        first_pending["status"] = "active"
+        first_pending["agent_id"] = agent_id
+        self._save_pipeline_context(round_name, ctx)
+
+        # 派活
+        await self._dispatch_step(ctx, first_pending, "")
+        logger.info("[AR] [%s] 🟢 Step 1 已派活: %s → %s", round_name, role, agent_id[:12])
 
     async def _on_step_complete(self, content: str) -> None:
-        """Step 完成 → 解析 → 找下一步 → 派活/完成（B2/B4/B9）。"""
-        role = self._extract_role(content)
-        sha = self._extract_sha(content)
+        """R97: Step 完成 → 更新 PipelineContext → 下一棒/完成。"""
         round_name = self._extract_round(content)
-
-        if not round_name or not role:
-            logger.debug("[AR] 无法解析完成消息: %s", content[:60])
-            return  # E7: 解析失败，忽略
-
-        progress = self._round_progress.get(round_name)
-        if not progress:
-            logger.debug("[AR] [%s] 无进度记录，跳过（B4）", round_name)
-            return  # B4: 管线结束后又收到完成消息
-
-        chain = progress["chain"]
-
-        # 找完成者对应 step 在 chain 中的 index
-        current_idx = self._find_role_in_chain(chain, role)
-        if current_idx is None:
-            logger.debug("[AR] [%s] 角色 %s 不在 chain 中（E6）", round_name, role)
-            return  # E6: 角色不在 chain 中，忽略
-
-        # 幂等标记（B3/B10）
-        if current_idx in progress["completed_steps"]:
-            logger.debug("[AR] [%s] step %d 已完成，跳过重复（B10）", round_name, current_idx)
+        sha = self._extract_sha(content)
+        if not round_name:
             return
 
-        progress["completed_steps"].add(current_idx)
-        progress["current_step_idx"] = current_idx
+        ctx = self._load_pipeline_context(round_name)
+        if not ctx or ctx.get("status") != "running":
+            return
 
-        # 找下一棒
+        steps = ctx.get("steps", {})
+        step_order = ctx.get("step_order", [])
+
+        # 找哪个 step 刚刚完成（匹配 agent_id 或 role）
+        completed_step = None
+        for sk in reversed(step_order):  # 优先匹配最新的 active step
+            si = steps.get(sk, {})
+            if si.get("agent_id") and si["agent_id"] in content:
+                completed_step = si
+                break
+        if not completed_step:
+            # 回退：找 active step
+            for sk in step_order:
+                si = steps.get(sk, {})
+                if si.get("status") == "active":
+                    completed_step = si
+                    break
+        if not completed_step:
+            return
+
+        # 标记完成
+        completed_step["status"] = "done"
+        completed_step["result_msg"] = content
+        completed_step["output"] = {"sha": sha} if sha else {}
+
+        # 找下一步
+        current_key = completed_step["step_key"]
+        current_idx = step_order.index(current_key)
         next_idx = current_idx + 1
-        if next_idx >= len(chain):
-            await self._notify_all_done(round_name)
+
+        if next_idx >= len(step_order):
+            # 全部完成
+            ctx["status"] = "done"
+            self._save_pipeline_context(round_name, ctx)
+            self._cleanup_all_dispatch(round_name)
+            await self._send_to_pm(f"🏁 {round_name} 全部 Step 已完成！管线自动闭环。")
+            logger.info("[AR] [%s] 🏁 全线闭环", round_name)
             return
 
-        next_step = chain[next_idx]
-        await self._dispatch_step(round_name, next_step, role, sha, chain)
+        next_key = step_order[next_idx]
+        next_step = steps.get(next_key)
+        if not next_step:
+            return
 
-        # ── 🅱️ 完成时清理该 Step 的计时器 ──
-        step_key = chain[current_idx].get("step", "")
-        if step_key:
-            self._cleanup_dispatch(round_name, step_key)
+        # 激活下一步
+        role = next_step.get("role", "")
+        agent_id = await self._resolve_agent_by_role(role)
+        if not agent_id:
+            await self._send_to_pm(
+                f"❌ AutoRouter: {round_name} {next_key}({role}) "
+                f"未找到对应 bot，请手动派活"
+            )
+            return
 
+        next_step["status"] = "active"
+        next_step["agent_id"] = agent_id
+        self._save_pipeline_context(round_name, ctx)
+
+        # 派活
+        await self._dispatch_step(ctx, next_step, sha or "")
         logger.info(
             "[AR] [%s] ✅ %s → 🎯 %s (SHA=%s)",
-            round_name, role, next_step.get("role", "?"), sha or "?",
+            round_name, completed_step["role"], role, sha or "?",
         )
-
-    def _find_role_in_chain(self, chain: list, role: str) -> int | None:
-        """在 chain 中查找角色对应的 step index。"""
-        for i, step in enumerate(chain):
-            step_role = step.get("role", "")
-            # 精确匹配或前缀匹配（如 "arch" 匹配 "architect"）
-            if step_role == role or step_role.startswith(role) or role.startswith(step_role):
-                return i
-        return None
 
     # ═══════════════ 管线引擎 ═══════════════
 
     async def _dispatch_step(
         self,
-        round_name: str,
-        step_config: dict,
-        prev_role: str,
+        ctx: dict,
+        step: dict,
         prev_sha: str,
-        chain: list,
     ) -> None:
-        """派活下一棒（E4/E5）。"""
-        role = step_config.get("role", "")
-        title = step_config.get("title", "")
-        step_key = step_config.get("step", "")
+        """R97: 派活下一棒（简单模板消息）。"""
+        role = step.get("role", "")
+        step_key = step.get("step_key", "")
+        agent_id = step.get("agent_id", "")
 
-        # ── 找目标 bot（E4） ──
-        target_id = self._resolve_agent_id(role, round_name)
-        if not target_id:
+        if not agent_id:
             await self._send_to_pm(
-                f"❌ AutoRouter: {round_name} {step_key}({role}) "
-                f"未找到对应 bot，请手动派活"
+                f"❌ AutoRouter: {ctx['round_name']} {step_key}({role}) "
+                f"未指定 agent_id"
             )
             return
 
-        # ── 构建任务上下文 ──
-        topology = progress = self._round_progress.get(round_name, {})
-        if isinstance(topology, dict):
-            topo = topology.get("topology", {})
-        else:
-            topo = {}
-        self._pipeline_config = topo.get("pipeline", {}) if isinstance(topo, dict) else {}
-        self._prev_sha = prev_sha
+        # 构建任务消息
+        task_content = self._build_task_message(ctx, step, prev_sha)
 
-        context_lines = []
-        for k, v in (step_config.get("context") or {}).items():
-            if v:
-                rendered = self._render_template(v, round_name)
-                context_lines.append(f"- {k}: {rendered}")
-        context_str = "\n".join(context_lines)
-
-        # ── 任务消息 ──
-        task_content = (
-            f"【{round_name} Step {step_key} 任务 — {title} 🎯】\n\n"
-            f"角色: {role}\n"
-            f"前一棒 {prev_role} 已完成 ✅ {prev_sha}\n\n"
-        )
-        if context_str:
-            task_content += f"参考：\n{context_str}\n\n"
-        task_content += (
-            f"请按流程完成任务后推 dev 分支。\n"
-            f"完成后请回复 _inbox:server 告知 SHA。"
-        )
-
-        # ── 发送（E5: 重试1次） ──
+        # 发送（重试1次）
         for attempt in range(2):
             try:
-                await self._send_inbox(target_id, task_content)
-                # ── 🅱️ 记录派活时间（确保 send 成功后再记录） ──
-                self._step_dispatch_times.setdefault(round_name, {})[step_key] = {
+                await self._send_inbox(agent_id, task_content)
+                # 记录派活时间（超时检测用）
+                self._step_dispatch_times.setdefault(ctx["round_name"], {})[step_key] = {
                     "dispatch_time": time.time(),
                     "role": role,
                 }
-                logger.info("[AR] ⏰ [%s] %s(%s) 已记录派活时间",
-                            round_name, step_key, role)
-                logger.info("[AR] 派活 %s → %s (%s)", round_name, role, target_id[:12])
+                logger.info("[AR] 派活 %s → %s (%s)", ctx["round_name"], role, agent_id[:12])
                 return
             except Exception as e:
                 if attempt == 0:
                     logger.warning("[AR] 发送失败，重试: %s", e)
                     await asyncio.sleep(1)
                 else:
-                    logger.error("[AR] 发送失败 %s: %s", target_id[:12], e)
+                    logger.error("[AR] 发送失败 %s: %s", agent_id[:12], e)
                     await self._send_to_pm(
-                        f"❌ AutoRouter: {round_name} {step_key}({role}) "
+                        f"❌ AutoRouter: {ctx['round_name']} {step_key}({role}) "
                         f"WS 发送失败: {e}"
                     )
 
-    async def _notify_all_done(self, round_name: str) -> None:
-        """全部完成通知 PM。"""
-        await self._send_to_pm(f"🏁 {round_name} 全部 Step 已完成！管线自动闭环。")
-        # ── 🅱️ 清空该轮所有计时器 ──
-        self._cleanup_all_dispatch(round_name)
-        logger.info("[AR] [%s] 🏁 全线闭环", round_name)
+    @staticmethod
+    def _build_task_message(ctx: dict, step: dict, prev_sha: str) -> str:
+        """R97: 机械组装任务消息，不涉及 LLM。"""
+        lines = [
+            f"【{ctx['round_name']} Step {step['step_key']} 任务 — {step['title']} 🎯】",
+            "",
+            f"角色: {step['role']}",
+            f"前一棒已完成: {prev_sha or '（无）'}",
+            "",
+            "请按流程完成任务后推 dev 分支。",
+            "完成后请回复 _inbox:server 告知 SHA。",
+        ]
+        return "\n".join(lines)
 
     # ── 🅱️ 超时检测辅助方法 ──
 
@@ -488,127 +490,93 @@ class PipelineAutoRouter:
         logger.debug("[AR] ⏰ 超时检查: %d/%d 活跃 Step 超时",
                      overdue_count, active_total)
 
-    async def _fetch_topology(self, round_name: str) -> dict | None:
-        """从远程 WORK_PLAN.md 读取 frontmatter → pipeline topology。
+    # ═══════════════ PipelineContext I/O ═══════════════
 
-        E1: YAML 解析失败 → None
-        E2: HTTP 请求失败 → None
-        """
-        # ① 缓存命中
-        if round_name in self._topologies:
-            return self._topologies[round_name]
-
-        # ② 构造 GitHub raw URL
-        base = "https://raw.githubusercontent.com/datahome73/ws-bridge/dev"
-        urls_to_try = [
-            f"{base}/docs/{round_name}/WORK_PLAN.md",
-        ]
-
-        import aiohttp
-
-        for url in urls_to_try:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status != 200:
-                            logger.debug("[AR] [%s] WORK_PLAN HTTP %s", round_name, resp.status)
-                            continue  # E2
-                        text = await resp.text()
-                        topology = self._parse_topology(text)
-                        if topology:
-                            self._topologies[round_name] = topology
-                            return topology
-            except asyncio.TimeoutError:
-                logger.debug("[AR] [%s] WORK_PLAN 超时", round_name)
-                continue  # E2
-            except aiohttp.ClientError as e:
-                logger.debug("[AR] [%s] WORK_PLAN 请求失败: %s", round_name, e)
-                continue  # E2
-
-        logger.warning("[AR] [%s] 未找到 topology 定义（E2）", round_name)
+    def _load_pipeline_context(self, round_name: str) -> dict | None:
+        """R97: 从 JSON 文件读取 PipelineContext。"""
+        path = self._pipeline_contexts_path
+        try:
+            if os.path.exists(path):
+                data = json.loads(open(path, encoding="utf-8").read())
+                ctx = data.get(round_name)
+                if ctx and isinstance(ctx, dict):
+                    return ctx
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("[AR] PipelineContext 读取失败: %s", e)
         return None
 
-    @staticmethod
-    def _parse_topology(markdown_text: str) -> dict | None:
-        """从 Markdown frontmatter 解析 pipeline topology。
+    def _save_pipeline_context(self, round_name: str, ctx: dict) -> None:
+        """R97: 写回 PipelineContext JSON 文件。"""
+        path = self._pipeline_contexts_path
+        try:
+            data = {}
+            if os.path.exists(path):
+                data = json.loads(open(path, encoding="utf-8").read())
+            data[round_name] = ctx
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("[AR] PipelineContext 保存失败: %s", e)
 
-        格式 A（完整）: topology.chain + auto_chain
-        格式 B（简写）: auto_chain: true（无 chain，从 steps 推断）
-        """
-        m = re.match(r"^---\s*\n(.*?)\n---", markdown_text, re.DOTALL)
-        if not m:
-            return None
+    # ═══════════════ 角色映射（R97: 实时查询 Agent Card）═══════════════
+
+    async def _resolve_agent_by_role(self, role: str) -> str | None:
+        """R97: 从 Agent Card 实时查询 role 对应的 agent_id。"""
+        await self._refresh_role_map()
+
+        # ① 精确匹配
+        if role in self._role_index:
+            agents = self._role_index[role]
+            return agents[0] if agents else None
+
+        # ② 子串匹配（"arch" ↔ "architect"）
+        for known_role, agents in self._role_index.items():
+            if role in known_role or known_role in role:
+                return agents[0] if agents else None
+
+        # ③ 角色名缩写匹配
+        short_map = {
+            "pm": ["product-manager", "product_manager", "product"],
+            "arch": ["architect", "architecture"],
+            "dev": ["developer", "development"],
+            "review": ["reviewer", "code_review"],
+            "qa": ["test", "tester", "quality"],
+            "operations": ["admin", "ops", "devops", "infra"],
+            "ops": ["operations", "devops", "infra"],
+        }
+        for short, expanded in short_map.items():
+            if role == short:
+                for exp in expanded:
+                    if exp in self._role_index:
+                        return self._role_index[exp][0]
+            elif role in expanded:
+                if short in self._role_index:
+                    return self._role_index[short][0]
+
+        logger.warning("[AR] 角色 %s 无对应 agent", role)
+        return None
+
+    async def _refresh_role_map(self) -> None:
+        """R97: 从 config/agent_cards.json 读取角色映射（60s TTL 缓存）。"""
+        now = time.time()
+        if now - self._last_role_refresh < self._role_map_ttl:
+            return
+
+        if not os.path.exists(self.agent_card_path):
+            logger.warning("[AR] Agent Card 文件不存在: %s", self.agent_card_path)
+            self._last_role_refresh = now
+            return
 
         try:
-            frontmatter = yaml.safe_load(m.group(1))  # E1
-        except yaml.YAMLError as e:
-            logger.error("[AR] YAML frontmatter 解析失败: %s", e)
-            return None
-
-        if not isinstance(frontmatter, dict):
-            return None
-
-        pipeline = frontmatter.get("pipeline", {})
-        if not isinstance(pipeline, dict):
-            return None
-
-        auto_chain = (
-            pipeline.get("auto_chain", False)
-            or pipeline.get("topology", {}).get("auto_chain", False)
-        )
-
-        # 格式 A: topology.chain 存在
-        topology = pipeline.get("topology", {})
-        chain = topology.get("chain", []) if isinstance(topology, dict) else []
-        if chain:
-            return {"chain": chain, "auto_chain": auto_chain, "pipeline": pipeline}
-
-        # 格式 B: 从 steps 按序推断 chain
-        if auto_chain:
-            steps = pipeline.get("steps", {})
-            if isinstance(steps, dict):
-                sorted_keys = sorted(
-                    steps.keys(),
-                    key=lambda k: int(re.search(r"\d+", k).group()) if re.search(r"\d+", k) else 99,
-                )
-                chain = []
-                for key in sorted_keys:
-                    step = steps[key]
-                    if isinstance(step, dict):
-                        chain.append({
-                            "step": key,
-                            "role": step.get("role", ""),
-                            "title": step.get("title", ""),
-                            "context": step.get("context", {}),
-                        })
-                if chain:
-                    return {"chain": chain, "auto_chain": True, "pipeline": pipeline}
-
-            # 空 chain + auto_chain → 仅标记，等待动态推断
-            return {"chain": [], "auto_chain": True, "pipeline": pipeline}
-
-        return None
-
-    # ═══════════════ 角色映射 ═══════════════
-
-    def _build_role_index(self) -> dict[str, list[str]]:
-        """从 Agent Card 构建 role → [agent_id, ...] 反向索引。
-
-        E8: 文件 IO 错误 → 空索引
-        """
-        cards: dict = {}
-        if os.path.exists(self.agent_card_path):
-            try:
-                with open(self.agent_card_path, encoding="utf-8") as f:
-                    cards = json.load(f)
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error("[AR] Agent Card 读取失败（E8）: %s", e)
-        else:
-            logger.warning("[AR] Agent Card 文件不存在: %s", self.agent_card_path)
+            with open(self.agent_card_path, encoding="utf-8") as f:
+                cards = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("[AR] Agent Card 读取失败: %s", e)
+            self._last_role_refresh = now
+            return
 
         role_index: dict[str, list[str]] = {}
         for agent_id, card in cards.items():
-            # 兼容两种格式: pipeline_roles (array) / role (string)
             roles: list[str] = []
             if "pipeline_roles" in card and isinstance(card["pipeline_roles"], list):
                 roles = card["pipeline_roles"]
@@ -618,47 +586,9 @@ class PipelineAutoRouter:
                 role_index.setdefault(role, []).append(agent_id)
 
         self._role_index = role_index
-        return role_index
-
-    def _resolve_agent_id(self, role: str, round_name: str) -> str | None:
-        """根据 pipeline role 查找 agent_id。
-
-        优先级: 精确匹配 → 子串匹配 → 首 agent 兜底 → None
-        """
-        if not self._role_index:
-            self._build_role_index()
-
-        # 精确匹配
-        if role in self._role_index:
-            return self._role_index[role][0]
-
-        # 子串匹配: chain 中 role="arch" 匹配索引中的 "architect"
-        for known_role, agents in self._role_index.items():
-            if role in known_role or known_role in role:
-                return agents[0]
-
-        logger.warning("[AR] 角色 %s 无对应 agent（E4）", role)
-        return None
-
-    # ═══════════════ 模板渲染 ═══════════════
-
-    def _render_template(self, template: str, round_name: str) -> str:
-        """执行模板变量替换: ${pipeline.xxx} / {round} / {prev_sha}"""
-        result = template.replace("{round}", round_name)
-
-        def _resolve_pipeline_var(m: re.Match) -> str:
-            path = m.group(1).split(".")
-            value: Any = self._pipeline_config
-            for key in path:
-                if isinstance(value, dict):
-                    value = value.get(key, m.group(0))
-                else:
-                    return m.group(0)
-            return str(value) if not isinstance(value, (dict, list)) else m.group(0)
-
-        result = re.sub(r"\$\{pipeline\.([^}]+)\}", _resolve_pipeline_var, result)
-        result = result.replace("{prev_sha}", self._prev_sha)
-        return result
+        self._last_role_refresh = now
+        logger.info("[AR] 角色映射已刷新: %d 角色, %d agent(s)",
+                     len(role_index), sum(len(v) for v in role_index.values()))
 
     # ═══════════════ 解析工具 ═══════════════
 
@@ -743,27 +673,25 @@ class PipelineAutoRouter:
     # ═══════════════ 状态恢复 ═══════════════
 
     async def _restore_pipeline_state(self) -> None:
-        """重启/重连时恢复已有管线状态（B5/B6/B8）。
-
-        v1 实现: 仅恢复已缓存的拓扑信息。
-        重连后 PM 可手动确认进度，AutoRouter 从下一个完成消息继续。
-        """
+        """R97: 重启时从 PipelineContext JSON 恢复活跃管线。"""
         logger.info("[AR] 正在查询活跃管线状态...")
-        for round_name in list(self._round_progress.keys()):
-            topo = await self._fetch_topology(round_name)
-            if topo:
-                chain = topo.get("chain", [])
-                self._round_progress[round_name]["chain"] = chain
-                self._round_progress[round_name]["topology"] = topo
-                logger.info(
-                    "[AR] [%s] 已恢复管线状态 (%d/%d steps)",
-                    round_name,
-                    len(self._round_progress[round_name]["completed_steps"]),
-                    len(chain),
-                )
+        path = self._pipeline_contexts_path
+        restored = 0
+        try:
+            if os.path.exists(path):
+                data = json.loads(open(path, encoding="utf-8").read())
+                for round_name, ctx in data.items():
+                    if isinstance(ctx, dict) and ctx.get("status") == "running":
+                        restored += 1
+                        logger.info(
+                            "[AR] [%s] 恢复管线 (%d steps)",
+                            round_name, len(ctx.get("steps", {})),
+                        )
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("[AR] 状态恢复读取失败: %s", e)
 
-        if not self._round_progress:
-            logger.info("[AR] 无活跃管线，等待新管线事件（B8）")
+        if restored == 0:
+            logger.info("[AR] 无活跃管线，等待新管线事件")
 
     # ═══════════════ 去重 ═══════════════
 
@@ -793,8 +721,8 @@ def main() -> None:
         help="ws-bridge WebSocket 地址",
     )
     parser.add_argument(
-        "--agent-card-path", default="",
-        help="Agent Card JSON 文件路径",
+        "--data-dir", default="",
+        help="PipelineContext JSON 所在目录（默认 ./data）",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -811,7 +739,7 @@ def main() -> None:
         api_key=args.api_key,
         ws_url=args.ws_url,
         pm_agent_id=args.pm_agent_id,
-        agent_card_path=args.agent_card_path,
+        data_dir=args.data_dir,
     )
 
     try:

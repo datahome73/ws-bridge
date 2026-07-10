@@ -2474,350 +2474,63 @@ async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
 # ── R42: Pipeline commands ─────────────────────────────────────────
 
 async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
-    """启动管线。
-    用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>]
-    仅在 _admin 频道可用。
+    """启动管线 — R97 简化版。
+
+    用法：!pipeline_start <R{N}>
+    仅需 round_name，零 frontmatter/workspace 依赖。
+    通过 PipelineContextManager + AutoRouter 自动调度 Step 链。
     """
     positional = params.get("_positional", [])
     if not positional:
-        return "❌ 用法：!pipeline_start <R{N}> [--from <step>] [--workspace-id <ws_id>] [--work_plan_url <url>] [--force]"
+        return "❌ 用法：!pipeline_start <R{N}>"
     round_name = positional[0].upper()
-    from_step = params.get("from", "")
-    # ── R74 A1: --force 参数，跳过 frontmatter steps 校验 ──
-    force_flag = "--force" in params.get("_raw", "")
-    # ── R71: Optional --workspace-id to attach to existing workspace ──
-    # Note: _parse_command stores --workspace-id as params["workspace-id"] (hyphen, not underscore)
-    explicit_ws_id = params.get("workspace-id", params.get("ws", params.get("workspace_id", "")))
 
-    # ── R55 E: Mode parameter ──
-    mode = params.get("mode", "auto").lower()
-    if mode not in ("auto", "manual"):
-        return "❌ mode 参数仅支持 auto（自动驾驶）或 manual（手动模式）"
-
-    # 验证前置决策状态 — R48 A: --work-plan-url 参数优先 + R45 fallback
-    work_plan_url = params.get("work_plan_url", "")
-    _remote_url = ""  # R62: initialize early
-    work_plan_ok = False
-    import urllib.request as _r45url
-    if work_plan_url:
-        # 方向 A: 使用传入的 URL
-        try:
-            _r48req = _r45url.Request(work_plan_url, method='HEAD')
-            with _r45url.urlopen(_r48req, timeout=5) as _r48resp:
-                if _r48resp.status == 200:
-                    work_plan_ok = True
-        except Exception:
-            pass
-        if not work_plan_ok:
-            return f"❌ WORK_PLAN URL 不可达：{work_plan_url}"
-    else:
-        # R45 fallback: 拼接默认 URL
-        _remote_url = f"{config.WORK_PLAN_REPO_URL}/docs/{round_name}/WORK_PLAN.md"
-        try:
-            _r45req = _r45url.Request(_remote_url, method='HEAD')
-            with _r45url.urlopen(_r45req, timeout=5) as _r45resp:
-                if _r45resp.status == 200:
-                    work_plan_ok = True
-        except Exception:
-            pass
-        if not work_plan_ok:
-            import os as _r42os
-            work_plan_path = f"docs/{round_name}/WORK_PLAN.md"
-            work_plan_ok = _r42os.path.exists(work_plan_path)
-        if not work_plan_ok:
-            return f"❌ {round_name} 未找到 WORK_PLAN.md（远程+本地均失败），请先完成 Step A/B"
-
-    # ── R62 A3: Parse frontmatter → Build _PIPELINE_CONFIG ──
-    _pipeline_config = _PIPELINE_CONFIG.get(round_name)
-    if not _pipeline_config:
-        import urllib.request as _r62url
-        try:
-            _r62req = _r62url.Request(work_plan_url or _remote_url)
-            with _r62url.urlopen(_r62req, timeout=5) as _r62resp:
-                wp_content = _r62resp.read().decode('utf-8')
-        except Exception:
-            wp_content = ""
-        if wp_content:
-            try:
-                frontmatter = _parse_frontmatter(wp_content)
-                config_data = _build_pipeline_config(frontmatter, round_name, {
-                    "work_plan_url": work_plan_url or _remote_url,
-                    "requirements_url": "",
-                })
-                # ── R74 A1: 校验 frontmatter 是否包含 steps 定义 ──
-                psteps = config_data.get("steps", {})
-                if not psteps and not force_flag:
-                    return (
-                        f"❌ {round_name} WORK_PLAN 缺少 pipeline.steps 定义。\n\n"
-                        f"请在 frontmatter 中补充 steps 配置，每 step 含 role/title/context。\n"
-                        f"参考格式：https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R74/WORK_PLAN.md\n\n"
-                        f"提示：可使用 --force 强制以默认 Step 映射启动（PIPELINE_STEP_MAP 回退）"
-                    )
-                _PIPELINE_CONFIG[round_name] = config_data
-            except (NoFrontmatterError, ValueError):
-                config_data = _build_fallback_config(round_name, {
-                    "work_plan_url": work_plan_url or _remote_url,
-                    "requirements_url": "",
-                })
-                _PIPELINE_CONFIG[round_name] = config_data
-                write_chat_log("系统", f"📋 {round_name}：使用旧格式配置（无 machine-frontmatter）")
-        else:
-            config_data = _build_fallback_config(round_name, {
-                "work_plan_url": work_plan_url or "",
-                "requirements_url": "",
-            })
-            _PIPELINE_CONFIG[round_name] = config_data
-    # ── R62 A3: End ──
-
-    # 锁定管线（防重复）
-    if pipeline_is_active(round_name):
+    # 防重复
+    mgr = _ensure_pipeline_manager()
+    existing = mgr.get_context(round_name)
+    if existing and isinstance(existing, dict):
+        if existing.get("status") in ("running",):
+            return f"❌ {round_name} 管线已活跃，不可重复启动"
+    elif existing and hasattr(existing, "is_active") and existing.is_active():
         return f"❌ {round_name} 管线已活跃，不可重复启动"
 
-    # 暂停大厅接收（方向 D）
-    set_lobby_paused(True, round_name)
+    # 获取发起者名称
+    sender_name = auth.get_users().get(sender_id, {}).get("name", sender_id[:16])
 
-    # ── R44 F-13: Auto-collect workspace members ──────────
-    # ── R49 B: Use agent cards if available ──────────
-    # ── R74 A1: Try frontmatter workspace.members first ──
-    cards = ac_mod.get_all_cards()
-    pconfig = _PIPELINE_CONFIG.get(round_name, {})
-    workspace_members_fm = pconfig.get("workspace", {}).get("members", {})
-
-    if workspace_members_fm:
-        # ── R74 A1: 使用 frontmatter workspace.members 定义的角色 ──
-        all_roles = set(workspace_members_fm.keys())
-        logger.info("R74: Using frontmatter workspace.members roles: %s", all_roles)
-
-        # ── R74 D2: 用 display_name 匹配 mention_keyword ──
-        role_to_keywords = {}
-        for role_name, role_cfg in workspace_members_fm.items():
-            kw = role_cfg.get("mention_keyword", "")
-            role_to_keywords[role_name] = set(kw.split(";")) if kw else set()
-
-        users = auth.get_users()
-        member_ids = []
-        for aid, card in cards.items():
-            card_name = card.get("display_name", "")
-            for role_name, keywords in role_to_keywords.items():
-                if card_name in keywords:
-                    member_ids.append(aid)
-                    break
-        # Include auth users without cards by role
-        seen = set(member_ids)
-        for aid, u in users.items():
-            if aid not in seen and u.get("role", "member") in all_roles:
-                member_ids.append(aid)
-    else:
-        # ── 无 frontmatter members → 回退原有 step_config 推断 ──
-        step_config = _get_step_config(round_name)
-        all_roles = set()
-        for step_key, step_cfg in step_config.items():
-            role = step_cfg.get("role", "")
-            if role and step_key != "step1":
-                all_roles.add(role)
-        logger.info("R74: No workspace.members in frontmatter, inferred roles: %s", all_roles)
-
-        users = auth.get_users()
-        member_ids = []
-        if cards:
-            # Agent cards exist: collect agents whose pipeline_roles intersect all_roles
-            seen = set()
-            for aid, card in cards.items():
-                p_roles = set(card.get("pipeline_roles", []))
-                if p_roles & all_roles:
-                    member_ids.append(aid)
-                    seen.add(aid)
-            # Also include any auth users who have matching role but no card
-            for aid, u in users.items():
-                if aid not in seen and u.get("role", "member") in all_roles:
-                    member_ids.append(aid)
-        else:
-            # No cards: fallback to auth.get_users() role field
-            for aid, u in users.items():
-                if u.get("role", "member") in all_roles:
-                    member_ids.append(aid)
-
-    # ── R71: Optional --workspace-id to attach to existing workspace ──
-    if explicit_ws_id:
-        # R71: Use the explicitly provided workspace ID — skip create/reuse
-        ws_id = explicit_ws_id
-        create_result = f"✅ 附着到已有工作室 {ws_id[:16]}…"
-        # Verify the workspace exists
-        _ws_check = ws_mod.get_workspace(ws_id)
-        if _ws_check:
-            create_result = f"✅ 附着到已有工作室「{_ws_check.name}」({ws_id[:16]}…)"
-        else:
-            create_result = f"⚠️ 指定工作室 {ws_id[:16]}… 不存在，仍以该 ID 启动管线"
-        # Skip member auto-discovery — workspace already has its members
-        member_ids = list(_ws_check.members) if _ws_check else []
-    else:
-        # ── R70 Fix: 先检查是否已有当前 round 的工作室 ──
-        existing_ws = None
-        # R82: removed get_agent_channel — check workspaces by round name
-        for w in ws_mod.get_all_workspaces():
-            if round_name in w.id or round_name in w.name:
-                existing_ws = w
-                break
-        if existing_ws and round_name in existing_ws.name:
-            # Reuse existing workspace instead of creating a new one
-            ws_id = existing_ws.id
-            create_result = f"✅ 复用现有工作室「{existing_ws.name}」({ws_id[:16]}…)"
-            logger.info(
-                "R70: Reusing existing workspace %s for pipeline %s (sender %s)",
-                ws_id, round_name, sender_id[:12],
-            )
-        else:
-            # 创建工作室（带自动组建）
-            create_params = {
-                "_positional": [f"{round_name}-dev"],
-                "members": ",".join(member_ids),
+    # 创建 R97 PipelineContext（dict 格式，轻量）
+    from .pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
+    ctx = {
+        "round_name": round_name,
+        "status": "running",
+        "created_at": time.time(),
+        "triggerer_id": sender_id,
+        "triggerer_name": sender_name,
+        "steps": {
+            k: {
+                "step_key": v.step_key,
+                "role": v.role,
+                "title": v.title,
+                "status": "pending",
+                "agent_id": "",
+                "agent_name": "",
+                "output": None,
+                "result_msg": "",
             }
-            create_result = await _cmd_create_workspace(sender_id, create_params)
-            # R82: extract ws_id from result — removed get_agent_channel dependency
-            # _cmd_create_workspace returns summary text starting with ✅
-            ws_id = f"ws_{round_name.lower()}-dev"
+            for k, v in DEFAULT_STEPS.items()
+        },
+        "step_order": list(DEFAULT_STEP_ORDER),
+        "work_plan_url": "",
+        "references": {},
+    }
 
-    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast — tasks delivered via inbox
-    # 查 Step 映射表，找起始角色（必须在 R58 A3 之前，因为 kickoff_msg 引用 target_role）
-    start_step = from_step if from_step else "step2"  # R44: default step2 (tech plan)
-    target_role = step_config[start_step]["role"]
-    # ── R59 C: Apply role override if configured for kickoff ──
-    _role_overrides = getattr(config, "PIPELINE_ROLE_OVERRIDES", {})
-    if start_step in _role_overrides:
-        target_role = _role_overrides[start_step]
-    # ── R59 C: End role override ──
+    # 持久化
+    mgr.set_context(round_name, ctx)
 
-    # ── R58 A3: Initial kickoff PM @mention notification ──
-    pm_name = config.PIPELINE_PM_NAME
-    # ── R62: Read from _PIPELINE_CONFIG ──
-    _pconfig = _PIPELINE_CONFIG.get(round_name, {})
-    _pconfig_steps = _pconfig.get("steps", {})
-    _step_cfg_from_pconfig = _pconfig_steps.get(start_step, {})
-    _step_title = _step_cfg_from_pconfig.get("title", start_step)
-    _req_url = _pconfig.get("requirements_url",
-        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
-    _plan_url = _pconfig.get("work_plan_url",
-        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md")
-    kickoff_msg = (
-        f"@全员 🚀 {round_name} 管线已启动！\n"
-        f"下一棒：{target_role} → {_step_title}\n\n"
-        f"📄 需求：{_req_url}\n"
-        f"📋 WORK_PLAN：{_plan_url}\n\n"
-        f"各 bot 请切换活跃频道到此工作室，确认就绪。"
+    # 广播 _admin
+    step_chain = " → ".join(
+        f"{s['step_key']}({s['role']})"
+        for s in ctx["steps"].values()
     )
-    _persist_broadcast(ws_id, pm_name, kickoff_msg)
-    kickoff_payload = json.dumps({
-        "type": "broadcast", "channel": ws_id,
-        "from_name": pm_name, "from": pm_name,
-        "content": kickoff_msg, "ts": time.time(),
-    })
-    # 用 ws_mod.get_workspace 替代不存在的 ws_obj 变量（R58 A3 Bug）
-    ws_obj_2 = ws_mod.get_workspace(ws_id)
-    if ws_obj_2:
-        for member_id in ws_obj_2.members:
-            for conn in list(_connections.get(member_id, set())):
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(kickoff_payload)
-                    elif hasattr(conn, "send"):
-                        await conn.send(kickoff_payload)
-                except Exception:
-                    pass
-    # ── R58 A3: End kickoff notification ──
-
-    # 点名架构师，附带文档 URL（R48: 有自定义 URL 时只传 WORK_PLAN 链接）
-    if work_plan_url:
-        context_urls = f"WORK_PLAN: {work_plan_url}"
-    else:
-        context_urls = (
-            f"需求: docs/{round_name}/{round_name}-product-requirements.md | "
-            f"WORK_PLAN: docs/{round_name}/WORK_PLAN.md"
-        )
-    rollcall_result = await _cmd_rollcall_next(sender_id, {
-        "_positional": [target_role],
-        "context": f"{round_name} {start_step}: {context_urls}",
-    })
-
-    # 创建 Step Task
-    task_result = await _cmd_task_create(sender_id, {
-        "context": round_name,
-        "name": start_step,
-        "role": target_role,
-    })
-
-    # 设置管线状态
-    _set_pipeline_state(round_name, {
-        "active": True,
-        "current_step": start_step,
-        "ws_id": ws_id,
-        "started_at": __import__("time").time(),
-        "work_plan_url": work_plan_url or None,   # R48 A: 传入的 WORK_PLAN URL
-        "triggerer_id": sender_id,                 # R48 B: 管线触发者
-        "mode": mode,                              # R55 E: 自动/手动模式
-    })
-
-    # ── R81 B2: 成员不足检测 + inbox 邀请 ──
-    try:
-        ws_obj = ws_mod.get_workspace(ws_id)
-        if ws_obj and len(ws_obj.members) <= 2:
-            step_config = _get_step_config(round_name)
-            all_roles = set()
-            for step_key, step_cfg in step_config.items():
-                role = step_cfg.get("role", "")
-                if role:
-                    all_roles.add(role)
-
-            invited = []
-            for role in all_roles:
-                agents = _get_agents_by_role(role)
-                for aid in agents:
-                    if aid not in ws_obj.members:
-                        target_ch = persistence.get_inbox_channel(aid)
-                        if target_ch:
-                            await _broadcast_to_channel(target_ch, {
-                                "type": "broadcast", "channel": target_ch,
-                                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-                                "content": (
-                                    f"📩 管线 {round_name} 已在工作区 {ws_obj.name} 启动。\n"
-                                    f"角色 {role} 需要你的参与。\n"
-                                    f"请使用 `!workspace_join --workspace {ws_id}` 加入。"
-                                ),
-                                "ts": time.time(),
-                            })
-                            invited.append(f"{role}({aid[:12]})")
-
-            if invited:
-                logger.info(
-                    "R81 B2: Invited %d agents to join %s: %s",
-                    len(invited), ws_id, ", ".join(invited),
-                )
-    except Exception as e:
-        logger.warning("R81 B2: Member invite failed: %s", e)
-
-    # ── R90 🅱️: 工作区创建失败通知 PM 收件箱 ──
-    pm_agent_id = getattr(config, "PIPELINE_PM_AGENT_ID", "")
-    if pm_agent_id and "❌" in create_result:
-        pm_inbox = f"_inbox:{pm_agent_id}"
-        try:
-            await _broadcast_to_channel(pm_inbox, {
-                "type": "broadcast",
-                "channel": pm_inbox,
-                "from_name": "系统",
-                "from_agent": SYSTEM_AGENT_ID,
-                "content": (
-                    f"⚠️ {round_name} 管线已启动但工作区创建失败。\n"
-                    f"create_result: {create_result}\n"
-                    f"AutoRouter 可能无法自动接力，请检查后手动启动。"
-                ),
-                "ts": time.time(),
-            })
-            logger.info(
-                "R90 🅱️: 已通知 PM 工作区创建失败 (%s)", round_name
-            )
-        except Exception as e:
-            logger.warning("R90 🅱️: PM 通知发送失败: %s", e)
-
-    # ── R92: 广播管线启动通知到 _admin（让 AutoRouter 等监听者收到） ──
     try:
         await _broadcast_to_channel(p.ADMIN_CHANNEL, {
             "type": "broadcast",
@@ -2826,25 +2539,18 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             "from_agent": SYSTEM_AGENT_ID,
             "content": (
                 f"🚀 **{round_name} 管线已启动**\n"
-                f"  Step: {start_step} → {target_role}\n"
-                f"  工作室: {ws_id}\n"
-                f"  {create_result}\n"
-                f"  {rollcall_result}\n"
-                f"  {task_result}"
+                f"  发起者: {sender_name}\n"
+                f"  Step 链: {step_chain}"
             ),
             "ts": time.time(),
         })
-        logger.info("R92: 已广播 %s 管线启动通知到 _admin", round_name)
     except Exception as e:
-        logger.warning("R92: _admin 广播失败: %s", e)
+        logger.warning("R97: _admin 广播失败: %s", e)
 
     return (
         f"🚀 **{round_name} 管线已启动**\n"
-        f"  Step: {start_step} → {target_role}\n"
-        f"  工作室: {ws_id}\n"
-        f"  {create_result}\n"
-        f"  {rollcall_result}\n"
-        f"  {task_result}"
+        f"  Step 链: {step_chain}\n"
+        f"  AutoRouter 将自动派活 Step 1 → PM（{DEFAULT_STEPS['step1'].role}）"
     )
 
 

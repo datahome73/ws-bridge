@@ -10,11 +10,40 @@ import enum
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("ws-bridge.pipeline_context")
+
+
+# ── R97: StepInfo dataclass ─────────────────────────────────────────────
+
+
+@dataclass
+class StepInfo:
+    """单个管线步骤信息。"""
+    step_key: str          # "step1", "step2", ...
+    role: str              # "pm" | "arch" | "dev" | "review" | "qa" | "operations"
+    title: str             # 步骤标题
+    status: str = "pending"  # "pending" | "active" | "done" | "failed" | "skipped"
+    agent_id: str = ""
+    agent_name: str = ""
+    output: dict | None = None       # {"sha": "abc1234"} 等
+    result_msg: str = ""             # "✅ 完成，已推 dev: xxxx"
+
+
+DEFAULT_STEP_ORDER = ["step1", "step2", "step3", "step4", "step5", "step6"]
+
+DEFAULT_STEPS: dict[str, StepInfo] = {
+    "step1": StepInfo(step_key="step1", role="pm",          title="标注 WORK_PLAN 已审核"),
+    "step2": StepInfo(step_key="step2", role="arch",        title="技术方案"),
+    "step3": StepInfo(step_key="step3", role="dev",         title="编码实现"),
+    "step4": StepInfo(step_key="step4", role="review",      title="代码审查"),
+    "step5": StepInfo(step_key="step5", role="qa",          title="测试验证"),
+    "step6": StepInfo(step_key="step6", role="operations",  title="合并部署归档"),
+}
 
 
 # ── Enums ──────────────────────────────────────────────────────────────
@@ -229,6 +258,21 @@ class PipelineContextManager:
     def get(self, round_name: str) -> PipelineContext | None:
         """按轮次名查询活跃上下文。"""
         return self._contexts.get(round_name)
+
+    # ── R97: 通用上下文存取 ──
+
+    def get_context(self, round_name: str) -> Any:
+        """R97: 获取上下文（兼容旧 PipelineContext + 新 dict 上下文）。"""
+        return self._contexts.get(round_name)
+
+    def set_context(self, round_name: str, ctx: Any) -> None:
+        """R97: 直接设置上下文（dict 或 PipelineContext 均可）。"""
+        self._contexts[round_name] = ctx
+        self._save()
+
+    def save(self) -> None:
+        """R97: 主动持久化。"""
+        self._save()
 
     def get_all_active(self) -> list[PipelineContext]:
         """返回所有活跃上下文。"""
