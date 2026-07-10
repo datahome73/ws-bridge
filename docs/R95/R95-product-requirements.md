@@ -40,18 +40,23 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 
 ## 3. 功能详细描述
 
-### 3.1 `!pipeline_stop R<N>`
+### 3.1 `!pipeline_stop R<N>` 停的是 AutoRouter 机器
+
+核心认知：**`pipeline_stop` 停的是 AutoRouter 调度器，不是干活的 bot。**
 
 | 属性 | 值 |
 |:-----|:----|
 | 命令 | `!pipeline_stop R<N>` |
 | 权限 | **仅发起者**（谁发的 `!pipeline_start`） |
-| 行为 | 标记管线为 `stopped` → 取消当前 step 的超时等待 → 清理 AutoRouter 的任务队列 |
-| 效果 | 工作区保留（数据不丢失），管线状态变 `stopped` |
+| 行为 | 标记管线为 `stopped` → 清空待发送的任务队列（inbox）→ 取消 AutoRouter 的 step 超时等待 |
+| 不影响 | **已在干活的 bot 不受影响** — 它们继续执行、继续输出 |
+| 效果 | AutoRouter 不再推进新的 step，管线状态变 `stopped` |
 | 响应 | `🛑 Pipeline R<N> 已停止` |
 
 **注意点：**
-- stop 后工作区**不删除**，保留现场供排查
+- stop 后**工作区和 bot 产出都在** — 保留现场供排查
+- 正在执行的 bot 的输出结果**可用与否由协调者自行判断**，不因 stop 而自动丢弃
+- stop 后清空了待发送的 inbox 队列，但**内存里的管线状态信息可以不管**——bot 本身不关心 step 进展到哪一步
 - stop 不会影响其他正在运行的管线
 - 重复 stop 同一管线 → 幂等，返回 `✅ Pipeline R<N> 已停止（无需操作）`
 - 非发起者执行 stop → 权限拒绝 `❌ 只有发起者可以 stop 此管线`
@@ -64,7 +69,7 @@ R88→R92 五轮迭代实现了 AutoRouter 全自动管线推进，R93 减法清
 ```
 管线 R<N> 在 Step 2 卡死
   ↓
-!pipeline_stop R<N>                    # ① 发起者停止管线
+!pipeline_stop R<N>                    # ① 停止 AutoRouter
   ↓
 发起者手工给 step4 的负责 bot 派活        # ② PM 通过 inbox 派活
   ↓
@@ -76,6 +81,7 @@ AutoRouter 收到 step4 完成               # ④ Server 自动接管
 ```
 
 **要点：**
+- **Bot 不关心 step 进展** — 它们只管自己干活的背景资料是否齐全。上下文足够就可以干活，不受管线状态影响
 - PM 知道哪些 step 已完成（`!pipeline_status` 可查），跳过已完成步骤，直接给下一步的负责 bot 发 inbox
 - AutoRouter 收到 step N 的完成通知后，自动检查 WORK_PLAN 推进 step N+1
 - 不需要额外的 `--from` 参数或新命令
@@ -131,10 +137,12 @@ AutoRouter 收到 step4 完成               # ④ Server 自动接管
 
 ### 6.1 `!pipeline_stop` 验证
 
-- [ ] 对 running 管线执行 stop → 状态变 `stopped`
+- [ ] 对 running 管线执行 stop → 状态变 `stopped`，AutoRouter 不再推进新 step
+- [ ] stop 时已在执行的 bot **不受影响** → 继续执行、正常输出
+- [ ] stop 清空了待发送的任务队列 → 无新 inbox 发出
 - [ ] 对 idle 管线执行 stop → 报错 `❌ Pipeline R<N> 不在运行状态`
 - [ ] 对已 stopped 管线重复 stop → 幂等提示 `✅ 已停止（无需操作）`
-- [ ] stop 后工作区保留，可用 `!list_workspaces` 看到
+- [ ] stop 后工作区保留（包含 bot 产出），可用 `!list_workspaces` 看到
 - [ ] stop 后其他管线不受影响
 - [ ] 非发起者执行 stop → 权限拒绝 `❌ 只有发起者可以 stop`
 
@@ -167,5 +175,4 @@ AutoRouter 收到 step4 完成               # ④ Server 自动接管
 
 ## 8. 评审问题
 
-1. `!pipeline_stop` 在 Step 正在执行中（AutoRouter 已发出 inbox）时 stop，是否需要等当前步骤完成/超时才真正停止？还是立即取消？
-2. stop 后 AutoRouter 的任务队列清理到什么程度？仅清理当前待发送的 inbox，还是同时清理 server 端的 pending 状态？
+1. 如果 step 的 inbox 已发出（bot 已收到）、但 step 超时等待尚未触发，此时 stop 的行为是否应该等该 inbox 的自然超时，还是立即清空？
