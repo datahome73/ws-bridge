@@ -49,24 +49,28 @@ PM                              Server                              AutoRouter
 │   (不需要 --work_plan_url)     │                                    │
 │                                │                                    │
 │                                ├─② 创建 PipelineContext             │
-│                                │   {round, steps, role_map, refs}   │
+│                                │   {round, status=running,          │
+│                                │    steps: step1▶ step2⏳...}       │
 │                                │                                    │
 │                                ├─③ _broadcast_to_channel(ADMIN)     │
 │                                │   "R97 管线已启动 + context_id"    │
 │                                │                                    │
 │                                │←─── ④ AutoRouter 收到广播 ───────┤
 │                                │     读 PipelineContext             │
-│                                │     "step2=active, role=arch"      │
+│                                │     "step1=active, role=pm"        │
 │                                │                                    │
-│                                ├─⑤ _inbox:ws_3f7c... → arch        │
-│                                │   "Step 2: 技术方案"               │
+│                                ├─⑤ _inbox:ws_f26e... → PM          │
+│                                │   "Step 1: 标记 WORK_PLAN 已审核" │
 │                                │                                    │
-│                                │←─── ⑥ ✅ 完成 ──────────────────┤
+│  ←── ⑥ 收到任务 ──────────────┤                                    │
+│  改 WORK_PLAN 标记为已审核     │                                    │
+│  推 git                        │                                    │
+│  ── ✅ 完成 ─────────────────→│                                    │
 │                                │     更新 PipelineContext            │
-│                                │     step2=done → step3=active      │
+│                                │     step1=done → step2=active      │
 │                                │                                    │
-│                                ├─⑦ _inbox:ws_0bb7... → dev         │
-│                                │   "Step 3: 编码"                   │
+│                                ├─⑦ _inbox:ws_3f7c... → arch        │
+│                                │   "Step 2: 技术方案"               │
 │                                │   ... chain 继续到 step6           │
 │                                │                                    │
 │←── 🏁 全部完成 ───────────────┤                                    │
@@ -115,13 +119,14 @@ class StepInfo:
 
 ```python
 DEFAULT_PIPELINE_STEPS = {
-    "step2":  StepInfo("arch",        "pending", ...),
-    "step3":  StepInfo("dev",         "pending", ...),
-    "step4":  StepInfo("review",      "pending", ...),
-    "step5":  StepInfo("qa",          "pending", ...),
-    "step6":  StepInfo("operations",  "pending", ...),
+    "step1":  StepInfo("pm",           "pending", ...),  # PM 标记 WORK_PLAN 已审核
+    "step2":  StepInfo("arch",         "pending", ...),
+    "step3":  StepInfo("dev",          "pending", ...),
+    "step4":  StepInfo("review",       "pending", ...),
+    "step5":  StepInfo("qa",           "pending", ...),
+    "step6":  StepInfo("operations",   "pending", ...),
 }
-DEFAULT_STEP_ORDER = ["step2", "step3", "step4", "step5", "step6"]
+DEFAULT_STEP_ORDER = ["step1", "step2", "step3", "step4", "step5", "step6"]
 ```
 
 ### 2.3 角色到 agent 的映射
@@ -165,7 +170,7 @@ async def _cmd_pipeline_start(sender_id, params):
 
     # 1. 构建角色映射（从 Agent Card 实时查询）
     role_map = {}
-    for role in DEFAULT_ROLES:  # ["arch","dev","review","qa","operations"]
+    for role in DEFAULT_ROLES:  # ["pm","arch","dev","review","qa","operations"]
         aid = _resolve_role_agent(role)
         if aid:
             role_map[role] = aid
