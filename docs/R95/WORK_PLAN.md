@@ -1,8 +1,8 @@
 ---
 pipeline:
   name: "R95 — Auto Pipeline 停止命令 🛑"
-  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R95/WORK_PLAN.md"
-  requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R95/R95-product-requirements.md"
+  work_plan_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/R95/WORK_PLAN.md"
+  requirements_url: "https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/R95/R95-product-requirements.md"
 
   topology:
     auto_chain: true
