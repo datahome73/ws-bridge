@@ -1,6 +1,6 @@
 # R88 产品需求 — 管线自动路由：Pipeline AutoRouter 🚂
 
-> **版本：** v2.0（PM 审核修訂 — Step 1 是 PM 的工作，非手动派活）
+> **版本：** v3.0（独立服务架构 — AutoRouter 外挂服务，零 handler.py 侵入）
 > **状态：** 📝 待审核
 > **产品经理：** 🧐 PM
 > **日期：** 2026-07-10
@@ -45,7 +45,7 @@ PM                                Server                              Bot
 | 🅴 | Step 5 | 🦐 QA | 测试验证 |
 | 🅵 | Step 6 | 🛠️ Ops | 合并部署归档 |
 
-**PM 完成 Step 1 后，server 收到完成信号，按同一套 AutoRouter 规则自动转 Step 2 给 arch（架构师）。** arch 收到的任务消息和 PM 手动派活时一模一样——bot 不 care 消息是谁发的。
+**PM 完成 Step 1 后从管线中退场，AutoRouter 服务接手。** arch 收到的任务消息和 PM 手动派活时一模一样——bot 不 care 消息是谁发的。
 
 > 📌 **对 bot 来说：通信方式完全没变化。** 任务消息的 channel 是 `_inbox:<bot_id>`，bot 该 ACK 就 ACK，该干活就干活。只是消息的 `from_name` 从「PM」变成「系统(管线)」，bot 不需要做任何适配改动。
 
@@ -53,107 +53,470 @@ PM                                Server                              Bot
 
 ## 2. 方案设计
 
-### 2.1 核心概念
+### 2.1 架构决策：独立服务 vs handler.py 侵入
 
-**Pipeline Topology（管线拓扑）** 定义：
-- 完整的 Step 链（Step 1 PM → Step 2 arch → ... → Step 6 ops）
-- 每个 Step 的产出上下文（文档 URL、变量）
-- Step 间自动接力规则（完成→自动派活下一棒）
-- **Step 1 由 PM 完成，Step 1 到 Step 2 的自动接力由 `!pipeline_start` 触发**
+**决策：AutoRouter 做成独立外挂服务，不往 handler.py 加一行代码。**
 
-### 2.2 通信流（R88 后）
+| 方案 | handler.py 内嵌 | **独立服务（✅ 选定）** |
+|:-----|:---------------|:---------------------|
+| 侵入性 | 修改核心路由逻辑 ~60 行 | **零侵入** |
+| 回归风险 | 中（handler 是核心路由） | **无**（现有代码完全不动） |
+| 部署 | 随 server 一起重启 | 独立启动/停止 |
+| 开发独立性 | 绑定 server 代码库 | 独立文件，可单独测 |
+| 容错 | server 挂了 AutoRouter 也挂 | server 挂了 AutoRouter 仍在（在线确认等恢复） |
+| 兼容性 | 修改后旧路由需回归测试 | **全手动模式零影响** |
+| 未来扩展 | 耦合在 handler 里 | 可独立扩展（并行拓扑/异常回退等） |
 
-对 bot 而言，和现在一模一样的收消息 → ACK → 干活 → ✅ 完成，唯一区别是消息来自 server 不是 PM：
+**这样做的好处：**
+- 想全手动 inbox → 不启动 AutoRouter，和之前一模一样
+- 要自动化管线 → 启动 AutoRouter 服务
+- 两者互不影响，兼容各种场景
+- 技术实现选型给 arch（架构师）做技术方案时定细节，这里给高层架构
 
-```
-PM                                Server                              Bot A
-│                                  │                                  │
-│① Step 1: 写需求+WORK_PLAN       │                                  │
-│   → !pipeline_start R88 ...     │                                  │
-│                                  │                                  │
-│② 收到: Step 1 完成, 准备派活    │                                  │
-│←── 确认: Step 1 配置就绪 ──────┤                                  │
-│                                  │                                  │
-│                                  │── ③ AutoRouter Step 1→2 ─────→│
-│                                  │    _inbox:arch                  │
-│                                  │    "Step 2 任务：技术方案"       │
-│                                  │                                  │
-│         [bot 体验完全不变]       │←── ④ ACK ✅ R88 收到！────────┤
-│                                  │         (_inbox:server)          │
-│←── ⑤ 转发 ACK ──────────────────┤                                  │
-│                                  │                                  │
-│                                  │         [arch 干活中...]        │
-│                                  │                                  │
-│                                  │←── ⑥ ✅ 完成 ──────────────────┤
-│                                  │     (_inbox:server)              │
-│←── ⑦ 转发 完成 ────────────────┤                                  │
-│                                  │── ⑧ 自动确认 bot ────────────→│
-│                                  │── ⑨ AutoRouter Step 2→3 ─────→│
-│                                  │    _inbox:dev                   │
-│                                  │    "Step 3 任务：编码实现"       │
-│                                  │                                  │
-│                           ... 以此类推到 Step 6 ...                │
-│                                  │                                  │
-│                                  │←── ⑩ Step 6 ops ✅ 完成 ─────┤
-│                                  │── ⑪ 「全部完成」通知 PM ──────→│
-│←── 🏁 全线闭环 ───────────────────┤                                  │
-```
-
-**PM 视角：** Step 1 工作准备 → `!pipeline_start` → 坐等通知 → 收全部完成。
-
-**Bot 视角：** 收到 `_inbox:<bot_id>` 任务（from_name=`系统(管线)` 而不是 PM 名字）→ ACK → 干活 → ✅ 完成。和现在一样的通信协议，啥也不用改。
-
-### 2.3 Key Insight：bot 不 care 谁发的消息
-
-| 维度 | R87（PM 手派） | R88（Server 自动派） | Bot 感知差异 |
-|:-----|:--------------|:--------------------|:------------|
-| 消息 channel | `_inbox:<bot_id>` | `_inbox:<bot_id>` | **无变化** |
-| 消息内容 | 任务描述 | 任务描述（自动生成） | **无变化** |
-| `from_name` | `PM` | `系统(管线)` | 仅名字不同 |
-| 回复地址 | `_inbox:server` | `_inbox:server` | **无变化** |
-| 协议（ACK/完成） | `ACK ✅` / `✅ 完成` | `ACK ✅` / `✅ 完成` | **无变化** |
-
-**== 对 bot 来说是完全透明的 ==** bot 不需要任何改动。
-
-### 2.4 PM 在管线中的位置
-
-PM 是**管线的一环**，不是「站在管线外的人」。
+### 2.2 架构示意
 
 ```
-Step 1 ──→ Step 2 ──→ Step 3 ──→ Step 4 ──→ Step 5 ──→ Step 6
- 👤PM       👷Arch     👨‍💻Dev     👀Review   🦐QA      🛠️Ops
+┌─────────────────────────────────────────────────────────────────┐
+│                     ws-bridge Server                            │
+│  ┌──────────────┐  ┌──────────────────┐  ┌─────────────────┐   │
+│  │ handle_auth  │  │ handle_broadcast │  │ _inbox:server   │   │
+│  │ handle_reg.  │  │ (正常路由)        │  │ 中继 (R87 现有)  │   │
+│  └──────────────┘  └──────────────────┘  └─────────────────┘   │
+│                                              ↑                  │
+└──────────────────────────────────────────────┼──────────────────┘
+                                               │
+                                     WebSocket (连接为 bot)
+                                               │
+                            ┌──────────────────┴──────────────────┐
+                            │         AutoRouter Service           │
+                            │                                      │
+                            │  • 监听 PM 收件箱 (inbox 通知)        │
+                            │  • 读取 Pipeline Topology 配置       │
+                            │  • Step 完成 → 派活下一棒            │
+                            │  • 全部完成 → 通知 PM                │
+                            └──────────────────────────────────────┘
 ```
 
-PM 的 Step 1 工作包括：
-1. 写需求文档 `docs/R{N}/R{N}-product-requirements.md`
-2. 写 WORK_PLAN `docs/R{N}/WORK_PLAN.md`（含 frontmatter 拓扑定义）
-3. 执行 `!pipeline_start R{N} --work_plan_url <raw_url>` — **此命令即 Step 1 完成信号**
+**AutoRouter 在 ws-bridge 眼中就是一个普通 bot：**
+- 用 api_key 认证连接
+- 有自己的 `_inbox:<router_id>` 收件箱
+- 能发消息到其他 bot 的 `_inbox:<bot_id>`
+- 能收来自 `_inbox:server` 中继的转发通知
+- **不需要特殊权限**——发 inbox 消息的能力普通 bot 就有
 
-**Step 1 的产出：**
-- `_PIPELINE_CONFIG[round_name]` — 完整的管线配置（steps, topology, context）
-- 已创建的工作区（workspace）
-- 可用于后续 Step 的基础上下文（work_plan_url, requirements_url, topology 定义）
+### 2.3 通信流（R88 后）
 
-### 2.5 关键设计原则
+```
+PM                     ws-bridge Server              AutoRouter Service          Bot N
+│                            │                            │                       │
+│① Step 1:                  │                            │                       │
+│ 写需求+WORK_PLAN           │                            │                       │
+│ → !pipeline_start         │                            │                       │
+│                            │                            │                       │
+│② Server 处理:              │                            │                       │
+│  解析 frontmatter          │                            │                       │
+│  创建 workspace            │                            │                       │
+│  通知 PM "已就绪"           │                            │                       │
+│                            │                            │                       │
+│                            │ ③ RouteStep N=1→2 ──────→│                       │
+│                            │   (查询 PM inbox 通知)      │                       │
+│                            │                            │── ④ 派活 Step2 ────→│
+│                            │                            │    _inbox:arch        │
+│                            │                            │                       │
+│                            │  ←────────---⑤ ACK ✅ ←──│                       │
+│                            │           (正常中继)        │                       │
+│  ←── ⑥ 转发 ACK ────────┤                            │                       │
+│                            │                            │                       │
+│                            │                            │     [arch 干活中...]  │
+│                            │                            │                       │
+│                            │  ←────────---⑦ ✅ 完成 ←─│                       │
+│                            │           (正常中继)        │                       │
+│  ←── ⑧ 转发 完成 ──────┤                            │                       │
+│                            │  ←── ⑨ 自动确认 bot ────→│                       │
+│                            │                            │                       │
+│                            │ ⑩ 路由 Step 2→3 ────────→│                       │
+│                            │   (检测到 Step 2 已完成)   │── ⑪ 派活 Step3 ────→│
+│                            │                            │    _inbox:dev          │
+│                            │                            │                       │
+│                     ... 以此类推到 Step 6 ...                              │
+│                            │                            │                       │
+│                            │  ←─── Step 6 ops ✅ 完成──│                       │
+│  ←── ⑫ 全部完成通知 ──┤                            │                       │
+│                            │                            │                       │
+```
+
+**PM 视角：** `!pipeline_start` → 坐等通知 → 收全部完成 → 下班 🏁
+
+**Bot 视角：** 和现在一模一样——收到的消息 `from_name` 从「PM」变成「系统(管线)」，bot 完全透明。
+
+### 2.4 核心设计原则
 
 | # | 原则 | 说明 |
 |:-:|:-----|:------|
-| 1 | **不引入新持久化状态** | Pipeline Topology 直接从 `_PIPELINE_CONFIG` 读取，不新增状态表 |
-| 2 | **不改变 bot 协议** | Bot 的 ACK/完成协议完全不变，bot 零改动 |
-| 3 | **向后兼容** | 无 Pipeline Topology 定义的管线照常运行（PM 手动接力）— 拓扑是可选项 |
-| 4 | **PM 是 Step 1** | PM 不是「派活的人」，是管线自动化的一部分 |
-| 5 | **`!pipeline_start` = Step 1 完成** | 此命令触发 Step 1→Step 2 自动接力 |
-| 6 | **Bot 透明** | Bot 不 care 任务是谁发的——消息结构完全一样 |
+| 1 | **零 handler.py 侵入** | AutoRouter 是独立服务，不修改现有 server 代码 |
+| 2 | **bot 透明** | Bot 的 ACK/完成协议完全不变，bot 零改动 |
+| 3 | **全手动兼容** | 不启动 AutoRouter，PM 手动 inbox 模式完全不变 |
+| 4 | **PM = Step 1** | `!pipeline_start` 是 Step 1 完成信号，之后 AutoRouter 接手 |
+| 5 | **标准 bot 身份** | AutoRouter 用 api_key 连接，发 inbox，收通知——不需要特殊权限 |
+| 6 | **无状态设计** | Pipeline Topology 来自 WORK_PLAN frontmatter（已持久化），AutoRouter 启动时重读 |
 
 ---
 
 ## 3. 实现方案
 
-### 3.1 Pipeline Topology 定义
+### 3.1 AutoRouter 服务概览
 
-#### 3.1.1 WORK_PLAN frontmatter 扩展
+**文件位置：** `server/auto_router.py`（独立文件，不修改 handler.py）
 
-在 `pipeline` 字段中增加 `topology` 定义：
+**运行方式：**
+- `python3 -m server.auto_router --api-key <key>` — 独立进程
+- 或由 `docker-compose` 管理（与 ws-bridge server 平行）
+- 或由 operations（运维）按需启动/停止
+
+**依赖：** 仅需 `websockets` + `PyYAML` + 标准库（已存在）
+
+### 3.2 核心流程
+
+```
+AutoRouter 启动
+    │
+    ├─ ① 连接 ws-bridge（WS + api_key 认证）
+    │
+    ├─ ② 连接就绪，等待事件
+    │
+    ├─ ③ 收到消息
+    │    ├─ 来自 PM 收件箱的 ACK/完成 转发通知（R87 中继）
+    │    ├─ 来自 _inbox:server 的直接通知（可选）
+    │    └─ 其他 → 忽略
+    │
+    ├─ ④ 检测到 "✅ X 任务完成" 或 管线启动信号
+    │    ├─ 解析 round_name + step_name + SHA
+    │    └─ 读取 Pipeline Topology
+    │
+    ├─ ⑤ 有下一棒？
+    │    ├─ 是 → 派活到 _inbox:<next_bot_id>
+    │    └─ 否 → 通知 PM "全部完成"
+    │
+    └─ ⑥ 回到 ③ 继续监听
+```
+
+### 3.3 AutoRouter 的输入信号
+
+AutoRouter 通过收到的消息判断管线和 Step 状态。它关心的消息来源：
+
+| 信号类型 | 来源 | 触发条件 | 示例消息 |
+|:---------|:-----|:---------|:---------|
+| **🆕 管线就绪** | `_admin` 频道系统消息 | `!pipeline_start` 成功创建 workspace | `📋 R88 管线已启动，工作区已就绪` |
+| **📬 Bot ACK** | PM 收件箱转发 | R87 bot 发 `ACK ✅` → server 转发 PM | `📬 architect 已接活: ACK ✅ R88 收到！` |
+| **✅ Bot 完成** | PM 收件箱转发 | R87 bot 发 `✅ 完成` → server 转发 PM | `✅ architect 任务完成: ✅ 完成，已推 dev: abc1234` |
+| **🏁 全部完成** | 无下一棒时的自产信号 | 最后一个 Step 的 `✅ 完成` → 自动发完工通知 | `🏁 R88 全部 Step 已完成！` |
+
+> **实际上 AutoRouter 只需监听 PM 收件箱的转发通知**（R87 第 ③⑤ 步）。当 PM 收到 `✅ architect 任务完成` 的转发时，AutoRouter 就解析它、查拓扑、派活下一棒。
+>
+> **为什么不监听 `_inbox:server`？** 省事——PM 收件箱的转发通知已经是格式化后的消息，直接解析即可。
+
+### 3.4 各函数接口
+
+```python
+# server/auto_router.py — 独立服务，不修改 handler.py
+
+import asyncio, json, logging, re, time
+import websockets
+
+logger = logging.getLogger("auto_router")
+
+
+class PipelineAutoRouter:
+    """管线自动路由服务。
+    
+    以 bot 身份连接 ws-bridge，监听 PM 收件箱的转发通知，
+    检测 Step 完成信号后自动派活下一棒。
+    """
+    
+    def __init__(self, api_key: str, ws_url: str = "wss://wsim.datahome73.cloud/ws",
+                 pm_agent_id: str = "", agent_card_path: str = ""):
+        self.api_key = api_key
+        self.ws_url = ws_url
+        self.pm_agent_id = pm_agent_id
+        self.agent_card_path = agent_card_path  # 或从卡片读角色映射
+        
+        # 运行时状态
+        self.ws = None
+        self.my_agent_id = ""
+        self.my_inbox = ""
+        
+        # — Pipeline Topology 缓存 —
+        # Key: round_name (如 "R88")
+        # Value: {"chain": [...], "auto_chain": bool, "steps": {...}}
+        self._topologies: dict[str, dict] = {}
+        
+        # — Step 进度追踪 —
+        # Key: round_name → Value: {"current_step_idx": int, "completed_steps": set}
+        self._round_progress: dict[str, dict] = {}
+    
+    # ── 生命周期 ──
+    
+    async def start(self):
+        """启动 AutoRouter 并保持连接。"""
+        async with websockets.connect(self.ws_url, max_size=2**20) as ws:
+            self.ws = ws
+            # 认证
+            await ws.send(json.dumps({"type": "auth", "api_key": self.api_key}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if resp.get("type") != "auth_ok":
+                raise RuntimeError(f"认证失败: {resp}")
+            self.my_agent_id = resp.get("agent_id", "")
+            self.my_inbox = f"_inbox:{self.my_agent_id}"
+            logger.info("AutoRouter 已连接, agent_id=%s", self.my_agent_id[:16])
+            
+            # 查询现有活跃管线，重建进度
+            await self._restore_pipeline_state()
+            
+            # 主循环：监听消息
+            async for raw in ws:
+                try:
+                    await self._handle_message(json.loads(raw))
+                except Exception as e:
+                    logger.error("消息处理异常: %s", e)
+    
+    # ── 消息处理 ──
+    
+    async def _handle_message(self, msg: dict):
+        """处理接收到的每条消息。"""
+        channel = msg.get("channel", "")
+        content = msg.get("content", "").strip()
+        from_name = msg.get("from_name", "")
+        
+        # 只关心 PM 收件箱的转发通知
+        if channel != f"_inbox:{self.pm_agent_id}":
+            return
+        
+        # 信号 1: 管线就绪（!pipeline_start 成功）
+        if "管线已启动" in content or "工作区已就绪" in content:
+            round_name = self._extract_round(content)
+            if round_name:
+                await self._on_pipeline_ready(round_name)
+            return
+        
+        # 信号 2: Bot 任务完成（PM 收到 "✅ X 任务完成" 转发）
+        if content.startswith("✅ ") and "任务完成" in content:
+            await self._on_step_complete(content)
+            return
+        
+        # 其他消息不关心
+        # （ACK 转发不需要处理——AutoRouter 只看完成信号）
+    
+    # ── 管线就绪处理 ──
+    
+    async def _on_pipeline_ready(self, round_name: str):
+        """!pipeline_start 成功后，加载拓扑配置，记录管线状态。"""
+        # 从远程 WORK_PLAN 读取 frontmatter 拓扑
+        topology = await self._fetch_topology(round_name)
+        if not topology:
+            logger.warning("[%s] 未找到 topology 定义，跳过自动接力", round_name)
+            return
+        
+        chain = topology.get("chain", [])
+        if not chain:
+            logger.warning("[%s] topology.chain 为空，跳过", round_name)
+            return
+        
+        # 记录进度：当前在 Step 1，等待 Step 1 完成信号
+        self._round_progress[round_name] = {
+            "current_step_idx": -1,   # 还没开始
+            "completed_steps": set(),
+            "chain": chain,
+            "topology": topology,
+        }
+        logger.info("[%s] AutoRouter 已就绪，chain=%d steps", round_name, len(chain))
+    
+    # ── Step 完成处理 ──
+    
+    async def _on_step_complete(self, content: str):
+        """处理 Step 完成通知 → 自动派活下一棒。"""
+        # 提取信息: 角色名 + SHA
+        # 格式: "✅ architect 任务完成: ✅ 完成，已推 dev: abc1234"
+        role = self._extract_role(content)      # 如 "architect"
+        sha = self._extract_sha(content)         # 如 "abc1234"
+        round_name = self._extract_round(content)
+        
+        if not round_name or not role:
+            logger.debug("无法解析完成消息: %s", content[:60])
+            return
+        
+        progress = self._round_progress.get(round_name)
+        if not progress:
+            logger.debug("[%s] 无进度记录，跳过", round_name)
+            return
+        
+        chain = progress["chain"]
+        
+        # 找完成者在 chain 中的 index
+        current_idx = None
+        for i, step in enumerate(chain):
+            if step.get("role") == role:
+                current_idx = i
+                break
+        
+        if current_idx is None:
+            logger.debug("[%s] 角色 %s 不在 chain 中", round_name, role)
+            return
+        
+        # 标记完成
+        progress["completed_steps"].add(current_idx)
+        progress["current_step_idx"] = current_idx
+        
+        # 找下一棒
+        next_idx = current_idx + 1
+        if next_idx >= len(chain):
+            # 全部完成！
+            await self._notify_all_done(round_name)
+            return
+        
+        next_step = chain[next_idx]
+        
+        # 派活下一棒
+        await self._dispatch_step(
+            round_name=round_name,
+            step_config=next_step,
+            prev_role=role,
+            prev_sha=sha or "",
+            chain=chain,
+        )
+        
+        logger.info(
+            "[%s] ✅ %s → 🎯 %s (SHA=%s)",
+            round_name, role, next_step.get("role", "?"), sha or "?",
+        )
+    
+    # ── 派活逻辑 ──
+    
+    async def _dispatch_step(self, round_name: str, step_config: dict,
+                              prev_role: str, prev_sha: str, chain: list):
+        """发送派活消息到目标 bot 的 inbox。"""
+        role = step_config.get("role", "")
+        title = step_config.get("title", "")
+        step_key = step_config.get("step", "")
+        
+        # 找目标 bot 的 agent_id
+        target_id = self._resolve_agent_id(role, round_name)
+        if not target_id:
+            await self._send_to_pm(
+                f"❌ AutoRouter: {round_name} {step_key}({role}) "
+                f"未找到对应 bot，请手动派活"
+            )
+            return
+        
+        # 构建上下文
+        context_lines = []
+        for k, v in step_config.get("context", {}).items():
+            if v:
+                context_lines.append(f"- {k}: {v}")
+        context_str = "\n".join(context_lines) if context_lines else ""
+        
+        # 任务消息
+        task_content = (
+            f"【{round_name} Step {step_key} 任务 — {title} 🎯】\n\n"
+            f"角色: {role}\n"
+            f"前一棒 {prev_role} 已完成 ✅ `{prev_sha}`\n\n"
+        )
+        if context_str:
+            task_content += f"参考：\n{context_str}\n\n"
+        task_content += (
+            f"请按流程完成任务后推 dev 分支。\n"
+            f"完成后请回复 _inbox:server 告知 SHA。"
+        )
+        
+        # 发消息
+        await self._send_inbox(target_id, task_content)
+        logger.info("[AutoRouter] 派活 %s → %s (%s)", round_name, role, target_id[:12])
+    
+    # ── 工具函数 ──
+    
+    async def _fetch_topology(self, round_name: str) -> dict | None:
+        """从远程 WORK_PLAN 读 frontmatter，提取 topology。"""
+        # 1. 通过 !pipeline_status 或直接查询
+        # 2. 从 GitHub raw URL 读取 WORK_PLAN.md
+        # 3. 解析 frontmatter 提取 topology.chain
+        ...
+    
+    def _resolve_agent_id(self, role: str, round_name: str) -> str | None:
+        """根据 role 名找对应 bot 的 agent_id。通过 Agent Card 映射。"""
+        # 1. 从缓存的本轮 _r72_users 查
+        # 2. 从 Agent Card pipeline_roles 查
+        ...
+    
+    def _extract_role(self, content: str) -> str | None:
+        """从"✅ architect 任务完成:..."中提取角色名。"""
+        m = re.match(r'✅ (\w+) 任务完成', content)
+        return m.group(1) if m else None
+    
+    def _extract_sha(self, content: str) -> str | None:
+        """从"已推 dev: abc1234"中提取 SHA。"""
+        m = re.search(r'(?:已推 dev[:\s]+|commit[:\s]+|SHA[:\s]*)([0-9a-f]{7,40})', content)
+        return m.group(1) if m else None
+    
+    def _extract_round(self, content: str) -> str | None:
+        """从消息中提取轮次名。"""
+        m = re.search(r'\b(R\d{1,3})\b', content)
+        return m.group(1) if m else None
+    
+    async def _send_inbox(self, target_id: str, content: str):
+        """发送 inbox 消息。"""
+        await self.ws.send(json.dumps({
+            "type": "message",
+            "channel": f"_inbox:{target_id}",
+            "content": content,
+            "from_name": "系统(管线)",
+            "agent_id": self.my_agent_id,
+            "id": f"auto-{int(time.time()*1000)}",
+            "ts": time.time(),
+        }))
+    
+    async def _send_to_pm(self, content: str):
+        """发送通知到 PM 收件箱。"""
+        if self.pm_agent_id:
+            await self._send_inbox(self.pm_agent_id, content)
+    
+    async def _notify_all_done(self, round_name: str):
+        """全部 Step 完成 → 通知 PM。"""
+        await self._send_to_pm(
+            f"🏁 {round_name} 全部 Step 已完成！管线自动闭环。"
+        )
+        logger.info("[%s] 🏁 全部完成，通知 PM", round_name)
+    
+    async def _restore_pipeline_state(self):
+        """启动时查询已有活跃管线，恢复进度状态。"""
+        # 发 !pipeline_status 查询所有活跃管线
+        # 或从 _admin 频道历史读取
+        ...
+
+
+# ── 入口 ──
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Pipeline AutoRouter Service")
+    parser.add_argument("--api-key", required=True, help="AutoRouter 的 ws-bridge api_key")
+    parser.add_argument("--pm-agent-id", default="", help="PM 的 agent_id")
+    parser.add_argument("--ws-url", default="wss://wsim.datahome73.cloud/ws")
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [AR] %(message)s")
+    
+    router = PipelineAutoRouter(
+        api_key=args.api_key,
+        ws_url=args.ws_url,
+        pm_agent_id=args.pm_agent_id,
+    )
+    
+    try:
+        asyncio.run(router.start())
+    except KeyboardInterrupt:
+        logger.info("AutoRouter 已停止")
+```
+
+### 3.5 Pipeline Topology 定义（frontmatter）
 
 ```yaml
 pipeline:
@@ -163,7 +526,7 @@ pipeline:
 
   topology:                              # ← 🆕 管线拓扑定义
     auto_chain: true                     # 启用自动接力
-    chain:                               # Step 链（有序列表）
+    chain:                               # Step 链（有序列表，从 Step 2 开始）
       - step: step2
         role: architect
         title: 技术方案
@@ -195,7 +558,7 @@ pipeline:
           requirements_url: "${pipeline.requirements_url}"
           test_report_url: "docs/{round}/{round}-test-report.md"
 
-  steps:                                 # 兼容现有格式（用于 !step_complete 等）
+  steps:                                 # 兼容现有格式（!step_complete 等）
     step2:
       role: architect
       title: 技术方案
@@ -214,474 +577,51 @@ pipeline:
 ```
 
 **关于 `chain` vs 现有的 `steps`：**
-- `topology.chain` — **新字段**，顶级管线拓扑定义，基于数组的有序 Step 链，表达 Step 1→2→3... 的自动接力关系
-- `steps` — **现有字段**，用于 `!step_complete` 等命令的 Step 配置（backward compat）
-- 两者并存但不冲突：`chain` 面向 AutoRouter，`steps` 面向状态机
 
-**`topology.chain` 的结构优势：**
-- **有序数组** — 天然表达 Step 执行顺序，第 N 个元素完成后 → 第 N+1 个元素自动派活
-- **自包含** — 每个 Step 定义了自己的 role、title、context，不需要去 `steps` 反向查找
-- **可扩展** — 未来可支持 `parallel: true` 实现并行 Step
+| 字段 | 用途 | 适用于 |
+|:-----|:------|:-------|
+| `topology.chain` | **AutoRouter** — 有序数组，表达 Step 自动接力关系 | 独立服务读取 |
+| `steps` | **`!step_complete`** — 用于状态机推进（现有） | handler.py 解析 |
 
-#### 3.1.2 简写格式
+两者并存且不冲突——一个面向 AutoRouter，一个面向管线状态机。
 
-对于标准 6-Step 管线，支持省略 `topology.chain`，使用默认 Step 排序：
+### 3.6 简写格式
+
+标准 6-Step 管线可省略 `topology.chain`：
 
 ```yaml
 pipeline:
   auto_chain: true                       # ← 仅需 1 行
   steps:
-    step2: { role: architect, ... }
-    step3: { role: developer, ... }
-    step4: { role: reviewer, ... }
-    step5: { role: qa, ... }
-    step6: { role: operations, ... }
+    step2: { role: architect, title: 技术方案 }
+    step3: { role: developer, title: 编码实现 }
+    step4: { role: reviewer, title: 代码审查 }
+    step5: { role: qa, title: 测试验证 }
+    step6: { role: operations, title: 合并部署归档 }
 ```
 
-默认规则：按 step_key 的数字排序（step2→step3→step4→step5→step6），step6 为终点。
+AutoRouter 启动时检测不到 `chain` 就按 role 顺序排序派活。
 
-#### 3.1.3 Task 模板变量
-
-自动生成的任务消息中可使用的变量：
-
-| 变量 | 来源 | 说明 |
-|:-----|:------|:------|
-| `{round}` | pipeline.name / round_name | 当前轮次名（如 R88） |
-| `{step}` | chain 中的 step key | 当前 Step（如 step3） |
-| `{role}` | chain 中的 role | 当前角色的通用名（如 developer） |
-| `{title}` | chain 中的 title | 当前 Step 的标题（如 编码实现） |
-| `{prev_sha}` | 从 `✅ 完成` 消息提取 | 前一棒的产出 SHA |
-| `{prev_role}` | chain 中前一个元素的 role | 前一棒角色名 |
-| `{prev_title}` | chain 中前一个元素的 title | 前一棒的标题 |
-| `{context}` | chain 中的 context 字典拼接 | 注入的文档 URL 引用列表 |
-
-#### 3.1.4 默认任务模板
-
-```python
-_DEFAULT_TASK_TEMPLATE = """【{round} Step {step} 任务 — {title} 🎯】
-
-角色: {role}
-前一棒 {prev_role} 已完成 ✅ `{prev_sha}`
-
-参考：
-{context}
-
-请按流程完成任务后推 dev 分支。
-完成后请回复 _inbox:server 告知 SHA。
-"""
-```
-
-### 3.2 Server 端改动
-
-#### 3.2.1 `!pipeline_start` → Step 1 完成 → AutoRouter 触发
-
-核心逻辑：`!pipeline_start` 完成后，不再等待 PM 手动派活 Step 2，而是**直接触发 AutoRouter 从 Step 1 转到 Step 2**。
-
-```python
-async def _cmd_pipeline_start(ws, agent_id, msg, ...):
-    # ... 现有解析 frontmatter、创建 workspace、配置管线等逻辑不变 ...
-
-    # ── 读取 topology 定义 ──
-    topology = frontmatter.get("pipeline", {}).get("topology", {})
-    if topology:
-        config_data["topology"] = topology
-        logger.info("[R88] 管线 %s 启用了拓扑自动接力", round_name)
-    
-    # ... 写入 _PIPELINE_CONFIG ...
-    
-    # ═══ R88: Step 1 完成 → AutoRouter 触发 Step 1→Step 2 ═══
-    # PM 已经完成了 Step 1（写文档+启动管线），这里是 Step 1 的完成信号
-    # AutoRouter 读取拓扑链，从第 1 个 Step（step2）开始派活
-    auto_chain = topology.get("auto_chain", False) or config_data.get("auto_chain", False)
-    if auto_chain:
-        chain = topology.get("chain", [])
-        if chain:
-            first_step = chain[0]  # step2
-            # 派活 Step 2 给 arch
-            await _auto_dispatch_step(
-                round_name=round_name,
-                step_config=first_step,
-                chain=chain,
-                pipeline_config=config_data,
-                prev_sha="",         # Step 1 是需求文档 + WORK_PLAN SHA
-                prev_role="PM",
-                prev_title="需求与计划",
-            )
-            logger.info("[R88] %s Step 1 完成 → 自动派活 Step 2 (%s)", 
-                       round_name, first_step.get("role", "?"))
-        else:
-            # 简写格式：按 steps 的 step_key 排序
-            steps_sorted = _get_sorted_steps(config_data.get("steps", {}))
-            if steps_sorted:
-                first_step_name = steps_sorted[0]
-                first_step_cfg = config_data["steps"][first_step_name]
-                await _auto_dispatch_step(
-                    round_name=round_name,
-                    step_name=first_step_name,
-                    step_config=first_step_cfg,
-                    chain=None,
-                    pipeline_config=config_data,
-                    prev_sha="",
-                    prev_role="PM",
-                    prev_title="需求与计划",
-                )
-```
-
-#### 3.2.2 `_handle_server_relay` 增强 — 规则 2 AutoRouter
-
-当 bot 发 `✅ 完成` 时，server 不仅转发和自动确认（R87 逻辑），还触发 AutoRouter 找下一棒：
-
-```python
-# 在 _handle_server_relay 规则 2（✅ 完成）中增加 AutoRouter
-
-if content.startswith("✅ 完成"):
-    # ⑤a 转发给 PM（现有 R87 逻辑 — 不变）
-    if pm_agent_id:
-        await _broadcast_to_channel(...)
-    
-    # ⑤b 自动确认给 bot（现有 R87 逻辑 — 不变）
-    await _broadcast_to_channel(
-        f"_inbox:{agent_id}", {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统(中继)",
-            "from_agent": "system",
-            "content": "✅ 确认，已收到你的完成通知。",
-            "ts": time.time(),
-        },
-    )
-    
-    # ═══ R88 AutoRouter: ✅ 完成 → 自动派活下一棒 ═══
-    await _auto_router_on_completion(
-        round_name=round_name,  # 从 context 推断
-        agent_id=agent_id,      # 完成的 bot
-        content=content,        # 完成消息（含 SHA）
-    )
-    
-    return True
-```
-
-#### 3.2.3 新增函数：`_auto_router_on_completion`
-
-```python
-async def _auto_router_on_completion(
-    round_name: str,
-    agent_id: str,
-    content: str,
-) -> None:
-    """Bot 完成 Step 后，AutoRouter 查找下一棒并自动派活。
-    
-    不阻塞调用方——派活失败不会影响 ⑤a/⑤b 的执行。
-    """
-    pipeline_config = _PIPELINE_CONFIG.get(round_name, {})
-    if not pipeline_config:
-        logger.debug("[AutoRouter] %s 无管线配置，跳过", round_name)
-        return
-    
-    auto_chain = pipeline_config.get("topology", {}).get("auto_chain", False) \
-                 or pipeline_config.get("auto_chain", False)
-    if not auto_chain:
-        return  # 未启用自动接力
-    
-    chain = pipeline_config.get("topology", {}).get("chain", [])
-    if not chain:
-        # 简写模式：按 steps key 排序
-        sorted_steps = _get_sorted_steps(pipeline_config.get("steps", {}))
-        if not sorted_steps:
-            return
-        # 找当前 agent_id 对应的 step 在链中的位置
-        current_idx = _find_step_index_by_agent(agent_id, sorted_steps, pipeline_config)
-    else:
-        # 标准模式：找 chain 中当前 agent_id 对应的元素位置
-        current_idx = _find_step_index_in_chain(agent_id, chain, pipeline_config)
-    
-    if current_idx is None:
-        logger.debug("[AutoRouter] %s 未找到当前 Step（agent=%s）", round_name, agent_id[:12])
-        return
-    
-    next_idx = current_idx + 1
-    
-    if chain:
-        # 标准模式：读取 chain[next_idx]
-        if next_idx >= len(chain):
-            # 终点 — 全部完成
-            await _notify_pipeline_complete(round_name)
-            return
-        next_step = chain[next_idx]
-        prev_step = chain[current_idx] if current_idx < len(chain) else {}
-    else:
-        # 简写模式
-        if next_idx >= len(sorted_steps):
-            await _notify_pipeline_complete(round_name)
-            return
-        next_step_name = sorted_steps[next_idx]
-        next_step = pipeline_config["steps"].get(next_step_name, {})
-        prev_step_name = sorted_steps[current_idx]
-        prev_step = pipeline_config["steps"].get(prev_step_name, {})
-    
-    # 提取 SHA
-    sha = _extract_sha(content)
-    
-    # 派活下一棒
-    await _auto_dispatch_step(
-        round_name=round_name,
-        step_config=next_step,
-        chain=chain or None,
-        pipeline_config=pipeline_config,
-        prev_sha=sha or "",
-        prev_role=prev_step.get("role", "?"),
-        prev_title=prev_step.get("title", "?"),
-        step_name=next_step_name if not chain else None,
-    )
-```
-
-#### 3.2.4 新增函数：`_auto_dispatch_step`
-
-```python
-async def _auto_dispatch_step(
-    round_name: str,
-    step_config: dict,
-    chain: list | None,
-    pipeline_config: dict,
-    prev_sha: str,
-    prev_role: str,
-    prev_title: str,
-    step_name: str | None = None,
-) -> None:
-    """派活指定 Step 到目标 bot 的 inbox。
-    
-    Args:
-        step_config: chain 中的元素或 steps 中的配置
-        chain: 完整 chain（为 None 时使用简写模式用 step_name 定位）
-    """
-    if chain:
-        role = step_config.get("role", "")
-        title = step_config.get("title", "")
-        step_key = step_config.get("step", step_name or "")
-    else:
-        role = step_config.get("role", "")
-        title = step_config.get("title", "")
-        step_key = step_name or ""
-    
-    if not role:
-        logger.warning("[AutoRouter] Step %s 缺少 role 定义，跳过自动派活", step_key)
-        return
-    
-    # 找目标 bot 的 agent_id
-    target_agent_id = _get_agent_id_for_role(round_name, role)
-    if not target_agent_id:
-        logger.warning("[AutoRouter] 角色 %s 无对应 agent（round=%s），通知 PM", role, round_name)
-        pm_agent_id = config.PIPELINE_PM_AGENT_ID
-        if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}", {
-                    "type": "broadcast",
-                    "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统(管线)",
-                    "from_agent": "system",
-                    "content": f"❌ AutoRouter 无法派活 {step_key}（角色={role}）：未找到对应 bot。\n"
-                              f"请手动派活到正确的 bot 收件箱。",
-                    "ts": time.time(),
-                },
-            )
-        return
-    
-    # 构建任务消息
-    context_lines = []
-    for k, v in step_config.get("context", {}).items():
-        if v:
-            context_lines.append(f"- {k}: {v}")
-    context_str = "\n".join(context_lines) if context_lines else "（参考上下文见 WORK_PLAN）"
-    
-    # 使用默认模板
-    task_content = (
-        f"【{round_name} Step {step_key} 任务 — {title} 🎯】\n\n"
-        f"角色: {role}\n"
-        f"前一棒 {prev_role} 已完成 ✅ `{prev_sha}`\n\n"
-        f"参考：\n{context_str}\n\n"
-        f"请按流程完成任务后推 dev 分支。\n"
-        f"完成后请回复 _inbox:server 告知 SHA。"
-    )
-    
-    # 发送到目标 bot inbox
-    await _send_inbox_task(
-        target_agent_id=target_agent_id,
-        content=task_content,
-        from_name="系统(管线)",
-        context={
-            "round_name": round_name,
-            "pipeline_step": step_key,
-            "previous_sha": prev_sha,
-        },
-    )
-    
-    logger.info(
-        "[AutoRouter] %s 自动派活 %s (%s → %s)",
-        round_name, step_key, prev_role, role,
-    )
-```
-
-#### 3.2.5 辅助函数
-
-```python
-def _find_step_index_in_chain(agent_id: str, chain: list, pipeline_config: dict) -> int | None:
-    """在 chain 中找当前 agent_id 对应的 position。"""
-    role = _get_role_for_agent(agent_id, pipeline_config)
-    if not role:
-        return None
-    for i, step in enumerate(chain):
-        if step.get("role") == role:
-            return i
-    return None
-
-
-def _find_step_index_by_agent(agent_id: str, sorted_steps: list, pipeline_config: dict) -> int | None:
-    """在 sorted_steps 中找当前 agent_id 对应的 position。"""
-    role = _get_role_for_agent(agent_id, pipeline_config)
-    if not role:
-        return None
-    steps_cfg = pipeline_config.get("steps", {})
-    for i, step_key in enumerate(sorted_steps):
-        if steps_cfg.get(step_key, {}).get("role") == role:
-            return i
-    return None
-
-
-def _get_role_for_agent(agent_id: str, pipeline_config: dict) -> str | None:
-    """从管线配置中找 agent_id 映射的角色名。"""
-    # 从 _r72_users 获取 agent 信息
-    agent_info = _r72_users.get(agent_id, {})
-    agent_name = agent_info.get("name", "")
-    
-    # 从 Agent Card 获取 pipeline_roles
-    cards = ac_mod.get_all_cards()
-    for card_id, card in cards.items():
-        if card.get("agent_id") == agent_id:
-            roles = card.get("pipeline_roles", {})
-            return next(iter(roles.keys()), None)
-    
-    # Fallback: 从 workspace members 匹配
-    workspace_members = pipeline_config.get("workspace", {}).get("members", {})
-    for role_name, role_cfg in workspace_members.items():
-        keywords = role_cfg.get("mention_keyword", "")
-        if agent_name in keywords:
-            return role_name
-    
-    return None
-
-
-def _get_sorted_steps(steps: dict) -> list:
-    """按 step key 的数字排序返回有序列表。"""
-    import re
-    def sort_key(k):
-        m = re.match(r'step(\d+)', k.lower())
-        return (int(m.group(1)),) if m else (0, k)
-    return sorted(steps.keys(), key=sort_key)
-
-
-def _extract_sha(content: str) -> str | None:
-    """从 ✅ 完成消息中提取 commit SHA。"""
-    import re
-    # 匹配 "已推 dev: abc1234" 或 "commit abc1234" 或 "SHA: abc1234"
-    m = re.search(r'(?:已推 dev[:\s]+|commit[:\s]+|SHA[:\s]*)([0-9a-f]{7,40})', content)
-    if m:
-        return m.group(1)
-    return None
-
-
-async def _notify_pipeline_complete(round_name: str) -> None:
-    """管线全部 Step 完成 → 通知 PM。"""
-    pm_agent_id = config.PIPELINE_PM_AGENT_ID
-    if not pm_agent_id:
-        return
-    await _broadcast_to_channel(
-        f"_inbox:{pm_agent_id}", {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_agent_id}",
-            "from_name": "系统(管线)",
-            "from_agent": "system",
-            "content": f"🏁 {round_name} 全部 Step 已完成！管线自动闭环。",
-            "ts": time.time(),
-        },
-    )
-```
-
-#### 3.2.6 `_cmd_pipeline_start` 修改点
-
-在现有 `_cmd_pipeline_start` 中增加：
-
-1. 解析 `topology` 字段 → 存入 `_PIPELINE_CONFIG[round_name]["topology"]`
-2. 判断 `auto_chain` 是否开启
-3. 若开启 → 读取 `chain[0]`（或 `steps` 排序后的第一个）→ 自动派活 Step 2
-
-```python
-# 在 _cmd_pipeline_start 末尾，workspace 创建成功后：
-
-# R88: Step 1 完成 → AutoRouter
-topology = config_data.get("topology", {})
-auto_chain = topology.get("auto_chain", False) or config_data.get("auto_chain", False)
-
-if auto_chain:
-    chain = topology.get("chain", [])
-    if chain:
-        # 标准模式：chain[0] = step2
-        first_step = chain[0]
-        await _auto_dispatch_step(
-            round_name=round_name,
-            step_config=first_step,
-            chain=chain,
-            pipeline_config=config_data,
-            prev_sha="",  # Step 1 产出是需求文档 + WORK_PLAN
-            prev_role="PM",
-            prev_title="需求与计划",
-        )
-    else:
-        # 简写模式：按 steps 排序取第一个
-        sorted_steps = _get_sorted_steps(config_data.get("steps", {}))
-        if sorted_steps:
-            first_key = sorted_steps[0]
-            first_cfg = config_data["steps"][first_key]
-            await _auto_dispatch_step(
-                round_name=round_name,
-                step_config=first_cfg,
-                chain=None,
-                pipeline_config=config_data,
-                prev_sha="",
-                prev_role="PM",
-                prev_title="需求与计划",
-                step_name=first_key,
-            )
-```
-
-#### 3.2.7 Step 1 完成信号
-
-`!pipeline_start` 就是 Step 1 的完成信号。PM 在启动管线前已完成 Step 1 工作：
-- × 写需求文档 ✅
-- × WORK_PLAN 含 frontmatter ✅
-- × 已推 dev ✅
-- → 执行 `!pipeline_start` = Step 1 完成
-
-**不需新增 `!step1_complete`、`✅ 完成 Step 1` 等信号。**
-
-### 3.3 改动估算
-
-| 文件 | 改动类型 | 估算 |
-|:-----|:---------|:-----|
-| `server/handler.py` | **新增** — `_auto_router_on_completion()`, `_auto_dispatch_step()`, `_find_step_index_in_chain()`, `_find_step_index_by_agent()`, `_get_role_for_agent()`, `_get_sorted_steps()`, `_extract_sha()`, `_notify_pipeline_complete()` | ~180 行 |
-| `server/handler.py` | **修改** — `_handle_server_relay()` 规则 2 中增加 AutoRouter 调用 | ~10 行 |
-| `server/handler.py` | **修改** — `_cmd_pipeline_start()` 解析 topology + AutoRouter 触发 | ~30 行 |
-| **合计** | | **~220 行净增**（全 server 端，bot 端零改动） |
-
-### 3.4 不纳入范围
+### 3.7 不纳入范围
 
 | 事项 | 原因 |
 |:-----|:------|
-| **并行 Step 拓扑** — chain 支持 `parallel: true` | 线性 6-Step 先跑通，并行拓展开启 R89 |
-| **异常回退** — bot 完成消息不合格式时自动回退 PM | v1 直接通知 PM 手动处理，不影响现有逻辑 |
-| **Step 跳过** | 非核心场景，未来扩展 |
-| **动态拓扑修改** — 管线运行时改 Step 链 | 拓扑在 `!pipeline_start` 时固定 |
-| **结构化 Task Card** — bot 间用 JSON/YAML 交接 | 自然语言模板先跑通，结构化留后面 |
-| **`!step_complete` 推进状态机** | 和 AutoRouter 是独立功能，各有各的推进方式 |
+| **并行 Step 拓扑** — chain 支持 `parallel: true` | 线性先跑通，并行留 R89 |
+| **异常回退** — 完成消息不合格式时自动回退 PM | v1 直接通知 PM 手动处理 |
+| **Step 跳过** | 非核心场景 |
+| **动态拓扑修改** | 拓扑在 pipeline_start 时固定 |
+| **结构化 Task Card** | 自然语言模板先跑通 |
+| **handler.py 的任何修改** | AutoRouter 是独立服务，零侵入 |
+
+### 3.8 改动估算
+
+| 文件 | 改动类型 | 估算 |
+|:-----|:---------|:-----|
+| `server/auto_router.py` | **新增** — 完整独立服务 | ~250 行 |
+| `server/config.py` | **可选新增** — 默认拓扑常量/agent_card 路径（AutoRouter 启动参数也可） | ~10 行 |
+| **handler.py** | **✅ 零改动！** | **0 行** |
+
+**净增：** ~250 行全新文件。零回归风险。bot 端零改动。
 
 ---
 
@@ -691,41 +631,40 @@ if auto_chain:
 
 | # | 检查项 | 预期结果 | 测试方法 |
 |:-:|:-------|:---------|:---------|
-| ✅-1 | `!pipeline_start` 含 topology → 解析成功存入 `_PIPELINE_CONFIG` | 日志打印 "启用了拓扑自动接力" | 启动管线 → grep 日志 |
-| ✅-2 | `!pipeline_start` 后自动派活 Step 2（arch） | arch inbox 收到任务消息（from_name="系统(管线)"） | 检查 arch 收件箱 |
-| ✅-3 | arch 发 `✅ 完成` → server 自动派活 Step 3（dev） | dev inbox 收到任务消息 | 检查 dev 收件箱 |
-| ✅-4 | Step 3 → 4, Step 4 → 5, Step 5 → 6 全线自动 | 全部自动接力，PM 未手动发任何一条中间派活 | 日志统计 AutoRouter 触发次数 |
-| ✅-5 | Step 6 ops 发 `✅ 完成` → server 发「全部完成」通知 PM | PM 收到 `🏁 R{轮次} 全部 Step 已完成！` | 检查 PM 收件箱 |
-| ✅-6 | 自动派活消息包含正确的 `prev_sha` 引用 | Step 3 任务中引用了 Step 2 的 commit SHA | 检查任务内容 |
-| ✅-7 | 自动派活消息包含正确的 context URL | 任务中提及前一棒的文档 URL | 检查任务内容 |
-| ✅-8 | 无 topology 定义的管线不受影响 | PM 手动接力模式仍正常工作 | 旧格式管线发 `!pipeline_start` → 无自动派活 |
-| ✅-9 | `auto_chain: false` 时不触发 AutoRouter | 即使写了 topology 但关闭了，不自动接力 | 设置 false → 启动 → 无自动派活 |
+| ✅-1 | `!pipeline_start` 含 topology → AutoRouter 检测到管线就绪 | AutoRouter 日志打印 "已就绪，chain=N steps" | 启动管线 → 检查 AutoRouter 日志 |
+| ✅-2 | arch 发 `✅ 完成` → AutoRouter 自动派活 Step 3 dev | dev inbox 收到任务消息（from_name="系统(管线)"） | 检查 dev 收件箱 |
+| ✅-3 | Step 3 → 4, Step 4 → 5, Step 5 → 6 全线自动 | 全部自动接力，PM 未手动发任何一条中间派活 | 日志统计 AutoRouter 派活次数 |
+| ✅-4 | Step 6 ops 发 `✅ 完成` → AutoRouter 发「全部完成」通知 PM | PM 收到 `🏁 R{轮次} 全部 Step 已完成！` | 检查 PM 收件箱 |
+| ✅-5 | 自动派活消息包含正确的 SHA 引用 | 任务中引用了前一棒的 commit SHA | 检查任务内容 |
+| ✅-6 | 自动派活消息包含正确的 context URL | 任务中提及前一棒的文档 URL | 同上 |
+| ✅-7 | 不启动 AutoRouter → 管线照常手动运行 | PM 手动 inbox 模式完全不变 | 不启动服务，正常手动派活 |
+| ✅-8 | AutoRouter 停止 → 不影响已启动的管线 | 管线不丢失，PM 切回手动继续 | 停止 AutoRouter，PM 手动接力 |
 
 ### 🎯 4.2 bot 透明性验证
 
 | # | 检查项 | 预期结果 |
 |:-:|:-------|:---------|
-| ✅-10 | Bot 收到 server 派活后，按正常协议发 ACK ✅ | Bot 的 ACK 协议不变 |
-| ✅-11 | Bot 正常干活、正常 `✅ 完成` | Bot 的工作流不变 |
-| ✅-12 | Bot 从 `from_name` 字段知道消息来源 | `from_name="系统(管线)"` 显示在消息中 |
-| ✅-13 | Bot 不因发送者不同而改变回复目标 | 回复地址仍是 `_inbox:server`（不变） |
+| ✅-9 | Bot 收到 server 派活后，正常发 ACK ✅ | Bot 的 ACK 协议不变 |
+| ✅-10 | Bot 正常干活、正常 `✅ 完成` | Bot 的工作流不变 |
+| ✅-11 | Bot 回复地址仍是 `_inbox:server` | 不受发送者影响 |
 
-### 🎯 4.3 安全与兼容
+### 🎯 4.3 安全与恢复
 
 | # | 检查项 | 预期结果 |
 |:-:|:-------|:---------|
-| ✅-14 | PM 手动派活和 AutoRouter 并行不冲突 | 两条消息都可到达 bot inbox，bot LLM 自行判断 |
-| ✅-15 | AutoRouter 找不到目标 agent → 通知 PM + 继续 | PM 收到 ❌ 通知，AotuRouter 不影响现有 `✅ 完成` 处理 |
-| ✅-16 | `!pipeline_mode manual` 期间 AutoRouter 静默跳过 | 手动模式下不触发自动派活 |
-| ✅-17 | `✅ 完成` 格式不匹配 → 不触发 AutoRouter | 仅 `✅ 完成` 精确前缀匹配 |
-| ✅-18 | server 重启后 `_PIPELINE_CONFIG` 恢复 | Agent Card 持久化恢复角色映射（R72/R73 已解决） |
+| ✅-12 | AutoRouter 找不到目标 agent → 通知 PM + 继续 | PM 收到 ❌ 通知 |
+| ✅-13 | AutoRouter 重启后恢复活跃管线进度 | 启动时查询 `!pipeline_status` 重建状态 |
+| ✅-14 | 无 topology 的管线 → AutoRouter 安静跳过 | 日志提示 "未找到 topology" 但无错误 |
+| ✅-15 | AutoRouter 断线重连 | 自动重连（现有 ws 库已支持） |
+| ✅-16 | PM 手动派活与 AutoRouter 不冲突 | 两者都可以发 inbox，bot LLM 自行处理 |
 
 ### 🎯 4.4 文档更新
 
 | # | 检查项 |
 |:-:|:-------|
-| ✅-19 | `inbox-message-protocol.md` §8 更新为 AutoRouter 模型 |
-| ✅-20 | TODO.md Phase 2 + 版本号更新 |
+| ✅-17 | `inbox-message-protocol.md` 更新为 AutoRouter 服务模型 |
+| ✅-18 | TODO.md Phase 2 + 版本号更新 |
+| ✅-19 | `server/auto_router.py` 模块注释和 README |
 
 ---
 
@@ -735,22 +674,22 @@ if auto_chain:
 |:----:|:-----|:-----|:--------:|
 | 🅰️ **需求审核** | **项目负责人** | 审核通过/修改意见 | ⏳ **当前** |
 | 🅰️ **Step 1** | **📋 PM** | WORK_PLAN.md（含 topology 定义）→ `!pipeline_start` | 5min |
-| 🅱️ **Step 2** | 👷 Arch | 技术方案（含 chain 解析、AutoRouter 伪代码、角色映射） | 10min |
-| 🅲 **Step 3** | 👨‍💻 Dev | 编码实现（~220 行净增） | 20min |
-| 🅳 **Step 4** | 👀 Review | 代码审查（重点：拓扑解析鲁棒性、角色映射准确性） | 10min |
-| 🅴 **Step 5** | 🦐 QA | 测试报告（20 项验收 + 3 端到端场景） | 15min |
-| 🅵 **Step 6** | 🛠️ Ops | 合并部署 + 更新 TODO.md + inbox-message-protocol.md §8 | 10min |
+| 🅱️ **Step 2** | 👷 Arch | 技术方案（含服务架构、角色映射策略、chain 解析） | 10min |
+| 🅲 **Step 3** | 👨‍💻 Dev | 编码实现 `auto_router.py`（~250 行） | 20min |
+| 🅳 **Step 4** | 👀 Review | 代码审查（重点：断线重连、角色映射鲁棒性） | 10min |
+| 🅴 **Step 5** | 🦐 QA | 测试报告（19 项验收 + 端到端场景） | 15min |
+| 🅵 **Step 6** | 🛠️ Ops | 注册 AutoRouter 服务 + 部署 + 更新文档 | 10min |
 
 ### 关键风险
 
 | 风险 | 影响 | 缓解 |
 |:-----|:------|:------|
-| **角色映射不准** — `_get_role_for_agent` 找不到 agent | AutoRouter 无法派活 Step | 通知 PM 手动派活 + 日志报错，不阻塞现有转发逻辑 |
-| **bot 未回 ACK** — 派活了但不回 ACK | PM 不知道 bot 是否收到 | 现有 R87 中继不依赖 ACK —— PM 从转发通知得知 |
-| **`!pipeline_start` 后 workspace 创建失败** | Step 2 派活了但无 workspace | Step 2 的任务消息可以直接送到 inbox，不依赖 workspace |
-| **chain 配置错误** — role 名与实际注册名不匹配 | AutoRouter 找不到 agent | 启动时校验：遍历 chain 中所有 role，启动前检查是否有对应 agent |
-| **bot 离线** — 派活时 bot 不在线 | 任务发了但 bot 没收到 | inbox 持久化保证投递 |
-| **server 重启后拓扑丢失** | `_PIPELINE_CONFIG` 内存数据丢失 | `_PIPELINE_CONFIG` 在现有持久化中已有保留（`persistence.save/load_pipeline_config`），重启后从持久化恢复 |
+| **角色映射不准** — `_resolve_agent_id` 找不到 bot | 派活失败 | 通知 PM 手动 + 日志，不阻任何现有流程 |
+| **`!pipeline_start` 消息被 AutoRouter 错过** | AutoRouter 感知不到管线启动 | 启动时 `_restore_pipeline_state` 查现有管线 |
+| **AutoRouter 断线** — 服务挂了 | 自动接力停止 | 断线重连（ws 库自带）+ PM 手动补位 |
+| **AutoRouter 重启后进度丢失** | 不知道当前到哪一步 | `_restore_pipeline_state` 查询 `!pipeline_status` |
+| **多个 AutoRouter 实例冲突** | 重复派活 | 只允许一个实例运行（进程级锁或 PM 管理） |
+| **handler.py 不改 → 无法读取 `_PIPELINE_CONFIG`** | AutoRouter 读不到 frontmatter 拓扑 | AutoRouter 自己从 WORK_PLAN raw URL 下载解析 frontmatter，不依赖 server 内存状态 |
 
 ---
 
@@ -778,34 +717,49 @@ Phase 3 — Coder Agent 编码专精（待启动）
 ```
 准备工作（Step 1 — PM）：
   ① 写 R88-product-requirements.md
-  ② 写 WORK_PLAN.md（含 pipeline.topology 定义）
+  ② 写 WORK_PLAN.md（含 pipeline.topology.chain 定义）
   ③ 推 dev
   ④ 执行 !pipeline_start R88 --work_plan_url <raw_url>
 
-Server 收到 !pipeline_start：
-  ⑤ 解析 frontmatter → _PIPELINE_CONFIG[R88]
-  ⑥ 创建 workspace
-  ⑦ 发现 auto_chain=true → 读取 chain[0] (step2/architect)
-  ⑧ AutoRouter: 派活 Step 2 到 _inbox:arch
-  ⑨ 日志: "[R88] Step 1 完成 → 自动派活 Step 2 (architect)"
+Server 处理 !pipeline_start：
+  ⑤ 解析 frontmatter → 创建 workshop → 通知全员就绪
 
-Step 2（arch — 自动触发）：
-  ⑩ arch 收活 → ACK ✅ → 写技术方案 → 推 dev → ✅ 完成
-  ⑪ Server 转发 + 自动确认（R87 逻辑）
-  ⑫ AutoRouter: chain[0]→chain[1] → 派活 Step 3 到 _inbox:dev
+AutoRouter 感知管线启动：
+  ⑥ 从 PM 收件箱收到 "R88 管线已启动，工作区已就绪"
+  ⑦ 从 WORK_PLAN 远程 URL 读取 frontmatter → 解析 topology.chain
+  ⑧ 发现 chain=[arch, dev, review, qa, ops]，auto_chain=true
+  ⑨ 记录进度: round_progress["R88"] = {current_idx: -1}
 
-Step 3→4→5→6（自动接力，同上模式）：
-  ⑬ 每步自动完成 → 自动转下步
+  ── 等待第一个 ✅ 完成通知 ──
+
+Step 2（arch）：
+  ➉ PM 自己给 arch 派活（AutoRouter 等待 PM 完成 Step 2 也行，
+    或者 PM 发给 arch，arch 完成时触发 AutoRouter）
+  — 实际流程: PM 完成 Step 1 后，通知 arch 开始或 AutoRouter
+    检测到 Step 1 完成后自动派活 arch
+
+  arch 收活 → ACK ✅ → 写技术方案 → 推 dev → ✅ 完成
+    ① AutoRouter 从 PM 收件箱收到转发 "✅ architect 任务完成"
+    ② 解析：role=architect, sha=abc1234, round=R88
+    ③ chain 中 arch idx=0 → next_idx=1 (developer)
+    ④ 派活 Step 3 到 _inbox:dev
+
+Step 3（dev — auto-dispatched by AutoRouter）：
+    ⑤ dev 收活 → ACK ✅ → 编码 → 推 dev → ✅ 完成
+    ⑥ AutoRouter 检测完成 → chain[1]→chain[2] → 派活 reviewer
+
+Step 4→5→6（自动接力，同上模式）：
+    ⑦ 每步完成 → AutoRouter 自动转下步
 
 终局：
-  ⑭ Step 6 ops ✅ 完成
-  ⑮ AutoRouter 发现 chain 终点 → 发「全部完成」通知 PM
-  ⑯ PM 收到 🏁 R88 全线闭环
+    ⑧ Step 6 ops ✅ 完成
+    ⑨ AutoRouter 检测 chain 终点 → 发「全部完成」通知 PM
+    ⑩ PM 收到 🏁 R88 全线闭环 🎉
 ```
 
-**PM 全程操作：** 写文档 → `!pipeline_start` → 收通知 → 收完工。
+**PM 全程操作：** 写文档 → `!pipeline_start` → 收 ACK/完成通知 → 收完工通知。
 
-**Bot 全程感知：** 和现在的流程一样 — 收消息 → ACK → 干活 → ✅ 完成。从 `from_name` 知道是 server 发的（"系统(管线)"），但行为完全不变。
+**Bot 全程感知：** 和现在的流程完全一致 — 收消息 → ACK → 干活 → ✅ 完成。消息的 `from_name` 是「系统(管线)」而非「PM」，但 bot 不需要为此做任何改动。
 
 ---
 
@@ -814,4 +768,4 @@ Step 3→4→5→6（自动接力，同上模式）：
 - [ ] docs/R88/*.md 零内部名残留（frontmatter 的角色 mapping 除外）
 - [ ] 使用通用角色名（PM / arch / dev / review / qa / operations）
 - [ ] 不包含真实 agent_id / token / URL
-- [ ] chain 示例中的 bot 名称用角色名（architect / developer 等），不使用具体 bot 名
+- [ ] chain 示例中的 bot 名称用角色名，不使用具体 bot 名
