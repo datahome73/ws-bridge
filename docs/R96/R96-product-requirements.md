@@ -443,3 +443,4 @@ parser.add_argument(
 | Hermes 框架 `.env` 加载时序修复 | 框架层，需大宏决策，可选调研 |
 | Web UI 功能增强 | 非入驻体验范畴 |
 | 旧 6 bot 卡片的 pipeline_roles 字段统一 | 已在 R73/R78 处理，无新问题 |
+| **inbox 消息已送达（sent:1）但目标 bot 未响应** | 晓周实测发现。可能原因：无 Agent Card 导致路由异常 / Gateway 未配通 / 框架层 inbox 消费 bug。**等大宏 TG 调查结果后决定是否纳入 R96 范围** |
