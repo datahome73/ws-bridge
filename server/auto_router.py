@@ -35,7 +35,9 @@ class PipelineAutoRouter:
     _RECONNECT_MAX_DELAY = 60  # 秒
     # ── R89 🅱️: Step 超时检测 ──
     _TIMEOUT_CHECK_INTERVAL = 300  # 5 分钟检查一次
-    _STEP_DEFAULT_TIMEOUT = 7200   # 2 小时默认超时
+    # R90 🅲: 从环境变量读取，支持 <=0 禁用
+    _STEP_DEFAULT_TIMEOUT = int(os.environ.get("AR_STEP_TIMEOUT", "7200"))
+    _STEP_TIMEOUT_ENABLED  = _STEP_DEFAULT_TIMEOUT > 0
     _STANDARD_PIPELINE_ORDER = [
         "product_manager", "pm", "architect", "arch", "developer", "dev",
         "reviewer", "review", "qa", "test", "operations", "ops",
@@ -87,6 +89,13 @@ class PipelineAutoRouter:
         self._step_dispatch_times: dict[str, dict[str, dict]] = {}
         # round_name → set[step_key]  已通知超时的 step（防重复）
         self._step_timeout_notified: dict[str, set[str]] = {}
+
+        # ── R90 🅲: 超时状态日志 ──
+        logger.info(
+            "[AR] 超时=%ds (%s)",
+            self._STEP_DEFAULT_TIMEOUT,
+            "启用" if self._STEP_TIMEOUT_ENABLED else "禁用",
+        )
 
     # ═══════════════ 生命周期 ═══════════════
 
@@ -151,9 +160,13 @@ class PipelineAutoRouter:
                 logger.info("[AR] ✅ 已连接, agent_id=%s", self.my_agent_id[:16])
 
                 # ── 🅱️ 启动超时检测后台 task ──
-                timeout_task = asyncio.create_task(self._timeout_check_loop())
-                logger.info("[AR] ⏰ 超时检测已启动 (interval=%ds, timeout=%ds)",
-                            self._TIMEOUT_CHECK_INTERVAL, self._STEP_DEFAULT_TIMEOUT)
+                if self._STEP_TIMEOUT_ENABLED:
+                    timeout_task = asyncio.create_task(self._timeout_check_loop())
+                    logger.info("[AR] ⏰ 超时检测已启动 (interval=%ds, timeout=%ds)",
+                                self._TIMEOUT_CHECK_INTERVAL, self._STEP_DEFAULT_TIMEOUT)
+                else:
+                    logger.info("[AR] ⏰ 超时检测已禁用 (AR_STEP_TIMEOUT=%d)",
+                                self._STEP_DEFAULT_TIMEOUT)
 
                 # ② 启动时重建已有管线状态（B5/B6/B8）
                 await self._restore_pipeline_state()
@@ -179,7 +192,7 @@ class PipelineAutoRouter:
     # ═══════════════ 消息处理 ═══════════════
 
     async def _handle_message(self, msg: dict) -> None:
-        """消息入口 — 只关心 PM 收件箱的管线通知。"""
+        """消息入口 — 监听 PM 收件箱 + _admin 频道（R90 🅰️ 白名单模式）。"""
         channel = msg.get("channel", "")
         content = (msg.get("content") or "").strip()
         msg_id = msg.get("id", "")
@@ -188,26 +201,32 @@ class PipelineAutoRouter:
         if self._mark_seen(msg_id):
             return
 
-        # ── 只监听 PM 收件箱 ──
-        if self._pm_inbox_channel and channel != self._pm_inbox_channel:
-            return
+        # ── 🅰️ R90: 通道过滤改为白名单模式 ──
+        is_pm_inbox = self._pm_inbox_channel and channel == self._pm_inbox_channel
+        is_admin = channel == "_admin"
 
-        # ═══ 信号 1: 管线就绪 ═══
+        if not is_pm_inbox and not is_admin:
+            return  # 只处理 PM inbox 或 _admin 的消息
+
+        # ═══ 信号 1: 管线就绪（PM inbox + _admin 均可） ═══
         if "管线已启动" in content or "工作区已就绪" in content:
             round_name = self._extract_round(content)
             if round_name:
                 await self._on_pipeline_ready(round_name)
             return
 
-        # ═══ 信号 2: Bot 任务完成 ═══
-        if content.startswith("✅ ") and "任务完成" in content:
-            await self._on_step_complete(content)
-            return
+        # ═══ PM inbox 专有: Step 完成信号 ═══
+        if is_pm_inbox:
+            if content.startswith("✅ ") and "任务完成" in content:
+                await self._on_step_complete(content)
+                return
+            if content.startswith("✅ 完成") or "✅ 完成，已推" in content:
+                await self._on_step_complete(content)
+                return
 
-        # ═══ 信号 3: Bot 完成推送（简写格式） ═══
-        if content.startswith("✅ 完成") or "✅ 完成，已推" in content:
-            await self._on_step_complete(content)
-            return
+        # _admin 专有: 只响应管线启动信号，其他忽略
+        if is_admin:
+            return  # 不干扰 admin 频道正常通信
 
     async def _on_pipeline_ready(self, round_name: str) -> None:
         """管线就绪 → 加载拓扑 → 记录进度（B1/B8）。"""
@@ -402,6 +421,11 @@ class PipelineAutoRouter:
 
         随 _connect_and_listen() 启动，周期检查所有活跃 Step 是否超时。
         """
+        # ── R90 🅲: <=0 禁用守卫 ──
+        if not self._STEP_TIMEOUT_ENABLED:
+            logger.info("[AR] ⏰ 超时检测已禁用 (AR_STEP_TIMEOUT=%d)",
+                         self._STEP_DEFAULT_TIMEOUT)
+            return  # 不启动定时器
         while self._running:
             try:
                 await self._check_step_timeouts()
@@ -415,6 +439,9 @@ class PipelineAutoRouter:
         遍历 _step_dispatch_times，超时 ≥ _STEP_DEFAULT_TIMEOUT 则通知 PM。
         同一 Step 仅首次通知（_step_timeout_notified 防重复）。
         """
+        # ── R90 🅲: <=0 禁用守卫 ──
+        if not self._STEP_TIMEOUT_ENABLED:
+            return
         now = time.time()
         overdue_count = 0
 

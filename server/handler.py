@@ -2818,6 +2818,29 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     except Exception as e:
         logger.warning("R81 B2: Member invite failed: %s", e)
 
+    # ── R90 🅱️: 工作区创建失败通知 PM 收件箱 ──
+    pm_agent_id = getattr(config, "PIPELINE_PM_AGENT_ID", "")
+    if pm_agent_id and "❌" in create_result:
+        pm_inbox = f"_inbox:{pm_agent_id}"
+        try:
+            await _broadcast_to_channel(pm_inbox, {
+                "type": "broadcast",
+                "channel": pm_inbox,
+                "from_name": "系统",
+                "from_agent": SYSTEM_AGENT_ID,
+                "content": (
+                    f"⚠️ {round_name} 管线已启动但工作区创建失败。\n"
+                    f"create_result: {create_result}\n"
+                    f"AutoRouter 可能无法自动接力，请检查后手动启动。"
+                ),
+                "ts": time.time(),
+            })
+            logger.info(
+                "R90 🅱️: 已通知 PM 工作区创建失败 (%s)", round_name
+            )
+        except Exception as e:
+            logger.warning("R90 🅱️: PM 通知发送失败: %s", e)
+
     return (
         f"🚀 **{round_name} 管线已启动**\n"
         f"  Step: {start_step} → {target_role}\n"
