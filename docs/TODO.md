@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.65
+> **版本：** v2.66
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -14,19 +14,22 @@
 || F-3 | **P3 角色体系** — `workspace_admin` 角色在 ws-bridge 中缺失，当前降级为 P1/P2 限速。R81: workspace member self-management (join/leave/add/remove/list_members) | 🟡 P2 | R81 | 🟢 已完成 ✅ |
 | F-4 | **测试标签与前缀匹配冲突** — `[R{N}测试]` 在 `📢` 之前破坏 startswith | 🟢 P3 | R45 | 🟢 已完成 ✅ |
 | F-5 | **P3 工作室管理能力增强** — 增加管理工作室的权限/功能（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
-| F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
+|| F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
+|| F-24 | **`!close_workspace` 关闭通知未覆盖全部管线参与 bot** — 当前通知仅发往 `ws.members`，但 R97 后 workspace 成员≠管线参与 bot。`_cmd_close_workspace` 应额外从 PipelineContext 读取 step→agent_id 列表，给每位管线参与者发归档通知，不论是否在 workspace 成员中 | 🟡 P2 | **R98** | ⬜ 待启动 |
 | F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | ❌ 已取消 | — | — |
 | F-9 | **Web 端 Tab 页加载空白（服务器挂了）** — Web 端 Tab 页显示「加载中」，服务器服务异常 | 🔴 P0 | R71 | 🟢 已完成 ✅ |
 | F-22 | **`!step_complete` 变量作用域 bug** — `_cmd_step_complete` 中 `step_config` 未定义，`cannot access local variable`。R70 管线中 `!step_complete` 完全不可用。需增加 `step_config = _PIPELINE_CONFIG.get(round_name, {})` 后备逻辑 | 🔴 P0 | R71 | 🟢 已完成 ✅ |
 | F-12 | **PM 无法直接触发管线入口** — `!pipeline_start` 需 P3+ 权限，PM(member) 无法在 TG DM 直接触发，需经 code 块中转给管理员执行 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-13 | **`!pipeline_start` 创建的工作室没有开发成员** — 未传 `--members` 参数，工作室内只有执行者一人。导致 `_cmd_rollcall_next` 找 arch 角色时工作区无人匹配 → 点名+派活静默失败 | 🟡 P2 | R44 | 🟢 已完成 ✅ |
 | F-14 | **`task_store` 缺少 `get_tasks_by_context` 方法** — `!pipeline_status` 和 `!step_complete` 调用此方法报错 `module 'server.task_store' has no attribute 'get_tasks_by_context'`，阻断管线状态查询和 Step 完成流程 | 🟡 P2 | R47 | 🟢 已完成 ✅ |
-| F-23 | **新 Bot 入驻体验修复** — 3 个 P0 bug（ws_url 字段名、.env API key 不生效、register.py 协议错）| 🔴 P0 | **R96** | ⬜ 待启动 |
+|| F-23 | **新 Bot 入驻体验修复** — 3 个 P0 bug（ws_url 字段名、.env API key 不生效、register.py 协议错）| 🔴 P0 | **R96** | 🟢 已完成 ✅ |
 || F-16 | **Agent 角色数据与代码耦合，管线角色映射缺乏扩展性** — 当前 `PIPELINE_STEP_MAP` 硬编码了 arch/dev/review/qa/admin 五角色。`!pipeline_start` 从 `auth.get_users()` 按角色过滤 agent，但现有 agent 角色为默认 `member`，无法匹配管线角色。同时硬编码角色体系无法适应未来新任务——新任务可能需要 「researcher」「designer」等完全不同的角色。**正确方向：** 用 Agent Card（A2A 协议模式）让各 agent 自行声明能力/角色，服务端将角色映射持久化到运维数据层（非代码层），`!pipeline_start` 从持久化数据中按需拉取对应角色的 agent | 🟡 P2 | R63 | 🟢 已完成 ✅ |
 | F-21 | **Gateway mention_keyword 多触发词支持** — `gateway-plugin/__init__.py` 中 `mention_keyword` 为单字符串，各 bot 只能配置一个触发词（如 `小开`）。导致 `@arch` 角色名无法触发 arch bot。解决方案：`mention_keyword` 改为分号/逗号分割多值，`if any(kw in content for kw in self._mention_keyword.split(';'))`。各 bot 配 `mention_keyword: "小开;arch"` 等，角色名和 bot 名均可触发。R63 实战暴露 | 🟡 P2 | R64 | 🟢 已完成 ✅ |
 || F-15 | **`!workspace_reset` 不在命令列表中** — 部分命令文档提及但未实现，导致频道切换/恢复流程断裂 | 🟢 P3 | R69 | 🟢 已完成 ✅ |
 ||| F-17 | **管线状态不同步** — `!step_complete` 未执行时管线 state 停留在原地，即使 Step 工作已实质完成。R65 实现 git sync 自动检测 PipelineGitSync：watchdog 周期性 git fetch，4 级匹配规则推进状态机，ACK 超时不标 FAILED 改为等待标记，完善闭环保证 | 🟡 P2 | R65 | 🟢 已完成 ✅ |
-|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |\n|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | R57 | 🟢 已完成 ✅ |\n|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | R53 | 🟢 已完成 ✅ |
+|| F-18 | **去掉 Web 端 📊 进度 Tab** — `!pipeline_status` 已正常输出管线进度到工作室中，进度 Tab 成为多余功能。移除 `templates.py` 中进度 Tab 的渲染逻辑和对应 API 路由 | 🟢 P3 | R52 | 🟢 已完成 ✅ |
+|| F-19 | **`!pipeline_start` 系统消息展示成员角色名替代 agent ID** — 管线启动后 `_admin` 频道的系统消息中列出成员时使用 `01KTNJ2QQ...` 等原始 agent ID，对 Web 端观察者不直观且暴露隐私。应翻译为角色名（arch/dev/review/qa/admin）或 bot 名显示 | 🟢 P3 | R57 | 🟢 已完成 ✅ |
+|| F-20 | **`!pipeline_start` 缺少 `_broadcast_active_channel()` 调用** — R50 修复了 `!step_complete` 和 `!step_handoff` 的 MSG_SET_ACTIVE_CHANNEL 自动切换，但 `!pipeline_start` 的 `_cmd_pipeline_start()` 从未调用 `_broadcast_active_channel(ws_id)`。导致：创建工作室后各成员活跃频道未切换到新工作室 → 看不到点名通知和任务派发 → 管线静默停摆。**修复：** `_cmd_pipeline_start()` 中 workspace 创建后（L1293 附近）加 `await _broadcast_active_channel(ws_id)`，与 `_cmd_pipeline_activate()` (L1371) 保持一致。改动量 1 行 | 🔴 P0 | R53 | 🟢 已完成 ✅ |
 
 ### L. 代码层清理
 
@@ -104,7 +107,9 @@
 | M-4 | **写开源版 README.md** — 通用接入指南 | R42 | 🟢 已完成 |
 || M-5 | **添加开源标配文档** — LICENSE、CONTRIBUTING.md、CODE_OF_CONDUCT.md | R42 | 🟢 已完成 |
 || R40-A | **Web 端 GitHub OAuth 认证** — 引入 GitHub OAuth 2.0 Authorization Code 流程，与现有绑定码并行运行。支持身份映射表、session 持久化、7 天 cookie 无感登录 | R40 | 🟢 已完成 |
-||| **R63** | **多 Agent 协作基础设施 — timeout_tracker + Agent Card 角色映射 + ACK 状态机 + 退化开关。29/30 验收 (W-1 闭包清理)。合并部署 ws-bridge:r63** | R63 | 🟢 已完成 ✅ |\n||| **R56** | **通信层修复轮 — 方向 A _send_to_agent 回退广播（39ef407）+ 方向 B 诊断 + 方向 C SOP。审查通过（e505d9d）。合并部署 ws-bridge:r56** | R56 | 🟢 已完成 |\n||| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
+||| **R63** | **多 Agent 协作基础设施 — timeout_tracker + Agent Card 角色映射 + ACK 状态机 + 退化开关。29/30 验收 (W-1 闭包清理)。合并部署 ws-bridge:r63** | R63 | 🟢 已完成 ✅ |
+||| **R56** | **通信层修复轮 — 方向 A _send_to_agent 回退广播（39ef407）+ 方向 B 诊断 + 方向 C SOP。审查通过（e505d9d）。合并部署 ws-bridge:r56** | R56 | 🟢 已完成 |
+||| **R55** | **自动驾驶管线技术实现** — 方向 A~F 全覆盖（放开角色校验、退回命令、git 验证、状态增强、模式开关、减少回声），测试 30 项验收全绿。合并部署 ws-bridge:r55 | R55 | 🟢 已完成 |
 || F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | — | ❌ 已取消 |
 || **R95** | **!pipeline_stop 命令 — AutoRouter 停止管线调度。全链路 6 步通过。架构师 tech-plan → dev 实现 +92行 → review 🟢 → qa 31/31 🟢 → ops 合并 main 部署 ✅** | R95 | 🟢 已完成 ✅ |
 
@@ -126,7 +131,27 @@
 |:-:|:----|:----:|:-----|
 | 📖 A2A | **[A2A 协议调研报告](A2A-Protocols-Research-Report.md)** | 🟢 已完成 | 调研 Google A2A、MCP、FIPA 等 Agent 协议，分析对 ws-bridge 可借鉴点。下一轮需求文档从本报告规划 |
 | 📖 A2A-v2 | **ws-bridge A2A 适配方案** （从调研报告延伸） | ⬜ 待规划 | 基于调研结论，输出具体适配方案（Task 状态机、Agent Card、Part 容器等） |
-| 📖 ECC | **[ECC multi-plan/multi-execute](https://github.com/datahome73/ECC) — 候选方向** | ⬜ 待排期 | 三个可借鉴点：① **并行分析** — 多个 bot 同时出方案再交叉验证，减少串行返工；② **结构化 Plan 交接** — bot 输出标准 Plan 文档供下个 bot 解析执行，减少自然语言沟通偏差；③ **多模型审计** — 实现后下一个 bot review 代码（已有 reviewer 轮，可强化）。后续切 ws-bridge 开发时讨论可行性 |\n|\n|---\n|\n|## 四、Roadmap — 分阶段演进规划\n|\n|> 本 roadmap 为 ws-bridge 中长期演进方向，基于「先夯实基础设施 → 再叠加智能编排 → 最后接入专业能力」的分层策略。\n|\n|### Phase 1 — 稳定 Inbox（当前阶段）\n|\n|**目标**：inbox 作为 ws-bridge 的核心通信机制，稳定可用，无死角\n|\n|**关键工作项**：\n|- ✅ R75—R83 已完成 inbox 化改造的基础\n|- 🔲 确认 inbox 在各种边缘场景下的稳定性（并发投递、消息丢失、超时重试）\n|- 🔲 各角色 bot 都能可靠地投递和消费 inbox 消息\n|- 🔲 补全 inbox 相关的监测和调试手段\n|\n|**完成标准**：inbox 通信链路在持续运行中无未预期丢消息、无积压死锁\n|\n|### Phase 2 — 自动化管线（Phase 1 完成后启动）
+| 📖 ECC | **[ECC multi-plan/multi-execute](https://github.com/datahome73/ECC) — 候选方向** | ⬜ 待排期 | 三个可借鉴点：① **并行分析** — 多个 bot 同时出方案再交叉验证，减少串行返工；② **结构化 Plan 交接** — bot 输出标准 Plan 文档供下个 bot 解析执行，减少自然语言沟通偏差；③ **多模型审计** — 实现后下一个 bot review 代码（已有 reviewer 轮，可强化）。后续切 ws-bridge 开发时讨论可行性 |
+|
+|---
+|
+|## 四、Roadmap — 分阶段演进规划
+|
+|> 本 roadmap 为 ws-bridge 中长期演进方向，基于「先夯实基础设施 → 再叠加智能编排 → 最后接入专业能力」的分层策略。
+|
+|### Phase 1 — 稳定 Inbox（当前阶段）
+|
+|**目标**：inbox 作为 ws-bridge 的核心通信机制，稳定可用，无死角
+|
+|**关键工作项**：
+|- ✅ R75—R83 已完成 inbox 化改造的基础
+|- 🔲 确认 inbox 在各种边缘场景下的稳定性（并发投递、消息丢失、超时重试）
+|- 🔲 各角色 bot 都能可靠地投递和消费 inbox 消息
+|- 🔲 补全 inbox 相关的监测和调试手段
+|
+|**完成标准**：inbox 通信链路在持续运行中无未预期丢消息、无积压死锁
+|
+|### Phase 2 — 自动化管线（Phase 1 完成后启动）
 
 **目标**：在 inbox 基础上，任务消息自动化流转，无需人工转发
 
@@ -242,6 +267,7 @@ Phase 3 (Coder Agent)
 
 || 版本 | 日期 | 变更 |
 ||:---:|:----:|:----|
+||| v2.63 | 2026-07-12 | 🎯 **R97 完成 ✅** — AutoRouter 稳定化：PipelineContext 驱动，去 frontmatter 依赖 🔧。重构 3 文件 +330/-666 净删 -336 行。核心变化：`!pipeline_start` 零参数（无需 frontmatter/workspace）、AutoRouter 从 PipelineContext 读拓扑、角色映射实时查询 Agent Card、PM=Step1 执行者、全链 6 Step 机械组装。19/19 单元测试 ALL GREEN 🟢。合并部署 main `7830639`，ws-bridge:r97 镜像 |
 ||| v2.62 | 2026-07-11 | 📄 **R96 启动** — 新 bot 入驻体验修复：3 个 P0 bug。基于晓周实测反馈 |
 ||| v2.56 | 2026-07-10 | 🎯 **R90 完成 ✅** — AutoRouter 坑位修补 🅰️🅱️🅲。改 2 文件 +67 行。审查 5/5 🟢，测试 61/61 ALL GREEN 🟢。合并部署 main `6dbaad6`，ws-bridge:r90 镜像 |
 ||| v2.57 | 2026-07-10 | 🎯 **R91 完成 ✅** — 工作室阻塞修复：🅰️ `max_per_person` 1→3 可配置化（`MAX_ACTIVE_WORKSPACES` 环境变量），🅱️ 错误信息细化（重名/超限精确区分 + 操作建议）。改 2 文件 +19 行。审查 3/3 🟢，测试 31/31 ALL GREEN 🟢。合并部署 main → 推 dev |
@@ -255,11 +281,16 @@ Phase 3 (Coder Agent)
 ||| v2.55 | 2026-07-10 | 🎯 **R89 完成 ✅** — AutoRouter 消息完善与 Step 超时检测 🔧。`server/auto_router.py` 增强（+169/-30 行）：payload completion + step timeout detection。19 项验收 61/61 ALL GREEN 🟢。合并部署 main `4f9bac0`，ws-bridge:r89 镜像，8 agents 在线 |
 ||| v2.54 | 2026-07-10 | 🎯 **R88 完成 ✅** — Pipeline AutoRouter 独立服务部署。PM = Step 1, `!pipeline_start` 即 Step 1 完成信号，server 自动检测 `✅ 完成` 并派活下一棒。新增 `server/auto_router.py`（667 行），零 handler.py 修改。19 项验收 72/72 ALL GREEN 🟢。合并部署 main `1910a55` |
 ||:---:|:----:|:----|
-|| v2.61 | 2026-07-10 | 🛑 **R95 完成 ✅** — !pipeline_stop 命令：AutoRouter 停止调度。全链路6步通过。合并 main `36f6ed8`。|\\n||| v2.60 | 2026-07-10 | 📄 R94 入驻技能轮完结 + R95 启动。|\\n||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅**" — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
-||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |\n||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
+|| v2.61 | 2026-07-10 | 🛑 **R95 完成 ✅** — !pipeline_stop 命令：AutoRouter 停止调度。全链路6步通过。合并 main `36f6ed8`。|\
+||| v2.60 | 2026-07-10 | 📄 R94 入驻技能轮完结 + R95 启动。|\
+||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅**" — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
+||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |
+||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |
+||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
 ||| v2.47 | 2026-07-08 | 🎯 **R80 完成 ✅**
 || v2.39 | 2026-07-06 | 🎯 **R73 完成 ✅** — R72 认证体系修复 + 权限打通 + 全员迁移 + 文档清理。子命令分发权限拦截（P0），L2 权限分支，小爱 operations 角色。10/10 验收 ALL GREEN 🟢。合并部署 main `87ad5d4`，ws-bridge:r73 镜像。全员 6 bot 用正确字段格式重新注册（display_name/description/pipeline_roles/skills/trigger_keyword/capabilities dict） |
-||| v2.46 | 2026-07-07 | 🎯 **R79 完成 ✅** — 新虾注册流程完善：欢迎消息 + 审批通知 + 自动切频道 + 大厅广播 + scripts/ 清理。审查 🟢 通过。12/12 37/37 ALL GREEN 🟢。合并部署 main `63b2e0d`，ws-bridge:latest（r79）镜像 |\n||| | 2026-07-08 | ➕ **R79 follow-up** — 小谷 `_cmd_close_workspace` 归档通知：遍历成员通知归档上下文。合并部署 main `0475ede`，ws-bridge:latest |
+||| v2.46 | 2026-07-07 | 🎯 **R79 完成 ✅** — 新虾注册流程完善：欢迎消息 + 审批通知 + 自动切频道 + 大厅广播 + scripts/ 清理。审查 🟢 通过。12/12 37/37 ALL GREEN 🟢。合并部署 main `63b2e0d`，ws-bridge:latest（r79）镜像 |
+||| | 2026-07-08 | ➕ **R79 follow-up** — 小谷 `_cmd_close_workspace` 归档通知：遍历成员通知归档上下文。合并部署 main `0475ede`，ws-bridge:latest |
 ||| v2.45 | 2026-07-07 | 🎯 **R78 完成 ✅** — 全局变量迁移补完：角色映射 + ACK 状态统一管理 + 小谷守护进程。审查 🟢 通过，B-1 已修复。10/10 验收 38/38 ALL GREEN 🟢。合并部署 main `a1bd8e8`，ws-bridge:latest（r78）镜像 |
 ||| v2.44 | 2026-07-07 | 🎯 **R77 完成 ✅** — PipelineContext：统一管线上下文对象。PipelineContext 类 + 上下文注入 + 历史消息追溯。7/7 验收 ALL GREEN 🟢。合并部署 main `2df79c0`，ws-bridge:latest（r77）镜像 |
 ||| v2.43 | 2026-07-07 | 🎯 **R76 完成 ✅** — Inbox Tab + 时间切片归档：Web Inbox Tab 可视化 + message_store 时间切片查询 + 归档 IO 保护。10/10 验收 ALL GREEN 🟢。合并部署 main `7bfbcfe`，ws-bridge:latest（r76）镜像 |
@@ -269,7 +300,10 @@ Phase 3 (Coder Agent)
 ||| v2.38 | 2026-07-06 | 🎯 **R72 完成 ✅**
 ||| v2.37 | 2026-07-05 | 🎯 **R71 完成 ✅** — Web 端诊断修复（F-9: WS await + fetch 超时 + 轮询增量；F-22: step_config 后备逻辑）。回归验证 3/3 ✅，治理 3/3 ✅。基线 198674d |
 || v2.36 | 2026-07-05 | 🎯 **R70 完成 ✅** — 验证轮 + 全链路回归：6-Step 管线跑通，R69 功能验证 7/9 ✅。发现 4 bug：`!step_complete` 变量作用域 (🔴)、角色映射缺陷 (🟡)、MSG_SET_ACTIVE_CHANNEL 单播 (🟡)、点名 ACK 超时异常 (🟢)。F-9 诊断排 R71 Web 验证轮。关闭归档。基线 `bfbdc7e→6967545` |
-||| v2.35 | 2026-07-05 | 🎯 **R69 完成 ✅** — 收件箱上下文增强 + TODO 清理：step_outputs 扩展（title/summary/artifact_url）+ !step_complete --summary/-s --artifact-url/-u + _infer_artifact_url 自动推断 + _send_inbox_task 前序 Step 上下文注入 + payload 补齐 agent_id（L-5 ✅）+ !workspace_reset 命令（F-15 ✅）+ pipeline_status 结构展示。~47 行净增。合并部署 ws-bridge:r69 |\n||| v2.34 | 2026-07-05 | 🎯 **R68 完成 ✅** — Bot 私有收件箱通道：INBOX_CHANNEL_PREFIX 常量 + 工具函数 + 收件箱路由 + step_complete/handoff 收件箱派活。37/37 验收通过。合并部署 ws-bridge:r68 |\n||| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |\n|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
+||| v2.35 | 2026-07-05 | 🎯 **R69 完成 ✅** — 收件箱上下文增强 + TODO 清理：step_outputs 扩展（title/summary/artifact_url）+ !step_complete --summary/-s --artifact-url/-u + _infer_artifact_url 自动推断 + _send_inbox_task 前序 Step 上下文注入 + payload 补齐 agent_id（L-5 ✅）+ !workspace_reset 命令（F-15 ✅）+ pipeline_status 结构展示。~47 行净增。合并部署 ws-bridge:r69 |
+||| v2.34 | 2026-07-05 | 🎯 **R68 完成 ✅** — Bot 私有收件箱通道：INBOX_CHANNEL_PREFIX 常量 + 工具函数 + 收件箱路由 + step_complete/handoff 收件箱派活。37/37 验收通过。合并部署 ws-bridge:r68 |
+||| v2.33 | 2026-07-03 | 🎯 **R67 完成 ✅** — Agent Card 系统统一与角色映射持久化：深拷贝模式、CardFileWatcher 热加载（5s 轮询）、心跳协议（不广播）、离线标记（300s 超时）、set/unset/reload ac_mod 统一接口。15/15 验收通过。合并部署 main `01da56d` |
+|| v2.32 | 2026-07-03 | 🎯 **R66 完成 ✅** — 管线参数化完善：frontmatter 驱动 Step 链 + 产出上下文注入 + 6 处消费点统一 + B1~B4。测试 13/16 通过 0 阻塞。合并部署 main `bdda485` |
 || v2.28 | 2026-07-01 | 🎯 **R62 完成 ✅** — 管线参数化改造：_PIPELINE_CONFIG + frontmatter 解析 + config/state 分离 + 兼容守卫，12/12 验收通过，合并部署 ws-bridge:r62 `0294fdb` |
 || v2.27 | 2026-06-30 | 🎯 **R61 完成 ✅** — 纯验证轮次：F-19（_get_agent_display 角色名）+ F-20（_broadcast_active_channel 自动切活跃频道）在真实管线中实测验证通过。零代码修改。QA 大宏拍板跳过。工作室已关闭 |
 |||||| v2.26 | 2026-06-30 | 🎯 **R59 完成 ✅** — arch/dev 自动触发修复 + PM 自动兜底：方向B arch from_name 差异化 + code block 增强 + B3 dev 自动兜底超时 TG 通知。方向C pipeline_role_override 角色覆盖命令。审查🟢通过（7ec7cbf），3💡改进建议。测试 29/30 项通过。合并部署 ws-bridge:r59 `2e2cd22` |
