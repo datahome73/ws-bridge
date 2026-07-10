@@ -38,7 +38,7 @@ pipeline:
 
 # R98 WORK_PLAN — !close_workspace 归档通知增强 🔧
 
-> **状态：** 📋 需求已审核 | WORK_PLAN 初稿
+> **状态：** 📋 需求已审核通过 ✅ | WORK_PLAN 已审核通过 ✅
 > **需求文档:** https://raw.githubusercontent.com/datahome73/ws-bridge/refs/heads/main/docs/R98/R98-product-requirements.md
 > **基线:** R97 后 `main` latest (`e375714`)
 
