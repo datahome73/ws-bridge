@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.53
+> **版本：** v2.54
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -193,10 +193,10 @@ PM                                Server                              Bot
 - 管线状态可观测（当前在第几步、谁在干活、下一步谁接）
 
 **关键工作项**：
-- 🔲 **`_inbox:server` 中继实现** — server 端识别特殊通道 `_inbox:server`，实现前缀匹配转发 + 自动确认（Step 4）
-- 🔲 **Bot 端适配** — 各 bot 回复目标从 `_inbox:<PM_id>` 改为 `_inbox:server`
-- 🔲 定义 Pipeline Topology 配置格式（YAML 或 JSON DSL 描述 Step 链 + 依赖关系）
-- 🔲 实现 AutoRouter — inbox 消息根据类型/来源自动派发到下一环节
+- ✅ **`_inbox:server` 中继实现** — server 端识别特殊通道 `_inbox:server`，实现前缀匹配转发 + 自动确认（Step 4）（R87 ✅）
+- ✅ **Bot 端适配** — 各 bot 回复目标从 `_inbox:<PM_id>` 改为 `_inbox:server`（R87 ✅）
+- ✅ **定义 Pipeline Topology 配置格式** — YAML frontmatter `topology.chain` 定义 Step 链 + 依赖关系（R88 ✅）
+- ✅ **实现 AutoRouter** — 独立服务 `server/auto_router.py`，监听 PM 收件箱，检测 `✅ 完成` 后自动派发下一 Step（R88 ✅）
 - 🔲 引入结构化 Task Card（替代自然语言描述）作为 bot 间交接的标准化文档载体
 - 🔲 异常处理机制：超时触发、驳回回退、跳过步骤
 - 🔲 管线监控可视化（`!pipeline_status` 增强，展示整条链路的进度）
@@ -241,7 +241,7 @@ Phase 3 (Coder Agent)
 ||:---:|:----:|:----|
 || v2.52 | 2026-07-09 | 🗺️ **Roadmap 规划上线** — 新增 §四 Roadmap，定义三阶段演进：Phase 1（稳定 Inbox）、Phase 2（自动化管线）、Phase 3（Coder Agent 编码专精）。来源于 OpenCode 调研 + ECC 候选方向 + 编码环节专业化讨论 |
 ||:---:|:----:|:----|
-|| v2.53 | 2026-07-09 | 🎯 **Phase 2 架构设计上线** — 新增 `_inbox:server` 中继架构作为自动化管线基石。PM 仅需 1 条派活消息，bot 统一回复到 `_inbox:server`，server 按前缀匹配转发关键消息（ACK ✅ / ✅ 完成）并自动发 Step 4 确认。替换原 Phase 2 核心设计问题列表，新增通信架构图、前缀规则、收益对比表。源自 R86 后 inbox 通信模式升级讨论 |
+||| v2.54 | 2026-07-10 | 🎯 **R88 完成 ✅** — Pipeline AutoRouter 独立服务部署。PM = Step 1, `!pipeline_start` 即 Step 1 完成信号，server 自动检测 `✅ 完成` 并派活下一棒。新增 `server/auto_router.py`（667 行），零 handler.py 修改。19 项验收 72/72 ALL GREEN 🟢。合并部署 main `1910a55` |
 ||:---:|:----:|:----|
 ||| v2.51 | 2026-07-08 | 🎯 **R84 完成 ✅** — Inbox 消息处理协议文档化：inbox-message-protocol.md 协议文档 + ws_client.py 注释 + _cmd_step_complete sender_ch 使用发送者活跃工作室修复。小谷代码合并部署 main `75b576a`，ws-bridge:latest 镜像 |
 ||| v2.50 | 2026-07-08 | 🎯 **R83 完成 ✅** — Web 端 Inbox 化改造：Tab 重设计 + 收件箱增强 + 绑定码清理。23/23 ALL GREEN 🟢。审查 🟢 通过，0阻塞。合并部署 main `8e2571a`，ws-bridge:r83 镜像。旧数据归档 messages.db→.r82-backup |\n||| v2.49 | 2026-07-08 | 🎯 **R82 完成 ✅** — Inbox-Only 架构重构：删除活跃频道概念、MSG_SET_ACTIVE_CHANNEL 广播、BROADCAST_ADMINS。净删 ~480 行。审查 🟢 通过 B-1/B-2/W-1 已修复。44/45 测试 🟢 通过。合并部署 main `cd5aeac`+`736ae55`，ws-bridge:r82 镜像 |\n||| v2.48 | 2026-07-08 | 🎯 **R81 完成 ✅** — Workspace member self-management: 5 commands (join/leave/add/remove/list_members) + auto-join + inbox invite. fix: _ADMIN_COMMANDS order (NameError). 审查 6/6 ✅ 测试 14/14 49/49 🟢. 合并部署 main `521c337`，ws-bridge:r81 镜像 |
