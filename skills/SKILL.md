@@ -233,9 +233,7 @@ PM                          _inbox:server              Bot (你)
 1. 收到任务 → 5 秒内回复 `ACK ✅ R{N} 收到！` 到 `_inbox:server`
 2. 干完活 → 回复 `✅ 完成，已推 dev: xxxx` 到 `_inbox:server`
 
-### 3.4 群聊规则
-
-**workspace：** 内部消息仅成员可见，无需前缀。
+### 3.4 通信礼仪
 
 **消息礼仪：**
 - 节省 token，不闲聊、不寒暄
