@@ -82,13 +82,9 @@ def _ensure_pipeline_manager() -> PipelineContextManager:
         _pipeline_manager = PipelineContextManager(data_dir=config.DATA_DIR)
     return _pipeline_manager
 
-# ── R63 Phase 2-4: Feature toggle switches (env overridable) ─────
-_ENABLE_R63_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
-_ENABLE_R63_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
-_ENABLE_R63_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
-_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
-_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
-# ── R63 Phase 5: End ──
+
+_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...]
+_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info
 
 # ── R65: Git pipeline sync state ───────────────────────────────
 _GIT_SYNC_TASK: asyncio.Task | None = None
@@ -343,7 +339,6 @@ def _build_admin_notification(agent_id: str, display_name: str,
         f"显示名称: {display_name}\n"
         f"角色: {roles_str}\n\n"
         f"操作:\n"
-        f"  !approve_pairing {agent_id}   批准加入\n"
         f"  !agent_card set {agent_id} roles...   修改角色"
     )
 
@@ -480,22 +475,6 @@ async def _flush_offline_push(agent_id: str) -> None:
         logger.info("Offline push: %d msgs delivered to %s after 3s", len(pending), agent_id[:12])
     elif pending:
         logger.info("Offline push: %d msgs for %s expired (still offline after 3s)", len(pending), agent_id[:12])
-
-
-async def handle_approve(data: dict) -> dict:
-    """Admin approves a pairing code."""
-    code = data.get("code", "").strip()
-    result = auth.approve(code, data.get("role", "member"))
-    if result["type"] == "approve_ok":
-        persistence.save_pairing_codes(config.DATA_DIR)
-        persistence.save_approved_users(config.DATA_DIR)
-        # R36 B-4: Admin approval confirmation notification (persisted for web viewer)
-        _approved_id = result["agent_id"]
-        _approved_name = auth.get_users().get(_approved_id, {}).get("name", _approved_id[:12])
-        write_chat_log("系统",
-            f"[核准] 管理员已核准代理 {_approved_name}（{_approved_id[:16]}）角色={data.get('role', 'member')}")
-        logger.info("Approved agent %s (role=%s)", _approved_id[:20], data.get("role", "member"))
-    return result
 
 
 # ── R35: Admin command infrastructure ────────────────────────────
@@ -872,20 +851,6 @@ async def _cmd_agent_status(sender_id: str, params: dict) -> str:
             f"  活跃频道={channel}\n"
             f"  所属工作室={ws_names}\n"
             f"  在线={online}")
-
-
-async def _cmd_approve_pairing(sender_id: str, params: dict) -> str:
-    """Approve a pairing code. P4 only."""
-    code = params.get("_positional", [None])[0]
-    if not code:
-        return "❌ 用法: !approve_pairing <code> [--role <role>]"
-    role = params.get("role", "member")
-    result = auth.approve(code, role)
-    if result["type"] == "approve_ok":
-        persistence.save_pairing_codes(config.DATA_DIR)
-        persistence.save_approved_users(config.DATA_DIR)
-        return f"✅ 配对码 {code} 已确认，{result['agent_id'][:12]} 已获得 {role} 角色。"
-    return f"❌ {result.get('error', '审批失败')}"
 
 
 async def _cmd_approve_ws_admin(sender_id: str, params: dict) -> str:
@@ -1816,7 +1781,6 @@ async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
                         pass
 
     # 5. 启动下一 Step timeout_tracker 倒计时
-    if _ENABLE_R63_TIMEOUT:
         timeout_min = step_config.get(next_step, {}).get("timeout_minutes", 20)
         timeout_tracker.start_timer(round_name, next_step, timeout_min)
 
@@ -1860,9 +1824,8 @@ async def _watchdog_scan() -> None:
         ws_id = pstate.get("ws_id", "")
 
         # ── R63 Phase 2: Use timeout_tracker if enabled ──
-        if _ENABLE_R63_TIMEOUT:
-            if not timeout_tracker.is_expired(round_name, step_name):
-                continue  # Not yet expired, skip
+        if not timeout_tracker.is_expired(round_name, step_name):
+            continue  # Not yet expired, skip
 
             # Check dedup — only alert if not already notified
             timer_info = timeout_tracker.get_timer_info(round_name, step_name)
@@ -2098,8 +2061,6 @@ def _update_step_ack_state(sender_id: str, content: str) -> None:
         sender_id: Agent ID who sent the message.
         content: Message content (checked for ack keywords).
     """
-    if not _ENABLE_R63_ACK:
-        return
 
     ack_keywords = ["收到", "好的", "在", "到", "接", "OK", "ok", "开始", "done"]
     is_ack = any(kw in content for kw in ack_keywords)
@@ -3532,26 +3493,22 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     if _clear_watchdog_alert(round_name, step_name):
         await _send_clear_alert(round_name, step_name, output_ref)
 
-    # ── R63 Phase 2: Step-complete → clear old timer, start next step timer ──
-    if _ENABLE_R63_TIMEOUT:
-        timeout_tracker.clear_timer(round_name)
-        _step_timeout_mins = step_config.get(next_step, {}).get("timeout_minutes",
-            int(step_config.get(next_step, {}).get("timeout_hours", 6) * 60))
-        timeout_tracker.start_timer(round_name, next_step, int(_step_timeout_mins))
-    # ── R63 Phase 2: End ──
+    # ── Step-complete: clear old timer, start next step timer ──
+    timeout_tracker.clear_timer(round_name)
+    _step_timeout_mins = step_config.get(next_step, {}).get("timeout_minutes",
+        int(step_config.get(next_step, {}).get("timeout_hours", 6) * 60))
+    timeout_tracker.start_timer(round_name, next_step, int(_step_timeout_mins))
 
-    # ── R63 Phase 4: Start ACK state machine for next step assignment ──
-    if _ENABLE_R63_ACK:
-        ack_key = f"{round_name}/{next_step}"
-        _step_ack_states[ack_key] = {
-            "state": "SENT",
-            "agent_id": primary_agent if 'primary_agent' in dir() and primary_agents else "",
-            "sent_at": time.time(),
-            "deadline": time.time() + 30,
-            "delivery_sent": 0,
-        }
-        asyncio.create_task(_ack_timeout_task(ack_key))
-    # ── R63 Phase 4: End ──
+    # ── Start ACK state machine for next step assignment ──
+    ack_key = f"{round_name}/{next_step}"
+    _step_ack_states[ack_key] = {
+        "state": "SENT",
+        "agent_id": primary_agent if 'primary_agent' in dir() and primary_agents else "",
+        "sent_at": time.time(),
+        "deadline": time.time() + 30,
+        "delivery_sent": 0,
+    }
+    asyncio.create_task(_ack_timeout_task(ack_key))
 
     # ── R53 D: Enhanced return value with ACK confirm ──
     # ── R55 F: Use targeted handoff result ──
@@ -4351,12 +4308,11 @@ async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
                     task_state = "🔄"  # R55 B: rejected, needs rework
 
             current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
-            # ── R63 Phase 2: Countdown display on current step ──
-            if current and _ENABLE_R63_TIMEOUT:
+            # ── Countdown display on current step ──
+            if current:
                 remaining_str = timeout_tracker.format_remaining(round_name, step_key)
                 current += f" ({remaining_str})"
-            # ── R63 Phase 2: End countdown ──
-            # ── R63 Phase 4: ACK state display on current step ──
+            # ── ACK state display on current step ──
             if current:
                 ack_status = _format_ack_status(f"{round_name}/{step_key}")
                 if ack_status:
@@ -4737,10 +4693,6 @@ _ADMIN_COMMANDS: dict[str, dict] = {
     "agent_status": {
         "handler": _cmd_agent_status, "min_role": 3, "workspace_scope": True,
         "usage": "!agent_status <agent_id>",
-    },
-    "approve_pairing": {
-        "handler": _cmd_approve_pairing, "min_role": 4, "workspace_scope": False,
-        "usage": "!approve_pairing <code> [--role <role>]",
     },
     "approve_ws_admin": {
         "handler": _cmd_approve_ws_admin, "min_role": 4, "workspace_scope": False,
@@ -7035,46 +6987,6 @@ async def handler(ws):
                         pass
                 await _send(ws, {"type": "ack", "message": f"✅ 已拒绝 {target_name or target_id[:12]} 的管理员申请"})
                 logger.info("Admin request rejected: %s for '%s' by %s, reason: %s", target_id[:12], ws_id, agent_id[:12], reject_reason)
-
-            elif msg_type == p.MSG_REGISTER_AGENT and agent_id:
-                # DEPRECATED — R72 新体系使用 register 协议，旧 R23 路径保留不动
-                # 仅 admin 可执行（R23 遗留路径）
-                # 通过 _approved_users 注册
-                users = auth.get_users()
-                role = users.get(agent_id, {}).get("role", "member")
-                if role != "admin":
-                    await _send(ws, {"type": "error", "error": "Permission denied: only admin can register agents"})
-                    continue
-                target_id = msg.get("target_agent_id", "").strip()
-                if not target_id:
-                    await _send(ws, {"type": "error", "error": "Missing target_agent_id"})
-                    continue
-                # Approve agent via persistence (not auth — auth reads from persistence)
-                users[target_id] = {"name": target_id, "role": "member"}
-                persistence.set_approved_users(users)
-                persistence.save_approved_users(config.DATA_DIR)
-                # Move to lobby + clean registration channel
-                # R82: removed set_agent_channel
-                # Notify if online
-                for conn in list(_connections.get(target_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(json.dumps({
-                                "type": p.MSG_REGISTRATION_CONFIRMED,
-                                p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
-                            }))
-                        elif hasattr(conn, "send"):
-                            await conn.send(json.dumps({
-                                "type": p.MSG_REGISTRATION_CONFIRMED,
-                                p.FIELD_ACTIVE_CHANNEL: p.LOBBY,
-                            }))
-                    except Exception:
-                        pass
-                # R36 B-3: Welcome message to newly registered agent (纯文本, write_chat_log)
-                _reg_name = users.get(target_id, {}).get("name", target_id[:12])
-                write_chat_log("系统", f"[注册] 注册成功 — 欢迎 {_reg_name}（使用 @点名 或 📋 等前缀与队友沟通）")
-                await _send(ws, {"type": "ok", "message": f"Agent {target_id[:20]} registered"})
-                logger.info("[REG] Agent %s registered by %s", target_id[:20], agent_id[:20])
 
             elif msg_type == p.MSG_MANAGE_MEMBER and agent_id:
                 # Workspace admin can add/remove members in their workspace

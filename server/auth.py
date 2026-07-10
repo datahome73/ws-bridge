@@ -1,71 +1,13 @@
-"""Pairing code generation and approval logic."""
+"""Agent authentication and permission checking."""
 import hashlib
 import os
 import secrets
-import string
-import time
 
 from . import persistence
 
-PAIRING_CODE_TTL = 300  # 5 minutes
-
-
-def _code_expired(entry: dict) -> bool:
-    """Check if a pairing code entry has expired."""
-    created = entry.get("created_at", 0)
-    return time.time() - created > PAIRING_CODE_TTL
-
-
-def generate_code() -> str:
-    chars = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(chars) for _ in range(8))
-
-
-def create_pairing_code(agent_id: str, app_id: str, name: str, code: str) -> None:
-    codes = persistence.get_pairing_codes()
-    codes[code] = {
-        "agent_id": agent_id,
-        "app_id": app_id,
-        "name": name,
-        "created_at": time.time(),
-    }
-    persistence.set_pairing_codes(codes)
-
-
-def approve(code: str, role: str = "member") -> dict:
-    codes = persistence.get_pairing_codes()
-    if code not in codes:
-        return {"type": "approve_error", "error": "Code not found or expired"}
-
-    entry = codes[code]
-    if _code_expired(entry):
-        del codes[code]
-        persistence.set_pairing_codes(codes)
-        return {"type": "approve_error", "error": "Code expired"}
-
-    agent_id = entry["agent_id"]
-    users = persistence.get_approved_users()
-    users[agent_id] = {"name": entry.get("name", agent_id), "role": role}
-    persistence.set_approved_users(users)
-    # ── R68: Register inbox channel for approved agent ──
-    persistence.set_agent_channel(agent_id, persistence.get_inbox_channel(agent_id))
-    del codes[code]
-    persistence.set_pairing_codes(codes)
-    return {"type": "approve_ok", "agent_id": agent_id}
-
-
-def cleanup_expired_codes() -> int:
-    """Remove expired pairing codes. Returns count of removed codes."""
-    codes = persistence.get_pairing_codes()
-    expired = [code for code, entry in codes.items() if _code_expired(entry)]
-    for code in expired:
-        del codes[code]
-    if expired:
-        persistence.set_pairing_codes(codes)
-    return len(expired)
-
 
 def is_approved(agent_id: str) -> bool:
+    """Check if agent is approved."""
     # R73: Check approved users first
     if agent_id in persistence.get_approved_users():
         return True
@@ -76,18 +18,6 @@ def is_approved(agent_id: str) -> bool:
 
 def get_users() -> dict:
     return persistence.get_approved_users()
-
-
-# ── R6: Role Level System ──────────────────────────────────────────────
-
-
-def role_level(agent_id: str) -> int:
-    """Return role level: 4=global_admin, 3=workspace_admin, 2=member, 1=observer."""
-    users = get_users()
-    user = users.get(agent_id, {})
-    if user.get("role") == "admin":
-        return 4
-    return 2  # All authenticated agents default to L2 member
 
 
 def is_workspace_admin(ws_id: str, agent_id: str) -> bool:

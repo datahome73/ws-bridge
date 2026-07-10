@@ -7,7 +7,6 @@ import threading
 import os
 from pathlib import Path
 
-_pairing_codes: dict = {}
 _approved_users: dict = {}
 _web_sessions: dict = {}
 
@@ -30,16 +29,6 @@ def _save_json_atomic(path: Path, data: dict) -> None:
     tmp.rename(path)
 
 
-def load_pairing_codes(data_dir: Path) -> None:
-    global _pairing_codes
-    _pairing_codes = _load_json(data_dir / "_pairing_codes.json")
-
-
-def save_pairing_codes(data_dir: Path) -> None:
-    with _lock:
-        _save_json_atomic(data_dir / "_pairing_codes.json", _pairing_codes)
-
-
 def load_approved_users(data_dir: Path) -> None:
     global _approved_users
     _approved_users = _load_json(data_dir / "_approved_users.json")
@@ -48,17 +37,6 @@ def load_approved_users(data_dir: Path) -> None:
 def save_approved_users(data_dir: Path) -> None:
     with _lock:
         _save_json_atomic(data_dir / "_approved_users.json", _approved_users)
-
-
-def get_pairing_codes() -> dict:
-    with _lock:
-        return dict(_pairing_codes)
-
-
-def set_pairing_codes(codes: dict) -> None:
-    global _pairing_codes
-    with _lock:
-        _pairing_codes = dict(codes)
 
 
 def get_approved_users() -> dict:
