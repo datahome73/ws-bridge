@@ -736,15 +736,25 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
         logger.warning("R76: Archive state write failed (non-fatal): %s", e)
 
     # ── R79+: Notify all workspace members that the round is over ──
+    # ── R98: 合并 ws.members + PipelineContext 参与者 ──
     try:
         _round_name = ws.name.split('-')[0] if '-' in ws.name else ws.name
         _end_msg = (
             f"📋 {_round_name} 轮的开发工作已经结束，更新记忆，话题归档。\n\n"
             f"工作室「{ws.name}」已关闭。下一轮开发将另启新工作室。"
         )
-        for _member_id in list(ws.members):
-            if _member_id == sender_id:
-                continue
+
+        # R98: 构建通知目标集合（member + pipeline 参与者，去重）
+        _notify_ids = set(ws.members)
+        _mgr = _ensure_pipeline_manager()
+        _ctx = _mgr.get_context(_round_name)
+        if _ctx and isinstance(_ctx, dict):
+            for _step in _ctx.get("steps", {}).values():
+                if isinstance(_step, dict) and _step.get("agent_id"):
+                    _notify_ids.add(_step["agent_id"])
+        _notify_ids.discard(sender_id)
+
+        for _member_id in list(_notify_ids):
             _inbox_ch = f"_inbox:{_member_id}"
             write_chat_log("系统", _end_msg, channel=_inbox_ch)
             ms.save_message(
@@ -766,9 +776,9 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
                         await _conn.send(_payload)
                 except Exception:
                     pass
-        _member_count = len(ws.members) - (1 if sender_id in ws.members else 0)
+        _member_count = len(_notify_ids)
         if _member_count > 0:
-            logger.info("Round-end notifications sent to %d member(s) for %s",
+            logger.info("Round-end notifications sent to %d recipient(s) for %s",
                         _member_count, _round_name)
     except Exception as e:
         logger.warning("Round-end notification failed (non-fatal): %s", e)
