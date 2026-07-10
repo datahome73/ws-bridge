@@ -196,6 +196,7 @@ class PipelineAutoRouter:
         channel = msg.get("channel", "")
         content = (msg.get("content") or "").strip()
         msg_id = msg.get("id", "")
+        logger.debug("[AR] 收到消息: channel=%s, content=%.60s", channel, content)
 
         # ── 去重（B3/B10） ──
         if self._mark_seen(msg_id):
