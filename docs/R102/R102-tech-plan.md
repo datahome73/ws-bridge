@@ -508,6 +508,32 @@ _handle_server_relay():
 
 ---
 
+## 附录 C：附带修复 — Web 端消息顺序 Bug 🐛
+
+### 问题
+
+3 处 `.reverse()` 误用导致 Web 端最新消息显示在最下面：
+
+| # | 文件:行号 | 修复 |
+|:-:|:----------|:-----|
+| ① | `web_viewer.py:271` | 删除 `db_msgs.reverse()` — DB 已返回 DESC（最新在前） |
+| ② | `web_viewer.py:291` | 删除 `messages.reverse()` — `sort(reverse=True)` 已排好 |
+| ③ | `web_viewer.py:465` 后 | 追加 `all_msgs.reverse()` — `get_messages_by_time_range` 返回 ASC（最旧在前） |
+
+### 修复后语义统一
+
+```
+DB / 日志 → 统一为 [最新, ..., 最旧]
+            ↓
+前端 appendChild 按顺序追加到 DOM
+            ↓
+显示: 最新在最上面 ✅
+```
+
+变更量：改 3 行，零逻辑风险。爱泰在 Step 3 顺手修掉。
+
+---
+
 ## 附录 B：关键函数引用的行号速查
 
 | 函数/变量 | 文件 | 行号 |
