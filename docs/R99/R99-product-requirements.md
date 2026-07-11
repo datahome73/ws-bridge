@@ -28,9 +28,73 @@
 
 ---
 
-## 1.3 通信流程总览
+## 1.3 通信架构与消息流转
 
-下图展示从注册到全权限的完整通信链路和各等级的行为边界。
+### 1.3.1 消息传递架构
+
+下图展示一条消息从 **发送端 Bot** 出发，经过 **ws-bridge 服务器中转**，抵达 **接收端 Bot** 的完整路径。每个位置的定义见下方说明。
+
+```mermaid
+sequenceDiagram
+    participant Sender as 🤖 发送端 Bot
+    participant Server as 🖥️ ws-bridge Server (中转)
+    participant API_KEY as 📁 _api_key 文件
+    participant Receiver as 🤖 接收端 Bot
+
+    Note over Sender,Receiver: ── 消息发送完整链路（9 个位置）──
+
+    Sender->>Server: ① 发出消息 (channel= _inbox:xxx)
+
+    Server->>Server: ② 接收消息<br/>提取 sender_id / channel / content
+
+    Server->>Server: ③ Channel 识别<br/>是 _inbox: 前缀？
+
+    alt _inbox: 前缀
+        Server->>Server: ④ 目标判断<br/>_inbox:server 还是 _inbox:<bot_id>？
+
+        alt _inbox:server ✅ AUTO 放行
+            Server->>Server: ⑤ 注册 / ACK / ✅完成<br/>等流程消息 → 全部放行
+        else _inbox:<bot_id>
+            Server->>API_KEY: ⑥ 查 sender level<br/>根据 sender_id 读取 level 字段
+            API_KEY-->>Server: level=N
+
+            Note over Server: ⭐ ⑦ 安全检查 ⭐<br/>level >= 4 才允许发往 <bot_id>
+
+            alt level >= 4 ✅
+                Server->>Server: 允许 → 继续转发
+            else level < 4 ❌
+                Server-->>Sender: ❌ 无权限 (拒绝)
+                Note over Sender: 结束 → 不继续
+            end
+        end
+
+        Server->>Receiver: ⑧ 路由转发<br/>投递到目标 bot 的 inbox
+
+        Receiver->>Receiver: ⑨ 收到消息
+    else 其他 channel
+        Server->>Server: 非 inbox 消息<br/>走其他处理逻辑
+    end
+```
+
+**位置编号定义：**
+
+| 位置 | 名称 | 说明 |
+|:----:|:-----|:------|
+| ① | **发送端** | Bot 发出消息，指定 `channel=_inbox:xxx` |
+| ② | **接收解析** | ws-bridge 收到消息，提取 `sender_id`、`channel`、`content` |
+| ③ | **Channel 识别** | 判断是否是 `_inbox:` 前缀 |
+| ④ | **目标判断** | 判断目标类型：`server` 还是其他 bot ID |
+| ⑤ | **AUTO 放行** | `_inbox:server` 全部放行（注册/ACK/完成等流程消息） |
+| ⑥ | **查 level** | 从 `_api_key` 文件按 `sender_id` 读取 `level` 字段 |
+| ⑦ ⭐ | **安全检查** | 核心检查点：`level >= 4` 才允许发往 `<bot_id>`，否则拒绝 |
+| ⑧ | **路由转发** | 通过 WebSocket 投递到目标 bot |
+| ⑨ | **接收端** | 目标 bot 从自己的 inbox 收到消息 |
+
+> **说明：** 安全检查仅影响 **发送者主动发消息**。L3 能收到发给自己的消息（那是⑧路由过去的，不是 L3 主动发的），但不能通过位置①发出消息给其他 bot。
+
+### 1.3.2 全生命周期流程
+
+下图展示一个 bot 从注册到全权限的完整演进过程。
 
 ```mermaid
 sequenceDiagram
@@ -55,19 +119,19 @@ sequenceDiagram
 
     Note over Bot_L1,Admin: ── ③ L3 收消息（允许）──
     Bot_L4->>Server: 发消息 → _inbox:L3_Bot
-    Server->>Server: 检查发送者 level=4 ✅ 放行
-    Server->>Target: 转发消息
-    Note over Target: L3 收到 ✓
+    Server->>Server: ⑦ 检查发送者 level=4 ✅ 放行
+    Server->>Target: ⑧ 转发消息
+    Note over Target: ⑨ L3 收到 ✓
 
     Note over Bot_L1,Admin: ── ④ L3 发消息（拒绝）──
     Bot_L3->>Server: 发消息 → _inbox:L4_Bot
-    Server->>Server: 检查发送者 level=3 ❌ 拒绝
+    Server->>Server: ⑦ 检查发送者 level=3 ❌ 拒绝
     Server-->>Bot_L3: ❌ 无权限
 
     Note over Bot_L1,Admin: ── ⑤ L4 发消息（允许）──
     Bot_L4->>Server: 发消息 → _inbox:Target_Bot
-    Server->>Server: 检查发送者 level=4 ✅ 放行
-    Server->>Target: 转发消息
+    Server->>Server: ⑦ 检查发送者 level=4 ✅ 放行
+    Server->>Target: ⑧ 转发消息
 
     Note over Bot_L1,Admin: ── ⑥ 运维兜底 L3 → L4 ──
     Admin->>Server: 手动改 _api_key level=4
