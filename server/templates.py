@@ -629,7 +629,7 @@ async function init() {
   let offlineSince = {};
   async function pollStatus() {
     try {
-      const resp = await fetch('/api/status');
+      const resp = await fetch('/api/bot_status');
       const data = await resp.json();
       const bar = document.getElementById('status-bar');
       const now = Date.now();
