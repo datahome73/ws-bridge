@@ -27,6 +27,7 @@ from . import task_store as ts
 from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
 from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
+from .commands.pipeline import _refresh_role_agent_map
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
