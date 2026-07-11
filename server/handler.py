@@ -286,6 +286,7 @@ async def handle_register(ws, msg: dict) -> str | None:
         "created_at": time.time(),
         "expires_at": None,
         "status": "active",
+        "level": 2,  # ── R99: 新注册默认 L2 ──
     }
     persistence.set_api_keys(keys)
     persistence.save_api_keys(config.DATA_DIR)
@@ -2684,7 +2685,7 @@ async def _send_inbox_task(
     output_ref: str,
     workspace_id: str,
     pm_name: str,
-    pm_agent_id: str = "system",  # ← R69 B1
+    pm_agent_id: str = SYSTEM_AGENT_ID,  # ← R69 B1 / R99: 常量统一
 ) -> None:
     """Send full task to target agent's inbox + lightweight workspace notification."""
     inbox_ch = persistence.get_inbox_channel(target_agent_id)
@@ -2736,7 +2737,7 @@ async def _send_inbox_task(
     write_chat_log(pm_name, inbox_msg, channel=inbox_ch)
     ms.save_message(
         msg_id=str(uuid.uuid4()), msg_type="broadcast",
-        from_agent="system", from_name=pm_name,
+        from_agent=SYSTEM_AGENT_ID, from_name=pm_name,
         content=inbox_msg, ts=time.time(),
         data_dir=config.DATA_DIR, channel=inbox_ch,
     )
@@ -6074,8 +6075,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统(中继)",
-                    "from_agent": "system",
+                    "from_name": "系统",
+                    "from_agent": SYSTEM_AGENT_ID,
                     "content": f"📬 {sender_name} 已接活:\n{content}",
                     "ts": time.time(),
                 },
@@ -6092,8 +6093,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统(中继)",
-                    "from_agent": "system",
+                    "from_name": "系统",
+                    "from_agent": SYSTEM_AGENT_ID,
                     "content": f"✅ {sender_name} 任务完成:\n{content}",
                     "ts": time.time(),
                 },
@@ -6104,8 +6105,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
-                "from_name": "系统(中继)",
-                "from_agent": "system",
+                "from_name": "系统",
+                "from_agent": SYSTEM_AGENT_ID,
                 "content": "✅ 确认，已收到你的完成通知。本轮任务完成。",
                 "ts": time.time(),
             },
@@ -6162,6 +6163,22 @@ async def handler(ws):
                 if await _handle_server_relay(ws, agent_id, msg):
                     continue
                 # ════════════════════════════════════════
+                # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
+                _channel = msg.get("channel", "")
+                if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != SERVER_INBOX_CHANNEL:
+                    _sender_level = auth.get_level(agent_id)
+                    if _sender_level < 4:
+                        await _send(ws, {
+                            "type": "error",
+                            "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息。请提交 Agent Card 或联系管理员提升等级。",
+                        })
+                        logger.info(
+                            "[R99] 拒绝: %s (L%d) 试图发消息到 %s",
+                            agent_id[:12], _sender_level, _channel,
+                        )
+                        continue
+                # ════════════════════════════════════════════════════
+
                 await handle_broadcast(ws, agent_id, msg)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增

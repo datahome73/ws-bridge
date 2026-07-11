@@ -380,6 +380,20 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
     _cards[agent_id] = card
     save_cards()
 
+    # ── R99: Agent Card 提交成功 → L2→L3 自动晋升 ──
+    try:
+        from . import auth as _auth_mod
+        current_level = _auth_mod.get_level(agent_id)
+        if current_level == 2:
+            _auth_mod.set_level(agent_id, 3)
+            logger.info(
+                "[R99] 自动晋升: %s L2→L3 (Agent Card 提交)",
+                agent_id[:20],
+            )
+    except Exception:
+        logger.warning("[R99] 自动晋升失败 (非致命): %s", agent_id[:20])
+    # ──────────────────────────────────────────────
+
     # Update _ROLE_AGENT_MAP from handler for role-based routing
     if pipeline_roles:
         try:
