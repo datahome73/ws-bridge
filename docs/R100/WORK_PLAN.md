@@ -9,14 +9,14 @@ pipeline:
     chain:
       - step: step2
         role: architect
-        title: 结构设计
+        title: 架构设计方案
         context:
           requirements_url: "${pipeline.requirements_url}"
       - step: step3
         role: developer
         title: 编码拆分
         context:
-          requirements_url: "${pipeline.requirements_url}"
+          tech_plan_url: "docs/{round}/{round}-tech-plan.md"
       - step: step4
         role: reviewer
         title: 代码审查
@@ -36,7 +36,7 @@ pipeline:
   steps:
     step2:
       role: architect
-      title: 结构设计
+      title: 架构设计方案
     step3:
       role: developer
       title: 编码拆分
@@ -54,10 +54,16 @@ pipeline:
     members:
       architect:
         mention_keyword: "architect;架构师"
-        rules: "产出结构设计方案（8 文件拆分路径 + 47 命令映射表 + 依赖关系）"
+        rules: |
+          基于 R100 需求文档 + server/README.md 架构全景，
+          输出独立架构设计方案（R100-tech-plan.md），
+          确定 8 个新文件定位、依赖关系、核心/插件边界。
       developer:
         mention_keyword: "developer;开发"
-        rules: "6 步编码执行：state.py → command_utils.py → commands/ → main.py → __main__.py 更新 → 验证"
+        rules: |
+          按架构方案执行 6 步编码拆分：
+          state.py → command_utils.py → commands/ → main.py → __main__.py 更新 → 验证。
+          每步提交、可回退。
       reviewer:
         mention_keyword: "reviewer;审查"
         rules: "审查拆分质量（核心/插件分层、无循环导入、inbox 通路保留）"
@@ -71,8 +77,8 @@ pipeline:
 
 # R100 工作计划 — 服务端核心重构：handler.py 拆分 🏗️
 
-> **版本：** v1.0
-> **状态：** 📝 初稿
+> **版本：** v1.1
+> **状态：** 📝 定稿
 > **负责人：** 🧐 PM
 > **前置条件：** R99 部署完成 ✅ (v2.68, main 9c0c5b8)
 
@@ -121,74 +127,53 @@ pipeline:
 
 | Step | 角色 | 工作内容 | 产出 | 验收 |
 |:----:|:-----|:---------|:-----|:-----|
-| **Step 1** ✅ 完成 | 🧐 PM | 写需求 + WORK_PLAN | R100-product-requirements.md + WORK_PLAN.md | 推 dev ✅ |
-| **Step 2** | 👷 Arch | 结构设计 | 已产出server/README.md（架构图 + 依赖关系 + 文件职责） | 推 dev ✅ |
-| **Step 3** | 👨‍💻 Dev | 编码拆分 — 6 步执行 | 全部代码文件拆分 | 见下 |
-| **Step 4** | 👀 Review | 代码审查 | R100-code-review.md | 推 dev |
-| **Step 5** | 🦐 QA | 测试验证 | R100-test-report.md（15 项验收） | 推 dev |
-| **Step 6** | 🛠️ Ops | 合并 dev→main + 部署 | Docker 新镜像 + 生产验证 | TODO.md 更新 |
+| **Step 1** ✅ 完成 | 🧐 PM | 需求文档 + 工作计划 | R100-product-requirements.md + WORK_PLAN.md | 推 dev |
+| **Step 2** 🟡 待执行 | 👷 小开 | 架构设计方案 | R100-tech-plan.md | 推 dev |
+| **Step 3** ⏳ | 👨‍💻 Dev | 编码拆分 — 6 步执行 | 全部代码文件拆分 | 见下 |
+| **Step 4** ⏳ | 👀 Review | 代码审查 | R100-code-review.md | 推 dev |
+| **Step 5** ⏳ | 🦐 QA | 测试验证 | R100-test-report.md（15 项验收） | 推 dev |
+| **Step 6** ⏳ | 🛠️ Ops | 合并 dev→main + 部署 | Docker 新镜像 + 生产验证 | TODO.md 更新 |
 
 ---
 
-## Step 3 编码拆分（Dev — 6 步执行）🔧
+## Step 1 产出（PM — 已完成 ✅）
 
-### Step 3.1 — 创建 state.py
+| 产出 | 路径 |
+|:-----|:------|
+| 需求文档 | `docs/R100/R100-product-requirements.md` |
+| 工作计划 | `docs/R100/WORK_PLAN.md` |
+| 架构全景参考 | `server/README.md` |
 
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev |
-| 做什么 | 从 handler.py 复制全部模块级全局变量到新文件 `server/state.py` |
-| 清单 | `_PIPELINE_STATE`, `_PIPELINE_CONFIG`, `_ROLE_AGENT_MAP`, `_step_ack_states`, `_pipeline_manager`, `_GIT_SYNC_TASK`, `_LOBBY_PAUSED`, `_LOBBY_PAUSED_ROUND`, `_step_advance_buffer`, `_r57_rollcall_events`, `_watchdog_started`, `_watchdog_task`, `_watchdog_alerts`, `_offline_timers`, `_r72_users`, `_delivery_status`, `_offline_push_queue`, `SYSTEM_AGENT_ID`, `REGISTRATION_BROADCAST_ENABLED`, `SERVER_INBOX_CHANNEL`, `is_server_inbox()`, `_task_ack_timers`, `_rate_limits`, `_last_message`, 消息常量, `_channel_ack_state`, `_card_watcher_running` |
-| 验证 | `python3 -c "from server.state import _PIPELINE_STATE"` 无报错 |
+---
 
-### Step 3.2 — 创建 command_utils.py
+## Step 2 架构设计（小开 — 待执行）
 
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev |
-| 做什么 | 从 handler.py 复制命令路由工具函数到 `server/command_utils.py`，引用改为 `state.X` |
-| 清单 | `_admin_msg()`, `_persist_admin_response()`, `_send_cmd_response()`, `_parse_command()`, `_is_any_workspace_admin()`, `_log_audit()`, `_check_command_permission()`, `_resolve_workspace()` |
-| 验证 | `python3 -c "from server.command_utils import _parse_command; print(_parse_command('!test --key val'))"` |
+小开需要：
 
-### Step 3.3 — 创建 commands/ 包
+1. **阅读参考资料**
+   - `docs/R100/R100-product-requirements.md` — 需求文档（分层原则、目标、验收标准）
+   - `server/README.md` — 当前架构全景（17 文件职责、依赖关系、数据流）
 
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev |
-| 做什么 | 创建 `server/commands/` 目录 + `__init__.py` + 5 个领域文件 |
-| 文件 | `workspace.py`, `pipeline.py`, `agent_card.py`, `task.py`, `admin.py` |
-| **workspace.py** | `_cmd_create_workspace`, `_cmd_close_workspace`, `_cmd_list_workspaces`, `_cmd_workspace_join`, `_cmd_workspace_leave`, `_cmd_workspace_add`, `_cmd_workspace_remove`, `_cmd_workspace_list_members`, `_cmd_workspace_reset` |
-| **pipeline.py** | `_cmd_pipeline_start`, `_cmd_pipeline_stop`, `_cmd_pipeline_status`, `_cmd_pipeline_activate`, `_cmd_pipeline_context`, `_cmd_pipeline_mode`, `_cmd_pipeline_role_override`, `_cmd_step_handoff`, `_cmd_step_complete`, `_cmd_step_reject`, `_cmd_step_force`, `_cmd_step_verify` + 全部管线辅助函数（约 30 个） |
-| **agent_card.py** | `_cmd_agent_card_list`, `_cmd_agent_card_get`, `_cmd_agent_card_set`, `_cmd_agent_card_unset`, `_cmd_agent_card_reload`, `_cmd_agent_card_register`, `_cmd_agent_card_auto_register`, `_cmd_agent_role_map` |
-| **task.py** | `_cmd_task_create`, `_cmd_task_update`, `_cmd_task_query`, `_cmd_task_list`, `_cmd_rollcall_role`, `_cmd_rollcall_next` |
-| **admin.py** | `_cmd_approve_ws_admin`, `_cmd_reject_ws_admin`, `_cmd_list_pending`, `_cmd_audit_log`, `_cmd_list_workspace_admins`, `_cmd_list_agents`, `_cmd_agent_status`, `_cmd_revoke_api_key` |
-| 关键改法 | 每个命令函数中：`_PIPELINE_STATE` → `state._PIPELINE_STATE`, `_broadcast_to_channel()` → `command_utils._broadcast_to_channel()`, `_send_cmd_response()` → `command_utils._send_cmd_response()`, `_log_audit()` → `command_utils._log_audit()` |
-| 验证 | `python3 -c "from server.commands import _ADMIN_COMMANDS; print(len(_ADMIN_COMMANDS))"` 返回 47 |
+2. **产出** `docs/R100/R100-tech-plan.md`
+   - 确认 8 个新文件的定位和边界
+   - 确认依赖关系（确保无循环导入）
+   - 确认核心/插件边界划分
+   - 给出 Step 3 编码的执行建议
 
-### Step 3.4 — handler.py → main.py
+---
 
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev |
-| 做什么 | `git mv server/handler.py server/main.py`，删除已搬出的函数和变量，保留核心 ~800 行，添加新 import |
-| 保留 | `handler()`, `handle_broadcast()`, `_handle_server_relay()`, `_handle_server_query()`, `handle_auth()`, `handle_register()`, `handle_agent_card_register()`, `_send()`, `_connections`, `_force_disconnect_revoked_agent()`, `get_connections()`, `get_delivery_status()`, msg_type 分支 |
-| 验证 | 服务启动无 ImportError |
+## Step 3 编码拆分（Dev — 待执行）
 
-### Step 3.5 — 更新 __main__.py
+等待 Step 2 架构方案确定后执行。预计 6 个子步骤：
 
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev |
-| 做什么 | 改 import 路径：`from .main import ...` 替代 `from .handler import ...` |
-| 验证 | 服务正常启动 |
-
-### Step 3.6 — 验证 + 部署
-
-| 项 | 内容 |
-|:---|:------|
-| 谁做 | 👨‍💻 Dev → 🛠️ Ops |
-| 做什么 | 本地测试 → 推 dev → 代码审查 → QA 验收 → Ops 合并部署 |
-| 验证 | 15 项验收标准全部通过 |
+| 子步 | 内容 | 产出 |
+|:----:|:-----|:-----|
+| 3.1 | 创建 `state.py` — 共享状态提取 | `server/state.py` ~200 行 |
+| 3.2 | 创建 `command_utils.py` — 命令路由工具 | `server/command_utils.py` ~200 行 |
+| 3.3 | 创建 `commands/` 包 — 5 个领域文件 | 6 个文件 ~2700 行 |
+| 3.4 | handler.py → main.py 改名精简 | `server/main.py` ~800 行 |
+| 3.5 | 更新 `__main__.py` import 路径 | ~5 行修改 |
+| 3.6 | 本地验证 + 推 dev | 无报错 |
 
 ---
 
@@ -226,21 +211,11 @@ pipeline:
 
 ---
 
-## Step 1 产出（PM — 已完成 ✅）
-
-| 产出 | 路径 |
-|:-----|:------|
-| 需求文档 | `docs/R100/R100-product-requirements.md` |
-| 工作计划 | `docs/R100/WORK_PLAN.md` |
-| 架构文档 | `server/README.md` |
-
----
-
 ## 交付物要求
 
 | 类别 | 要求 |
 |:-----|:------|
 | 代码 | `server/` 下 8 新增 + 2 修改，零行为变更 |
 | 测试 | 全部 15 项验收 🟢 通过 |
-| 文档 | 审查报告 + 测试报告推 dev |
+| 文档 | 架构方案 + 审查报告 + 测试报告推 dev |
 | 部署 | Ops 合并 main + build 新镜像 + 重启服务 |
