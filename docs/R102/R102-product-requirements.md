@@ -55,24 +55,29 @@ R101 完成了 WSS/Web 解耦，但消息路由层面存在一个根本问题：
 
 ### 3.1 消息格式
 
-PM 派活时，发送到 `_inbox:server`，消息内容中嵌入目标路由参数和任务内容：
+PM 派活时，发送到 `_inbox:server`，payload 中通过 `to_agent` 显式指定目标 bot：
 
 ```json
 {
   "type": "message",
   "channel": "_inbox:server",
-  "content": "派活@小开 | R102 架构设计\n请完成 R102 的技术方案设计，输出 docker 架构图",
+  "to_agent": "ws_0bb747d3ea2a",
+  "content": "R102 架构设计\n请完成 R102 的技术方案设计，输出 docker 架构图",
   "from_name": "小谷",
   "from_agent": "ws_f26e585f6479"
 }
 ```
 
-Server 解析规则：
-- **`派活@<bot_display_name>`** — 派活命令，`@` 后跟目标 bot 显示名
-- **`|` 后** — 任务内容
-- Server 根据显示名查 agent_id，转发到 `_inbox:ws_xxx`
+Server 处理逻辑：
 
-Bot 回复格式（回复到 `_inbox:server`）：
+| 字段 | 用途 | 说明 |
+|:-----|:------|:------|
+| **`to_agent`** | 目标路由 | 目标 bot 的 agent_id，Server 据此转发到 `_inbox:ws_xxx` |
+| **`content`** | 任务内容 | 纯任务描述，无需内嵌路由信息 |
+| **`from_name` / `from_agent`** | 隐藏 | Server 转发时替换为 `"系统"` / `"server"`，不暴露 PM 身份 |
+| 扩展字段 | 预留 | 未来可增加 `task_id`、`priority`、`pipeline_round` 等 |
+
+Bot 回复时同样回复到 `_inbox:server`，Server 根据内容前缀触发规则：
 
 ```json
 {
@@ -90,14 +95,15 @@ Bot 回复格式（回复到 `_inbox:server`）：
 
 | 前缀 | 发件人角色 | Server 行为 |
 |:-----|:----------|:------------|
-| `派活@` | PM | 解析目标 bot → 隐藏发件人 → 转发到目标 inbox |
-| `收到 ✅` | 任意 bot | 记录 ACK，可选回复 sender 确认 |
+| `收到 ✅` | 任意 bot | 记录 ACK |
 | `已完成 ✅` | 任意 bot | 标记 Step 完成，触发下一棒接力（为 auto 预留） |
 | `test` | 任意 bot | 回路测试（R96 已有实现） |
 | `失败 ❌` | 任意 bot | 记录失败，通知 PM |
 
-> **前缀匹配规则**：消息内容以任一前缀开头即触发。`content.startswith(prefix)` 匹配。
-> 多个前缀间按优先级顺序匹配（以表格从上到下顺序）。
+> **触发方式**：bot 回复统一走 `_inbox:server`，Server 对 content 做 `startswith()` 前缀匹配。
+> 不匹配任何前缀的消息静默丢弃。
+>
+> **派活触发**：PM 的派活消息通过 `to_agent` 字段触发，不是通过内容前缀（见 §3.1）。
 
 ### 3.3 通信流程对比
 
@@ -115,17 +121,17 @@ Server 角色: 纯透传，无拦截无过滤
 #### 🅱️ 目标（R102）— Server 中介派活
 
 ```
-小谷 ──→ _inbox:server (内容: "派活@小开 | 任务内容")
-      │
-      ▼
-  Server 处理:
-    ① 识别 "派活@" 前缀 → 触发派活处理
-    ② 解析 target = 小开 → 查 agent_id = ws_xxx
-    ③ 隐藏发件人 (from_name = "系统" / "server")
-    ④ 转发到 _inbox:ws_xxx
-      │
-      ▼
-小开收到 (from: 系统/Server，看不到小谷)
+|小谷 ──→ _inbox:server (to_agent: ws_xxx, content: "任务内容")
+|      │
+|      ▼
+|  Server 处理:
+|    ① 检测到 to_agent 字段 → 派活模式
+|    ② 解析 target = ws_xxx
+|    ③ 隐藏发件人 (from_name = "系统" / "server")
+|    ④ 转发到 _inbox:ws_xxx
+|      │
+|      ▼
+|小开收到 (from: 系统/Server，看不到小谷)
       │
       ▼
 小开回复 → _inbox:server (内容: "收到 ✅ ...")
@@ -157,18 +163,18 @@ sequenceDiagram
 
     Note over PM,Bot: 派活链路
 
-    PM->>Server: ① 发消息到 _inbox:server<br/>content: "派活@小开 | 任务"
+    PM->>Server: ① 发消息到 _inbox:server<br/>to_agent: ws_xxx, content: "任务"
 
     Server->>Server: ② 接收消息 channel=_inbox:server
-    Server->>Server: ③ content 前缀匹配
+    Server->>Server: ③ 检测 to_agent 字段
     
-    alt ✅ 前缀 "派活@" 匹配
-        Server->>Server: ④ 解析 target = "小开"<br/>查 agent_id = ws_xxx
+    alt ✅ to_agent 存在
+        Server->>Server: ④ 读取 target = to_agent<br/>= ws_xxx
         Server->>Server: ⑤ 构造转发 payload<br/>from_name = "系统"<br/>(隐藏真实发件人)
         Server->>Bot: ⑥ 转发到 _inbox:ws_xxx<br/>payload 含任务内容
         Bot->>Bot: ⑦ 收到任务，开始工作
-    else ❌ 无匹配前缀
-        Server->>Server: 静默丢弃，无回执
+    else ❌ 无 to_agent + 无 !前缀
+        Server->>Server: 进入 bot 回复处理 ← 前缀匹配
     end
 
     Note over PM,Bot: 回复链路
@@ -187,10 +193,10 @@ sequenceDiagram
 
 | 位置 | 名称 | 说明 |
 |:----:|:-----|:------|
-| ① | **PM 派活** | 小谷发消息到 `_inbox:server`，内容含目标 + 任务 |
-| ② | **Server 接收** | 入口 `_handle_server_query()` 或新增 `_handle_server_relay()` |
-| ③ | **前缀匹配** | 对 content 做 `startswith()` 前缀匹配 |
-| ④ | **解析目标** | 从 `派活@<bot_name>` 提取目标 bot 显示名，用 `_r72_users` 反查 agent_id |
+| ① | **PM 派活** | 小谷发消息到 `_inbox:server`，payload 含 `to_agent` + `content` |
+| ② | **Server 接收** | 入口 `_handle_server_query()` 或 `_handle_server_relay()` |
+| ③ | **触发判断** | 检测 payload 中是否存在 `to_agent` 字段 |
+| ④ | **读取目标** | 直接从 `to_agent` 字段读取目标 agent_id |
 | ⑤ | **隐藏发件人** | 转发 payload 的 `from_name` 设为 `"系统"` 或 `"server"`，不暴露 PM 身份 |
 | ⑥ | **转发到目标** | 调用 `_broadcast_to_channel(f"_inbox:{agent_id}", payload)` |
 | ⑦ | **Bot 收到任务** | Bot 看到发件人是系统，无 PM 身份信息 |
@@ -220,32 +226,25 @@ sequenceDiagram
 
 ```python
 # 伪代码 — 在 _handle_server_query 中新增
+channel = msg.get("channel", "")
 content = msg.get("content", "").strip()
 sender_id = msg.get("from_agent", "")
+to_agent = msg.get("to_agent", "")
 
-# 派活指令: "派活@<bot_name> | <任务内容>"
-if content.startswith("派活@"):
-    # 解析目标 bot
-    rest = content[3:]  # 去掉 "派活"
-    at_pos = rest.find("@")
-    pipe_pos = rest.find("|")
-    bot_name = rest[at_pos+1:pipe_pos].strip() if pipe_pos > at_pos else rest[at_pos+1:].strip()
-    task_content = rest[pipe_pos+1:].strip() if pipe_pos > 0 else ""
-    
-    # 查 agent_id
-    target_id = _resolve_bot_name(bot_name)  # 从 _r72_users 或 agent_card 查询
-    
-    if target_id:
-        # 隐藏发件人，构造新 payload
-        relay_payload = {
-            "type": "broadcast",
-            "channel": f"_inbox:{target_id}",
-            "from_name": SERVER_BOT_NAME,  # e.g. "系统"
-            "from_agent": "server",
-            "content": task_content,
-            "ts": time.time(),
-        }
-        await _broadcast_to_channel(f"_inbox:{target_id}", relay_payload)
+# 派活指令: 检测 to_agent 字段
+if channel == "_inbox:server" and to_agent:
+    # to_agent 存在 → 派活模式
+    # 隐藏发件人，构造新 payload
+    relay_payload = {
+        "type": "broadcast",
+        "channel": f"_inbox:{to_agent}",
+        "from_name": "系统",
+        "from_agent": "server",
+        "content": content,
+        "ts": time.time(),
+    }
+    sent = await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
+    # 可选：通知 PM 派活成功
 ```
 
 #### B. Bot 回复过滤（在对 `_inbox:server` 消息的处理中新增）
@@ -274,14 +273,13 @@ if channel == "_inbox:server" and not content.startswith("!"):
 
 | # | 验收项 | 方法 |
 |:-:|:-------|:------|
-| 1 | PM 发 `派活@小开 | 任务` 到 `_inbox:server`，小开能在自己 inbox 收到任务 | WS 直连测试 |
-| 2 | 小开收到的消息 `from_name` 不是 `小谷`，而是 `系统`/`server` | 检查消息 payload |
-| 3 | 小开回复 `收到 ✅` 到 `_inbox:server`，Server 不转发给任何人，不报错 | 检查 Server 日志 |
-| 4 | 小开回复 `已完成 ✅ R102` 到 `_inbox:server`，Server 不转发但记录状态 | 检查 Server 日志 |
-| 5 | 小开回复无前缀的普通消息到 `_inbox:server`，静默丢弃（无转发无报错） | 检查 Server 日志 |
+| 1 | PM 发消息到 `_inbox:server` 带 `to_agent: ws_xxx`，目标 bot 能在自己 inbox 收到任务 | WS 直连测试 |
+| 2 | 目标 bot 收到的消息 `from_name` 不是 `小谷`，而是 `系统`/`server` | 检查消息 payload |
+| 3 | Bot 回复 `收到 ✅` 到 `_inbox:server`，Server 不转发给任何人，不报错 | 检查 Server 日志 |
+| 4 | Bot 回复 `已完成 ✅ R102` 到 `_inbox:server`，Server 不转发但记录状态 | 检查 Server 日志 |
+| 5 | Bot 回复无前缀的普通消息到 `_inbox:server`，静默丢弃（无转发无报错） | 检查 Server 日志 |
 | 6 | 已有 `test ✅` 回路测试不受影响 | 发 test 到 `_inbox:server` 应收到回声 |
 | 7 | 已有 `!agent_card list` 等查询命令不受影响 | 发 `!` 命令到 `_inbox:server` 正常生效 |
-| 8 | 旧直达派活不立即删除，可兼容运行，但新派活走 server | 对比新旧两条路径 |
 
 ---
 
@@ -321,14 +319,14 @@ if channel == "_inbox:server" and not content.startswith("!"):
 | 泰虾 | 泰虾 | `ws_eab784ac7652` | QA |
 | 小谷 | 小谷 | `ws_f26e585f6479` | PM |
 
-### 8.2 前缀优先级
+### 8.2 Server 消息分类优先级
 
-| 优先级 | 前缀 | 来源 |
-|:------:|:-----|:------|
-| 1 (最高) | `!` | 查询命令（已有，`_handle_server_query`） |
-| 2 | `派活@` | 派活指令（R102 新增） |
-| 3 | `test` | 回路测试（R96 已有） |
-| 4 | `收到 ✅` | ACK 确认（R102 新增） |
-| 5 | `已完成 ✅` | 完成通知（R102 新增） |
-| 6 | `失败 ❌` | 失败通知（R102 新增） |
-| 7 | 其他 | 静默丢弃 |
+| 优先级 | 触发条件 | 处理方式 | 来源 |
+|:------:|:---------|:---------|:------|
+| 1 (最高) | `!` 前缀 | 查询命令 | 已有（`_handle_server_query`） |
+| 2 | `to_agent` 字段 | 派活指令 — 路由转发 | R102 新增 |
+| 3 | `test` 前缀 | 回路测试 | R96 已有 |
+| 4 | `收到 ✅` 前缀 | ACK 确认 | R102 新增 |
+| 5 | `已完成 ✅` 前缀 | 完成通知 | R102 新增 |
+| 6 | `失败 ❌` 前缀 | 失败通知 | R102 新增 |
+| 7 | 其他 | 静默丢弃 | — |
