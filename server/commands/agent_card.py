@@ -4,6 +4,7 @@ from .. import state, auth, command_utils
 from .. import agent_card as ac_mod
 from .. import config
 from ..command_utils import _refresh_role_agent_map
+_card_watcher = None  # R100: module-level variable for _cmd_agent_card_watch
 
 async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
     """Display all current agent cards.

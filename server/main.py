@@ -28,6 +28,7 @@ from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
 from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
 from .command_utils import _refresh_role_agent_map
+_card_watcher = None  # R100: module-level for _ensure_card_watcher()
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
