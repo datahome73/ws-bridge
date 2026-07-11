@@ -2310,6 +2310,11 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
 # ── R87: _inbox:server 中继转发 ─────────────────────────────
 
 
+def _is_valid_agent_id(aid: str) -> bool:
+    """粗校验：格式 must be ws_xxx."""
+    return bool(aid and aid.startswith("ws_") and len(aid) > 10)
+
+
 async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     """R87: 处理发往 _inbox:server 的 bot 回复中继.
 
@@ -2351,9 +2356,33 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
 
     # ── 获取发送者信息 ──
     sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.PIPELINE_PM_AGENT_ID
+    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
+
+    # ═══ R102: to_agent 派活路由 ═══
+    to_agent = (msg.get("to_agent") or "").strip()
+    if to_agent:
+        # 校验: 必须是合法 agent_id 格式
+        if not _is_valid_agent_id(to_agent):
+            logger.warning("[Dispatch] 拒绝: 非法 to_agent=%s", to_agent)
+            return True
+        # 隐藏发件人，构造转发 payload
+        relay_payload = {
+            "type": "broadcast",
+            "channel": f"_inbox:{to_agent}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": msg.get("content", "").strip(),
+            "ts": time.time(),
+        }
+        await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
+        logger.info("[Dispatch] %s → %s: %s...",
+                     agent_id[:12], to_agent[:16],
+                     (msg.get("content") or "")[:60])
+        return True
+    # ═══════════════════════════════════════════
 
     # ═══ 安全守卫: PM 误发 _inbox:server ═══
+    # 排除带 to_agent 的派活消息（已在上面拦截）
     if pm_agent_id and agent_id == pm_agent_id:
         await _send(ws, {
             "type": "error",
@@ -2362,8 +2391,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
         return True
 
-    # ═══ 规则 1: ACK ✅ → 转发 PM（进度通知）═══
-    if content.startswith("ACK ✅"):
+    # ═══ 规则 1: 收到 ✅ / ACK ✅ → 转发 PM（进度通知）═══
+    if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
         if pm_agent_id:
             await _broadcast_to_channel(
                 f"_inbox:{pm_agent_id}",
@@ -2379,8 +2408,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.info("[Relay] ACK: %s → PM", sender_name)
         return True
 
-    # ═══ 规则 2: ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
-    if content.startswith("✅ 完成"):
+    # ═══ 规则 2: 已完成 ✅ / ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
+    if content.startswith("已完成 ✅") or content.startswith("✅ 完成"):
         # ⑤ 转发给 PM
         if pm_agent_id:
             await _broadcast_to_channel(
@@ -2409,12 +2438,84 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
         return True
 
+    # ═══ 规则 3: 退回 🔄 ═══
+    if content.startswith("退回 🔄"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"🔄 {sender_name} 退回:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # 自动确认给 bot
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "🔄 已记录退回.",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 退回: %s → PM + 自动确认", sender_name)
+        return True
+
+    # ═══ 规则 4: 失败 ❌ ═══
+    if content.startswith("失败 ❌"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"⚠️ {sender_name} 失败:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # 自动确认给 bot
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "⚠️ 已记录失败.",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 失败: %s → PM + 自动确认", sender_name)
+        return True
+
     # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
     if content.startswith("!"):
         logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
         return False
 
-    # ═══ 规则 3: 其他内容 → 沉默 ═══
+    # ═══ 规则 5: 无匹配 → 入库留痕 ═══
+    # 入库留痕（不转发，不回复）
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="message",
+            channel=channel,
+            from_agent=agent_id,
+            from_name=sender_name,
+            content=content,
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+        )
+    except Exception:
+        pass  # 入库失败不阻塞主流程
     logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
     return True
 
@@ -2460,9 +2561,33 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
 
     # ── 获取发送者信息 ──
     sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.PIPELINE_PM_AGENT_ID
+    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
+
+    # ═══ R102: to_agent 派活路由 ═══
+    to_agent = (msg.get("to_agent") or "").strip()
+    if to_agent:
+        # 校验: 必须是合法 agent_id 格式
+        if not _is_valid_agent_id(to_agent):
+            logger.warning("[Dispatch] 拒绝: 非法 to_agent=%s", to_agent)
+            return True
+        # 隐藏发件人，构造转发 payload
+        relay_payload = {
+            "type": "broadcast",
+            "channel": f"_inbox:{to_agent}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": msg.get("content", "").strip(),
+            "ts": time.time(),
+        }
+        await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
+        logger.info("[Dispatch] %s → %s: %s...",
+                     agent_id[:12], to_agent[:16],
+                     (msg.get("content") or "")[:60])
+        return True
+    # ═══════════════════════════════════════════
 
     # ═══ 安全守卫: PM 误发 _inbox:server ═══
+    # 排除带 to_agent 的派活消息（已在上面拦截）
     if pm_agent_id and agent_id == pm_agent_id:
         await _send(ws, {
             "type": "error",
@@ -2471,8 +2596,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
         return True
 
-    # ═══ 规则 1: ACK ✅ → 转发 PM（进度通知）═══
-    if content.startswith("ACK ✅"):
+    # ═══ 规则 1: 收到 ✅ / ACK ✅ → 转发 PM（进度通知）═══
+    if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
         if pm_agent_id:
             await _broadcast_to_channel(
                 f"_inbox:{pm_agent_id}",
@@ -2488,8 +2613,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.info("[Relay] ACK: %s → PM", sender_name)
         return True
 
-    # ═══ 规则 2: ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
-    if content.startswith("✅ 完成"):
+    # ═══ 规则 2: 已完成 ✅ / ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
+    if content.startswith("已完成 ✅") or content.startswith("✅ 完成"):
         # ⑤ 转发给 PM
         if pm_agent_id:
             await _broadcast_to_channel(
@@ -2518,12 +2643,84 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
         return True
 
+    # ═══ 规则 3: 退回 🔄 ═══
+    if content.startswith("退回 🔄"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"🔄 {sender_name} 退回:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # 自动确认给 bot
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "🔄 已记录退回.",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 退回: %s → PM + 自动确认", sender_name)
+        return True
+
+    # ═══ 规则 4: 失败 ❌ ═══
+    if content.startswith("失败 ❌"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"⚠️ {sender_name} 失败:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # 自动确认给 bot
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "⚠️ 已记录失败.",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 失败: %s → PM + 自动确认", sender_name)
+        return True
+
     # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
     if content.startswith("!"):
         logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
         return False
 
-    # ═══ 规则 3: 其他内容 → 沉默 ═══
+    # ═══ 规则 5: 无匹配 → 入库留痕 ═══
+    # 入库留痕（不转发，不回复）
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="message",
+            channel=channel,
+            from_agent=agent_id,
+            from_name=sender_name,
+            content=content,
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+        )
+    except Exception:
+        pass  # 入库失败不阻塞主流程
     logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
     return True
 

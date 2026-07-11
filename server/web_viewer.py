@@ -267,8 +267,6 @@ async def handle_api_chat(request: web.Request) -> web.Response:
         try:
             db_msgs = ms.get_messages_by_channel(channel, config.DATA_DIR, limit=limit)
             if db_msgs:
-                # ★ 强制倒序：最新在上
-                db_msgs.reverse()
                 return web.json_response({"channel": channel, "messages": db_msgs})
         except Exception:
             pass
@@ -287,8 +285,6 @@ async def handle_api_chat(request: web.Request) -> web.Response:
             except (ValueError, IndexError):
                 return 0
         messages.sort(key=_sort_key, reverse=True)
-        # ★ 强制倒序：最新在上
-        messages.reverse()
         return web.json_response({"channel": channel, "messages": messages[:limit]})
     return web.json_response({"channel": channel, "messages": []})
 
@@ -463,6 +459,7 @@ async def handle_api_archive(request: web.Request) -> web.Response:
     end = ws_info["archive_window"]["end"]
 
     all_msgs = ms.get_messages_by_time_range(start, end, config.DATA_DIR)
+    all_msgs.reverse()
 
     # Add channel labels + inbox recipient resolution
     for m in all_msgs:
