@@ -540,10 +540,16 @@ class WSBridgeAdapter(BasePlatformAdapter):
         R87: ACK ✅ and ✅ 完成 replies route to _inbox:server (server relay).
         """
         # ═══ R87: server relay — ACK and completion go to _inbox:server ═══
+        # ═══ R102: also match 收到 ✅ / 已完成 ✅ / 退回 🔄 / 失败 ❌ ═══
         started_content = content.strip()
-        if started_content.startswith("ACK ✅") or started_content.startswith("✅ 完成"):
+        if (started_content.startswith("ACK ✅")
+                or started_content.startswith("✅ 完成")
+                or started_content.startswith("收到 ✅")
+                or started_content.startswith("已完成 ✅")
+                or started_content.startswith("退回 🔄")
+                or started_content.startswith("失败 ❌")):
             logger.warning(
-                "[WSBridge] R87 relay: %s → _inbox:server",
+                "[WSBridge] R102 relay: %s → _inbox:server",
                 content[:60],
             )
             return "_inbox:server"
