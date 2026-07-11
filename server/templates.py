@@ -163,6 +163,17 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+// ── 统一排序函数：消息数组按 ts 降序排列（最新在上） ──
+function sortNewestFirst(msgs) {
+  if (!msgs || msgs.length === 0) return;
+  msgs.sort(function(a, b) {
+    var ta = a.ts || 0, tb = b.ts || 0;
+    if (typeof ta === 'string') ta = ta.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
+    if (typeof tb === 'string') tb = tb.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
+    return tb - ta;
+  });
+}
+
 function formatTime(tsNum) {
   if (typeof tsNum === 'number') {
     const d = new Date(tsNum * 1000);
@@ -302,13 +313,8 @@ async function loadMessages(channel, since) {
       msgContainers[channel] = [];
       return;
     }
-    // 🔧 Explicit sort: newest first (insurance against any ordering issue)
-    msgs.sort(function(a, b) {
-      var ta = a.ts || 0, tb = b.ts || 0;
-      if (typeof ta === 'string') ta = ta.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
-      if (typeof tb === 'string') tb = tb.split(':').reduce(function(s,v){return Number(s)*60+Number(v);});
-      return tb - ta;
-    });
+    // ★ 统一排序：最新在上
+    sortNewestFirst(msgs);
     msgContainers[channel] = msgs;
     for (let i = 0; i < msgs.length; i++) {
       // 🔧 F-8: Dedup by content hash (shared _seenMsgHashes with appendMessage)
@@ -382,6 +388,8 @@ async function loadInboxMessages(since) {
       list.innerHTML = '<div class="empty">暂无收件箱消息</div>';
       return;
     }
+    // ★ 统一排序：最新在上
+    sortNewestFirst(msgs);
     for (const m of msgs) {
       list.appendChild(createInboxMessageEl(m));
     }
@@ -416,6 +424,8 @@ async function loadArchiveMessages(wsId) {
   if (!resp.ok) { list.innerHTML = '<div class="empty">加载失败</div>'; return; }
   const data = await resp.json();
   const msgs = data.messages || [];
+  // ★ 统一排序：最新在上（不依赖后端 reverse）
+  sortNewestFirst(msgs);
   list.innerHTML = '';
   // Header showing workspace info
   const header = document.createElement('div');
@@ -724,8 +734,10 @@ async function init() {
     const results = data.results || [];
     const list = document.getElementById('msgList');
     if (results.length === 0) {
-      list.innerHTML = '<div class=\"empty\">未找到匹配的消息</div>';
+      list.innerHTML = '<div class="empty">未找到匹配的消息</div>';
     } else {
+      // ★ 统一排序：最新在上
+      sortNewestFirst(results);
       list.innerHTML = '';
       results.forEach(function(m) {
         const el = createMessageEl(m);
