@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.70
+> **版本：** v2.71
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -266,6 +266,7 @@ Phase 3 (Coder Agent)
 ## 五、变更记录
 
 || 版本 | 日期 | 变更 |
+|| v2.71 | 2026-07-11 | R102: to_agent 派活路由 + 前缀匹配 + 入库留痕 🚀 |
 || v2.70 | 2026-07-11 | R101: WSS/Web 解耦 — 独立 web_service.py + Supervisor 双进程部署 🚀 |
 ||:---:|:----:|:----|
 ||| v2.63 | 2026-07-12 | 🎯 **R97 完成 ✅** — AutoRouter 稳定化：PipelineContext 驱动，去 frontmatter 依赖 🔧。重构 3 文件 +330/-666 净删 -336 行。核心变化：`!pipeline_start` 零参数（无需 frontmatter/workspace）、AutoRouter 从 PipelineContext 读拓扑、角色映射实时查询 Agent Card、PM=Step1 执行者、全链 6 Step 机械组装。19/19 单元测试 ALL GREEN 🟢。合并部署 main `7830639`，ws-bridge:r97 镜像 |
