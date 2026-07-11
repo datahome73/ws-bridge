@@ -11,7 +11,6 @@ import uuid
 
 from . import state, auth, workspace as ws_mod
 from . import message_store as ms
-from .web_viewer import write_chat_log
 
 
 async def _broadcast_to_channel(channel: str, payload: dict) -> int:
@@ -42,7 +41,6 @@ async def _broadcast_to_channel(channel: str, payload: dict) -> int:
             data_dir=__import__("server.config", fromlist=[""]).DATA_DIR,
             channel=channel,
         )
-        write_chat_log("系统", payload.get("content", ""), channel=channel)
     except Exception:
         pass
     return sent
@@ -71,7 +69,6 @@ async def _send_cmd_response(ws, sender_id: str, from_name: str, content: str, c
         )
     except Exception:
         pass
-    write_chat_log(from_name, content, channel=channel)
 
 
 def _parse_command(content: str) -> tuple[str | None, dict]:

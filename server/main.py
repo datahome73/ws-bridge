@@ -22,7 +22,6 @@ from . import command_utils  # R100: command routing utilities
 from . import message_store as ms
 from . import workspace as ws_mod
 from .audit import AuditLogger
-from .web_viewer import write_chat_log
 from . import task_store as ts
 from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
@@ -363,8 +362,6 @@ async def _persist_admin_response(ws, sender_id: str, from_name: str, content: s
         )
     except Exception:
         pass
-    write_chat_log(from_name, content, channel=p.ADMIN_CHANNEL)
-
 
 def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
     """Persist a broadcast message to message store and chat log.
@@ -381,7 +378,6 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
             content=content_text, ts=__import__("time").time(),
             data_dir=config.DATA_DIR, channel=channel,
         )
-        write_chat_log(from_name, content_text, channel=channel)
     except Exception:
         pass
 
@@ -1069,7 +1065,6 @@ async def _send_watchdog_alert(
                             conn.send(ws_payload)
                     except Exception:
                         pass
-            write_chat_log("\u7cfb\u7edf", ws_msg, channel=ws_id)
     logger.info("R43 watchdog alert: %s/%s (%s)", round_name, step_name, alert_type)
 
 
@@ -1264,19 +1259,6 @@ async def _broadcast_task_notify(
                 except Exception:
                     pass
 
-        # Push to web viewer WS clients
-        try:
-            from .web_viewer import _ws_clients as _web_clients
-            dead = set()
-            for ws in _web_clients:
-                try:
-                    ws.send_str(payload)
-                except Exception:
-                    dead.add(ws)
-            _web_clients -= dead
-        except ImportError:
-            pass
-
         # R41 C: Write task_notify to admin channel
         try:
             content_str = f"📊 {context_id} {task['name']}: {transition}"
@@ -1286,7 +1268,6 @@ async def _broadcast_task_notify(
                 content=content_str, ts=time.time(),
                 data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
             )
-            write_chat_log("系统", content_str, channel=p.ADMIN_CHANNEL)
         except Exception:
             pass
         logger.info("task_notify '%s' → %s (%s)", task["name"], context_id, transition)
@@ -1428,8 +1409,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             )
         except Exception:
             pass
-        write_chat_log(sender_name, content, channel=p.ADMIN_CHANNEL)
-
         # R49: ! commands now handled by universal routing above.
         # _admin channel still persists admin messages for logging.
         # Non-! messages in _admin are silently logged (admin channel only supports ! commands).
@@ -1453,8 +1432,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
         # 仅投递给目标 agent（单播，不广播给其他人）
         targets = [(aid, conns) for aid, conns in _connections.items() if aid == owner_id]
-        # 写日志
-        write_chat_log(sender_name, content, channel=channel)
         # 持久化到 DB（R84: 确保 inbox 消息有完整 from_name/to_name 字段）
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
@@ -1548,7 +1525,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             ]
             if not targets:
                 logger.info("Workspace '%s': no online members, msg logged only", channel)
-                write_chat_log(sender_name, content, channel=channel)
                 return
 
             broadcast = json.dumps({
@@ -1644,8 +1620,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                 })
 
             logger.info("Channel [%s] %s→%s: %s", channel, sender_name, ",".join(target_names), content[:60])
-            write_chat_log(sender_name, content, channel=channel)
-
             return
     # ── R24: Lobby routing with prefix classification ─────────────────
     if channel == p.LOBBY:
@@ -1715,7 +1689,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
         if not targets:
             logger.info("Lobby msg from %s has no online targets", sender_id[:12])
-            write_chat_log(sender_name, content, channel=p.LOBBY)
             return
 
     # ── R24: Registration channel → admin relay fallback ────────────
@@ -1723,7 +1696,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         targets = [(aid, conns) for aid, conns in _connections.items() if aid in admin_ids]
         if not targets:
             logger.info("Reg channel: no admin online, msg from %s logged only", sender_id[:12])
-            write_chat_log(sender_name, content, channel=channel)
             return
 
     # Use dual field names (new unified + legacy compat)
@@ -1858,9 +1830,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         logger.info("Admin-relay %s➔%s: %s", sender_name, ",".join(target_names), content[:60])
     else:
         logger.info("Member %s→admin: %s", sender_name, content[:60])
-
-    # Write to chat log (大宏/网页端可见所有消息)
-    write_chat_log(sender_name, content)
 
     # ── R29: 📋 roll-call — send online member list to admin
     # R33-1: Also allow workspace admin_ids (e.g. 泰虾) to call roll-call
@@ -2933,8 +2902,6 @@ async def handler(ws):
                                 )
 
                         # R82: removed set_agent_channel
-
-                    write_chat_log(sender_name, reset_content, channel=workspace_id)
 
                     reset_id = str(uuid.uuid4())
                     await _send(ws, {
