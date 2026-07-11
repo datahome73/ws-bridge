@@ -6,7 +6,6 @@ automatic archival after inactivity.
 
 from __future__ import annotations
 
-import asyncio
 import enum
 import json
 import logging
@@ -25,23 +24,7 @@ WORKSPACES_FILE = "workspaces.json"
 
 class WorkspaceState(enum.Enum):
     ACTIVE = "active"
-    CLOSING = "closing"
     ARCHIVED = "archived"
-
-
-@dataclass
-class TokenRing:
-    """Token ring state for workspace message flow control (R10)."""
-    mode: str = "free"                    # "token" | "free"
-    current_token: int = 0                # index in order that holds the floor
-    order: list[str] = field(default_factory=list)  # [agent_id, ...]
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "TokenRing":
-        return cls(**d)
 
 
 # ── R15: Admin Request ──────────────────────────────────────────
@@ -177,6 +160,7 @@ def list_workspace_admins(ws_id: str) -> list[dict]:
 
 @dataclass
 class Workspace:
+    """R82: 工作区元数据模型 — 不再创建频道，仅记录元数据。"""
     id: str
     name: str
     owner_id: str
@@ -184,47 +168,42 @@ class Workspace:
     state: WorkspaceState = WorkspaceState.ACTIVE
     members: set[str] = field(default_factory=set)
     admin_ids: set[str] = field(default_factory=set)   # R6: workspace admins
-    token_ring: TokenRing = field(default_factory=TokenRing)  # R10: token ring
     created_at: float = 0.0
     last_active_at: float = 0.0
     closed_at: float | None = None
-    closing_acks: set[str] = field(default_factory=set)
+
+    # R82 新增：工作流元数据
+    pipeline_round: str = ""              # 关联管线轮次 "R82"
+    workflow_url: str = ""                # WORK_PLAN URL
+    roles: list[str] = field(default_factory=list)  # 该管线所需的角色列表
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["token_ring"] = self.token_ring.to_dict()
         d["state"] = self.state.value
         d["members"] = list(self.members)
         d["admin_ids"] = list(self.admin_ids)
-        d["closing_acks"] = list(self.closing_acks)
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Workspace":
-        # Filter to only fields Workspace.__init__ accepts
-        # This prevents crashes when JSON has extra fields (e.g. from scripts)
+        # R82: 兼容处理 — 旧 JSON 中的 token_ring/closing_acks 字段被静默忽略
         allowed = {"id", "name", "owner_id", "owner_name", "state",
-                   "members", "admin_ids", "token_ring",
-                   "created_at", "last_active_at", "closed_at", "closing_acks"}
+                   "members", "admin_ids",
+                   "created_at", "last_active_at", "closed_at",
+                   "pipeline_round", "workflow_url", "roles"}
         extra = [k for k in d if k not in allowed]
         if extra:
-            logger.warning("Workspace.from_dict(%s): ignoring unknown fields: %s", d.get("id","?"), extra)
+            logger.debug("Workspace.from_dict(%s): ignoring legacy fields: %s", d.get("id","?"), extra)
         d["state"] = WorkspaceState(d["state"])
         d["members"] = set(d.get("members", []))
         d["admin_ids"] = set(d.get("admin_ids", []))
-        d["closing_acks"] = set(d.get("closing_acks", []))
-        tr = d.get("token_ring")
-        if tr:
-            d["token_ring"] = TokenRing.from_dict(tr)
-        else:
-            d["token_ring"] = TokenRing()
         clean = {k: v for k, v in d.items() if k in allowed}
         return cls(**clean)
 
 
 # ── Store ──────────────────────────────────────────────────────────
 
-_lock = asyncio.Lock()
+# _lock removed in R82 — workspace ops are synchronous
 _workspaces: dict[str, Workspace] = {}
 
 
@@ -285,7 +264,8 @@ def create_workspace(
         1 for w in _workspaces.values()
         if w.owner_id == owner_id and w.state == WorkspaceState.ACTIVE
     )
-    max_per_person = 1  # configurable later
+    # R91 🅰️: 从环境变量读取，默认 3 个活跃工作室
+    max_per_person = int(os.environ.get("MAX_ACTIVE_WORKSPACES", "3"))
     if active_count >= max_per_person:
         logger.warning(
             "Owner %s already has %d active workspaces (max %d)",
@@ -376,153 +356,29 @@ def get_workspace_members(ws_id: str) -> set[str]:
     return ws.members
 
 
-# ── Token Ring ──────────────────────────────────────────────────
-
-def set_token_mode(ws_id: str, mode: str) -> bool:
-    """Set token ring mode (\"token\" or \"free\")."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False
-    if mode not in ("token", "free"):
-        return False
-    ws.token_ring.mode = mode
-    _save()
-    logger.info("Workspace '%s' token mode → %s", ws_id, mode)
-    return True
-
-
-def set_token_order(ws_id: str, order: list[str]) -> bool:
-    """Set token ring order list."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False
-    ws.token_ring.order = order[:]
-    ws.token_ring.current_token = 0
-    _save()
-    logger.info("Workspace '%s' token order set: %s", ws_id, order)
-    return True
-
-
-def advance_token(ws_id: str, next_token: int) -> bool:
-    """Advance token to a specific index."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False
-    if next_token < 0 or next_token >= len(ws.token_ring.order):
-        return False
-    ws.token_ring.current_token = next_token
-    _save()
-    logger.info("Workspace '%s' token advanced → %d (%s)",
-                ws_id, next_token, ws.token_ring.order[next_token])
-    return True
-
-
-def skip_token(ws_id: str) -> bool:
-    """Skip current token: current_token += 1."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False
-    next_idx = ws.token_ring.current_token + 1
-    if next_idx >= len(ws.token_ring.order):
-        return False  # already at end, can't skip further
-    ws.token_ring.current_token = next_idx
-    _save()
-    logger.info("Workspace '%s' token skipped → %d (%s)",
-                ws_id, next_idx, ws.token_ring.order[next_idx])
-    return True
-
-
-def can_send_in_token_mode(ws_id: str, agent_id: str, reply_to: str | None) -> tuple[bool, str]:
-    """Check if agent can send a message in token mode.
-
-    Returns (allowed: bool, reason: str).
-    """
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False, "Workspace not found"
-    if ws.token_ring.mode == "free":
-        return True, ""
-    order = ws.token_ring.order
-    try:
-        idx = order.index(agent_id)
-    except ValueError:
-        return False, "Not in token order"
-
-    # Index 0 (admin) can always send
-    if idx == 0:
-        return True, ""
-
-    # Check if this is a reply to a smaller-numbered agent
-    if reply_to and reply_to in order:
-        reply_idx = order.index(reply_to)
-        if reply_idx < idx:
-            return True, ""
-
-    # Initiate new topic only if current_token == idx
-    if ws.token_ring.current_token == idx:
-        return True, ""
-
-    return False, f"发言权当前在 #{ws.token_ring.current_token}（{order[ws.token_ring.current_token]}），请等待轮到你"
-
-
-def get_token_status(ws_id: str) -> dict | None:
-    """Get token ring status dict."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return None
-    return {
-        "mode": ws.token_ring.mode,
-        "current_token": ws.token_ring.current_token,
-        "order": ws.token_ring.order,
-    }
-
-
 # ── State Machine ──────────────────────────────────────────────────
 
 def start_closing(ws_id: str) -> bool:
-    """Initiate closing of a workspace. Returns False if not found or not ACTIVE."""
+    """R82: 简化为时间戳标记 — 不再等待 ACK。"""
     ws = _workspaces.get(ws_id)
     if not ws or ws.state != WorkspaceState.ACTIVE:
-        return False
-    ws.state = WorkspaceState.CLOSING
-    _save()
-    logger.info("Workspace '%s' → CLOSING", ws_id)
-    return True
-
-
-def confirm_ack(ws_id: str, agent_id: str) -> bool:
-    """Member acknowledges cleaning up."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
-        return False
-    ws.closing_acks.add(agent_id)
-    _save()
-    return True
-
-
-def finalize_close(ws_id: str) -> bool:
-    """Finalize: set state to ARCHIVED."""
-    ws = _workspaces.get(ws_id)
-    if not ws:
         return False
     ws.state = WorkspaceState.ARCHIVED
     ws.closed_at = time.time()
     _save()
-    logger.info("Workspace '%s' → ARCHIVED", ws_id)
+    logger.info("Workspace '%s' → ARCHIVED (R82 close)", ws_id)
     return True
 
 
 def force_close(ws_id: str) -> bool:
-    """Admin force-close without waiting for ACKs."""
+    """R82: 直接归档，不再需要等待 ACK。"""
     ws = _workspaces.get(ws_id)
     if not ws:
         return False
-    # Auto-ack all members
-    ws.closing_acks.update(ws.members)
     ws.state = WorkspaceState.ARCHIVED
     ws.closed_at = time.time()
     _save()
-    logger.info("Workspace '%s' force-closed", ws_id)
+    logger.info("Workspace '%s' force-closed (R82)", ws_id)
     return True
 
 
@@ -549,7 +405,7 @@ def check_idle(ws_id: str) -> bool:
     return False
 
 
-def can_create_for(owner_id: str, max_active: int = 1) -> bool:
+def can_create_for(owner_id: str, max_active: int = 3) -> bool:
     """Check if owner can create a new workspace."""
     active_count = sum(
         1 for w in _workspaces.values()

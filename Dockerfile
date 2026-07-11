@@ -4,7 +4,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install dependencies
+# Install system deps (supervisor for dual-process management)
+RUN apt-get update && apt-get install -y supervisor && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -17,6 +20,9 @@ COPY scripts/ scripts/
 COPY config/ config/
 COPY docs/ docs/
 
-EXPOSE 8765
+# Copy supervisor config
+COPY supervisord.conf /etc/supervisor/conf.d/ws-bridge.conf
 
-CMD ["python3", "-u", "/app/entrypoint.py"]
+EXPOSE 8765 8766
+
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/ws-bridge.conf"]

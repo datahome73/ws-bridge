@@ -10,60 +10,29 @@ import uuid
 from aiohttp import web
 
 from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS
-from .handler import handle_auth, handle_broadcast, handle_register, _connections
+from .main import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
 from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
 from .persistence import (
-    load_pairing_codes, load_approved_users,
-    load_web_bind_codes, load_web_sessions,
-    load_agent_channels, load_api_keys,
-    save_pairing_codes, save_approved_users,
-    save_web_bind_codes, save_web_sessions,
+    load_approved_users,
+    load_web_sessions,
+    load_api_keys,
+    save_approved_users,
+    save_web_sessions,
+    get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
-from .web_viewer import setup_routes, _ws_clients, write_chat_log
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
 
-# ── Periodic cleanup task ────────────────────────────────────
-
-
-async def _auto_archive_loop():
-    """Auto-archive inactive workspaces every 30 minutes."""
-    while True:
-        await asyncio.sleep(1800)
-        try:
-            from . import workspace as _ws_mod
-            for w in _ws_mod.get_active_workspaces():
-                _ws_mod.check_idle(w.id)
-        except Exception:
-            pass
-
-
-async def _periodic_cleanup():
-    """Remove expired pairing codes and old messages every 60 seconds."""
-    global _start_time
-    while True:
-        await asyncio.sleep(60)
-        from . import auth as _auth
-        removed = _auth.cleanup_expired_codes()
-        if removed:
-            logger.info("Cleaned up %d expired pairing codes", removed)
-            save_pairing_codes(DATA_DIR)
-        # Message store cleanup (every ~10 min)
-        if int(asyncio.get_event_loop().time()) % 600 < 60:
-            from . import message_store as _ms
-            _ms.clean_old_messages(DATA_DIR)
-        # P4: Chat log auto-cleanup — files older than 30 days
-        from .config import CHAT_LOG_DIR
-        _cutoff = time.time() - 30 * 86400
-        try:
-            for f in CHAT_LOG_DIR.iterdir():
-                if f.suffix == ".log" and f.stat().st_mtime < _cutoff:
-                    f.unlink()
-        except Exception:
-            pass
+# ── [REMOVED] Periodic cleanup task — ALL auto stopped per user request (2026-07-13) ──
+#
+# async def _auto_archive_loop():
+#     ...removed...
+#
+# async def _periodic_cleanup():
+#     ...removed...
 
 # ── WS handler for aiohttp ──────────────────────────────────────────
 
@@ -102,10 +71,35 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
             elif msg_type == "message" and agent_id:
+                # ── R86 B1: key 活性检查 ──
+                _key_records = _get_api_keys()
+                _key_record = _key_records.get(agent_id)
+                if not _key_record or _key_record.get("status") == "revoked":
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
+                    })
+                    continue  # skip this message, keep connection alive
+                # ═══ R87: _inbox:server 中继拦截 ═══
+                if await _handle_server_relay(ws, agent_id, data):
+                    continue
+                # ════════════════════════════════════════
+                # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
+                _channel = data.get("channel", "")
+                if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != f"{p.INBOX_CHANNEL_PREFIX}server":
+                    from . import auth as _auth
+                    _sender_level = _auth.get_level(agent_id)
+                    if _sender_level < 4:
+                        await ws.send_json({
+                            "type": "error",
+                            "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息。请提交 Agent Card 或联系管理员提升等级。",
+                        })
+                        continue
+                # ════════════════════════════════════════════════════
                 await handle_broadcast(ws, agent_id, data)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
-                from .handler import handle_agent_card_register
+                from .main import handle_agent_card_register
                 result = await handle_agent_card_register(ws, agent_id, data)
                 await ws.send_json(result)
 
@@ -121,7 +115,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 "workspace_remove_member",
             ) and agent_id:
                 # Route to handler's workspace processing
-                from .handler import handler as _handler_fn
+                from .main import handler as _handler_fn
                 # Re-use the same logic — delegate to handler
                 if msg_type == "workspace_create":
                     ws_name = data.get("name", "").strip()
@@ -162,10 +156,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         if ws_id and owner_id:
                             result = ws_mod.create_workspace(ws_id, ws_name or ws_id, owner_id, owner_name)
                             if result:
-                                # R7: Auto-bind owner's active channel to new workspace
-                                from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
-                                _set_ch(owner_id, ws_id)
-                                _save_ch(DATA_DIR)
+                                # R82: removed auto-bind active channel
                                 await ws.send_json({"type": "ok", "workspace_id": ws_id})
                             else:
                                 await ws.send_json({"type": "error", "error": f"Failed: owner may have too many active"})
@@ -177,12 +168,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     else:
                         await ws.send_json({"type": "error", "error": "Failed to close workspace"})
                 elif msg_type == "workspace_ack_close":
+                    # R82: removed ack-close logic — workspace close is immediate archive
                     ws_id = data.get("workspace_id", "").strip()
                     if ws_id:
-                        ws_mod.confirm_ack(ws_id, agent_id)
-                        ws_info = ws_mod.get_workspace(ws_id)
-                        if ws_info and ws_info.closing_acks >= ws_info.members:
-                            ws_mod.finalize_close(ws_id)
+                        ws_mod.start_closing(ws_id)
                 elif msg_type == "workspace_add_member":
                     ws_id = data.get("workspace_id", "").strip()
                     member_id = data.get("member_id", "").strip()
@@ -215,14 +204,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg_type == "approve_web" and agent_id:
                 users = (await _get_users())
                 if users.get(agent_id, {}).get("role") == "admin":
-                    from . import auth as _auth
-                    code = data.get("code", "").strip().upper()
-                    name = data.get("name", "大宏")
-                    result = _auth.approve_web_bind_code(code, name)
-                    if result.get("type") == "approve_ok":
-                        save_web_bind_codes(DATA_DIR)
-                        save_web_sessions(DATA_DIR)
-                    await ws.send_json(result)
+                    logger.warning("Web viewer bind code rejected: deprecated feature removed in R83")
+                    await ws.send_json({"type": "error", "error": "bind_code_deprecated"})
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
@@ -387,21 +370,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_json({"type": "ack", "message": f"✅ 已拒绝 {target_name or target_id[:12]} 的管理员申请"})
                 logger.info("Admin request rejected: %s for '%s' by %s, reason: %s", target_id[:12], ws_id, agent_id[:12], reject_reason)
 
-            # ── R7: set_active_channel ────────────────────────────────────────
-            elif msg_type == p.MSG_SET_ACTIVE_CHANNEL and agent_id:
-                users = (await _get_users())
-                if users.get(agent_id, {}).get("role") == "admin":
-                    target = data.get("target_agent_id", "").strip()
-                    channel = data.get(p.FIELD_ACTIVE_CHANNEL, "lobby")
-                    if target:
-                        from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
-                        _set_ch(target, channel)
-                        _save_ch(DATA_DIR)
-                        await ws.send_json({"type": "ok", "channel": channel, "agent_id": target})
-                    else:
-                        await ws.send_json({"type": "error", "error": "Missing target_agent_id"})
-                else:
-                    await ws.send_json({"type": "error", "error": "Permission denied"})
+            # ── R82: removed MSG_SET_ACTIVE_CHANNEL handler
 
             # ── R15: Workspace Admin Request ──────────────────────
             elif msg_type == p.MSG_ADMIN_REQUEST and agent_id:
@@ -484,10 +453,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                             target_id = aid
                             break
                 if target_id and target_id in users:
-                    from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
-                    _set_ch(target_id, p.LOBBY)
-                    _save_ch(DATA_DIR)
-                    logger.info("Admin %s task-switched agent %s to lobby", agent_id[:12], target_id[:12])
+                    logger.info("Admin %s task-switched agent %s to lobby (R82: channel tracking removed)", agent_id[:12], target_id[:12])
                 else:
                     logger.info("Admin %s task-switch target '%s' not found (silently ignored)", agent_id[:12], data.get("target", "")[:20])
                 # Fire-and-forget: no ACK
@@ -501,8 +467,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 workspace_id = data.get("workspace_id", "").strip()
                 all_flag = data.get("all", False)
                 target_id = data.get("target", "").strip()
-                from .persistence import set_agent_channel as _set_ch, save_agent_channels as _save_ch
-                from .handler import _offline_push_queue, _offline_timers, _flush_offline_push
+                from .state import _offline_push_queue, _offline_timers
+                from .main import _flush_offline_push
 
                 # ── R34: Workspace-scoped reset ──────────────────
                 if workspace_id:
@@ -568,10 +534,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                                     _flush_offline_push(mid)
                                 )
 
-                        _set_ch(mid, workspace_id)
-
-                    _save_ch(DATA_DIR)
-                    write_chat_log(sender_name, reset_content, channel=workspace_id)
+                        # R82: removed set_agent_channel
 
                     reset_id = str(uuid.uuid4())
                     await ws.send_json({
@@ -590,11 +553,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 # ── R29: Global reset (all: true) ────────────────
                 elif all_flag:
-                    for aid in users:
-                        if aid != agent_id:
-                            _set_ch(aid, p.LOBBY)
-                    _save_ch(DATA_DIR)
-                    logger.info("Admin %s reset ALL agents to lobby", agent_id[:12])
+                    # R82: removed global agent channel reset
+                    logger.info("Admin %s reset ALL agents (R82: channel tracking removed)", agent_id[:12])
                     await ws.send_json({"type": "ack", "status": "ok",
                                         "message": f"✅ 已重置全部 {len(users)} 个成员到 lobby"})
 
@@ -606,8 +566,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                                 target_id = aid
                                 break
                     if target_id and target_id in users:
-                        _set_ch(target_id, p.LOBBY)
-                        _save_ch(DATA_DIR)
                         target_name = users.get(target_id, {}).get("name", target_id[:12])
                         logger.info("Admin %s reset agent %s to lobby", agent_id[:12], target_id[:12])
                         await ws.send_json({"type": "ack", "status": "ok",
@@ -617,22 +575,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 else:
                     await ws.send_json({"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
-
-            # ── R38: MSG_TASK_NOTIFY relay ──────────────────────────
-            elif msg_type == p.MSG_TASK_NOTIFY and agent_id:
-                # Server-side push — relay to Web clients via write_chat_log
-                # (agent-side handling is done in handler.py's _broadcast_task_notify)
-                task_info = data.get("task", {})
-                transition = data.get("transition", "")
-                name = task_info.get("name", "?")
-                ctx = task_info.get("context_id", "?")
-                state = task_info.get("state", "?")
-                notify_text = f"📊 {ctx} {name}: {transition}"
-                write_chat_log("系统", notify_text, channel=p.ADMIN_CHANNEL)
-                logger.info(
-                    "R38 task_notify relayed to web: %s/%s → %s",
-                    ctx, name, state,
-                )
 
             else:
                 await ws.send_json({"type": "error", "error": "Unknown msg or not authenticated"})
@@ -645,8 +587,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             if not _connections[agent_id]:
                 del _connections[agent_id]
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
-        if ws in _ws_clients:
-            _ws_clients.discard(ws)
 
     return ws
 
@@ -655,12 +595,12 @@ async def _broadcast_workspace_closing_aiohttp(ws_id: str):
     """Notify workspace members of close via aiohttp connections."""
     from . import workspace as _ws_mod
     ws_info = _ws_mod.get_workspace(ws_id)
-    if not ws_info or ws_info.state != _ws_mod.WorkspaceState.CLOSING:
+    if not ws_info or ws_info.state != _ws_mod.WorkspaceState.ACTIVE:
         return
     
     import json as _json
     import shared.protocol as _p
-    from .handler import _connections as _conns
+    from .main import _connections as _conns
     
     deadline_ts = time.time() + _p.WORKSPACE_CLOSING_TIMEOUT
     payload = _json.dumps({
@@ -684,17 +624,10 @@ async def _broadcast_workspace_closing_aiohttp(ws_id: str):
     await asyncio.sleep(_p.WORKSPACE_CLOSING_TIMEOUT)
     
     ws_info = _ws_mod.get_workspace(ws_id)
-    if ws_info and ws_info.state == _ws_mod.WorkspaceState.CLOSING:
-        unacked = ws_info.members - ws_info.closing_acks
-        if unacked:
-            for aid in unacked:
-                ws_info.closing_acks.add(aid)
-        _ws_mod.finalize_close(ws_id)
-    # R7: Reset owner's active channel back to lobby after close
+    if ws_info and ws_info.state == _ws_mod.WorkspaceState.ARCHIVED:
+        pass  # already archived (R82: close is immediate)
     if ws_info:
-        from .persistence import reset_agent_channel as _reset_ch, save_agent_channels as _save_ch
-        _reset_ch(ws_info.owner_id)
-        _save_ch(DATA_DIR)
+        _ws_mod.start_closing(ws_id)
 
 
 async def _get_users():
@@ -819,15 +752,12 @@ async def _api_health(request: web.Request) -> web.Response:
 
 
 def main():
-    from .persistence import load_agent_channels
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load persisted data
-    load_pairing_codes(DATA_DIR)
     load_approved_users(DATA_DIR)
-    load_web_bind_codes(DATA_DIR)
     load_web_sessions(DATA_DIR)
-    load_agent_channels(DATA_DIR)
+    # R82: removed load_agent_channels
     load_api_keys(DATA_DIR)  # R72: API Key 存储
 
     # Initialise message store
@@ -841,25 +771,20 @@ def main():
 
     # Initialise workspace module
     ws_mod.init()
-    # R7: Load agent channel bindings (already imported above)
-    load_agent_channels(DATA_DIR)
-    # Register workspace API
-    from .web_viewer import setup_routes as _setup_routes
+    # R82: removed load_agent_channels
 
     logger.info("WS Bridge starting on %s:%d", HOST, PORT)
     logger.info("Admin agents: %s", ADMIN_AGENTS or "none")
 
     app = web.Application()
 
-    # Start periodic cleanup + auto-archive via on_startup
-    app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))
-    app.on_startup.append(lambda _: asyncio.create_task(_auto_archive_loop()))
+    # [REMOVED] Start periodic cleanup + auto-archive via on_startup
+    # User requested to stop ALL auto features (2026-07-13)
+    # app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))
+    # app.on_startup.append(lambda _: asyncio.create_task(_auto_archive_loop()))
 
     # Register WebSocket route
     app.router.add_get("/ws", ws_handler)
-
-    # Register web viewer routes
-    setup_routes(app)
 
     # P1: /api/status
     app.router.add_get("/api/status", _api_status)

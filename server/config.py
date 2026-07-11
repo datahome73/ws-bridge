@@ -10,11 +10,6 @@ HTTP_PORT = int(os.environ.get("WS_HTTP_PORT") or os.environ.get("PORT", "8765")
 APP_ID = os.environ.get("WS_APP_ID", "hermes-ws")
 DATA_DIR = Path(os.environ.get("WS_DATA_DIR", "./data"))
 CHAT_LOG_DIR = DATA_DIR / "chat_logs"
-BROADCAST_ADMINS: set[str] = set(
-    filter(None, os.environ.get("BROADCAST_ADMINS", "").split(","))
-)
-
-
 ADMIN_AGENTS: set[str] = set(
     filter(None, os.environ.get("WS_ADMIN_AGENTS", "").split(","))
 )
@@ -90,7 +85,7 @@ PIPELINE_PM_NAME: str = os.environ.get("WS_PM_NAME", "PM")
 # ── R42: Pipeline step map ────────────────────────────────────────
 PIPELINE_STEP_MAP: dict[str, dict] = {
     # step1 is auto-step, no primary/backup needed
-    "step1": {"role": "admin",   "name": "管线启动",       "timeout_hours": 2.0,  "escalation": "notify_pm"},
+    "step1": {"role": "operations",   "name": "管线启动",       "timeout_hours": 2.0,  "escalation": "notify_pm"},
     "step2": {"role": "arch",    "name": "技术方案",       "timeout_hours": 6.0,  "escalation": "notify_pm",
               "primary": "arch", "backup": "dev"},
     "step3": {"role": "dev",     "name": "编码",          "timeout_hours": 12.0, "escalation": "notify_pm",
@@ -99,8 +94,8 @@ PIPELINE_STEP_MAP: dict[str, dict] = {
               "primary": "review", "backup": "qa"},
     "step5": {"role": "qa",      "name": "测试验证",       "timeout_hours": 6.0,  "escalation": "notify_pm",
               "primary": "qa",   "backup": "review"},
-    "step6": {"role": "admin",   "name": "合并部署归档",    "timeout_hours": 2.0,  "escalation": "notify_pm",
-              "primary": "admin", "backup": "arch"},
+    "step6": {"role": "operations",   "name": "合并部署归档",    "timeout_hours": 2.0,  "escalation": "notify_pm",
+              "primary": "operations", "backup": "arch"},
 }
 _override_raw = os.environ.get("PIPELINE_STEP_MAP_OVERRIDE", "")
 if _override_raw.strip():
@@ -145,9 +140,27 @@ GIT_SYNC_FALLBACK: bool = os.environ.get("R65_GIT_SYNC_FALLBACK", "1") == "1"
 REPO_PATH: str = os.environ.get("R65_REPO_PATH", "/opt/data/ws-bridge")
 
 
-# ── R63 Phase 5: Feature toggle switches ──────────────────────────
-# Environment variables to enable/disable R63 features independently.
-# Default: all enabled ("1").
-R63_ENABLE_TIMEOUT: bool = os.environ.get("R63_ENABLE_TIMEOUT", "1") == "1"
-R63_ENABLE_AGENT_MAP: bool = os.environ.get("R63_ENABLE_AGENT_MAP", "1") == "1"
-R63_ENABLE_ACK: bool = os.environ.get("R63_ENABLE_ACK", "1") == "1"
+# ── R80: Validation hook system ────────────────────────────────
+ENABLE_VALIDATION_HOOK: bool = (
+    os.environ.get("R80_ENABLE_VALIDATION", "0") == "1"
+)
+"""验证钩子总开关。默认关闭（opt-in），旧管线不受影响。"""
+
+VALIDATION_DEFAULT_SCRIPT: str = os.environ.get(
+    "R80_VALIDATION_SCRIPT",
+    "python3 scripts/verify_default.py {output_ref}",
+)
+"""默认验证脚本模板。未配 validation.script 时使用此值。"""
+
+VALIDATION_DEFAULT_TIMEOUT: int = int(
+    os.environ.get("R80_VALIDATION_TIMEOUT", "30")
+)
+"""默认验证超时（秒）。"""
+
+PIPELINE_PM_AGENT_ID: str = os.environ.get("WS_PM_AGENT_ID", "")
+"""PM 的 agent_id。用于 step_force 权限判断。为空时仅检查全局管理员。"""
+
+
+# ── R87: _inbox:server 中继通道 ────────────────────────────
+SERVER_INBOX_CHANNEL: str = "_inbox:server"
+"""Bot 回复中继通道。bot 将 ACK/完成回复发至此通道，由 server 筛选转发。"""

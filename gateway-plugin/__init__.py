@@ -1,6 +1,12 @@
-"""WS Bridge Gateway plugin — broadcast group chat for bots (R72+).
+"""WS Bridge Gateway plugin — Inbox-only protocol (R82+).
 
-Uses the new R72 auth: register → api_key → auth(api_key).
+Uses R82 inbox-message-protocol:
+- All messages are inbox messages (channel="_inbox:<receiver_id>")
+- Reply = send_message(content, channel=f"_inbox:{sender_id}")
+- No more broadcast/lobby distinction
+- No active channel switching
+
+Uses R72+ auth: register → api_key → auth(api_key).
 Credentials are stored in ``~/.ws-bridge/{display_name}.json``.
 """
 
@@ -81,7 +87,7 @@ def check_requirements() -> bool:
 
 def validate_config(config: PlatformConfig) -> bool:
     extra = config.extra or {}
-    url = extra.get("url") or _env("URL")
+    url = extra.get("url") or extra.get("ws_url") or _env("URL")
     if not url:
         logger.warning("[WSBridge] URL not configured")
         return False
@@ -158,7 +164,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
         extra = config.extra or {}
 
         self._url = normalize_ws_url(
-            extra.get("url") or _env("URL") or ""
+            extra.get("url") or extra.get("ws_url") or _env("URL") or ""
         )
         self._bot_name = extra.get("bot_name") or _env("BOT_NAME") or "bot"
         self._role = extra.get("role") or "member"
@@ -187,9 +193,31 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._api_key = api_key
         self._agent_id = agent_id
 
+        # ── R96: API key 来源诊断日志 ──
+        if api_key:
+            source = "unknown"
+            if extra.get("api_key"):
+                source = "extra (config.yaml)"
+            elif _env("API_KEY"):
+                source = "env (WS_IM_API_KEY)"
+            else:
+                source = f"cred file (~/.ws-bridge/{self._bot_name}.json)"
+            logger.warning(
+                "[WSBridge] API key resolved from %s (len=%d)", source, len(api_key)
+            )
+        else:
+            logger.error(
+                "[WSBridge] No api_key for '%s'. Options: "
+                "(1) config.yaml extra.api_key, "
+                "(2) env WS_IM_API_KEY, "
+                "(3) ~/.ws-bridge/%s.json",
+                self._bot_name, self._bot_name,
+            )
+        # ═══════════════════════════════════════════
+
         # If we didn't get api_key yet, fail gracefully at connect time
         self._last_msg_ts: float = 0.0
-        self._active_channel: str = "lobby"
+        self._inbox_sender_agent_id: str = ""
 
         # WS state
         self._ws: Optional[Any] = None
@@ -279,11 +307,9 @@ class WSBridgeAdapter(BasePlatformAdapter):
             resp_type = resp.get("type")
             if resp_type == MSG_AUTH_OK:
                 self._agent_id = resp.get("agent_id", self._agent_id)
-                self._active_channel = resp.get(FIELD_ACTIVE_CHANNEL, "lobby")
                 logger.warning(
-                    "[WSBridge] Auth OK — agent_id=%s display_name=%s channel=%s",
+                    "[WSBridge] Auth OK — agent_id=%s display_name=%s",
                     self._agent_id[:20], resp.get("display_name", "?"),
-                    self._active_channel,
                 )
                 backoff = RECONNECT_BASE_DELAY
                 asyncio.create_task(self._reader_loop())
@@ -418,8 +444,20 @@ class WSBridgeAdapter(BasePlatformAdapter):
             if from_agent == self._agent_id or from_name == self._bot_name:
                 return
 
+            # Inbox routing: extract sender_id for reply routing
+            # R82+ protocol: ALL messages are inbox messages
+            broadcast_channel = msg.get(FIELD_CHANNEL, "lobby")
+            if broadcast_channel.startswith("_inbox:"):
+                self._inbox_sender_agent_id = from_agent
+                logger.warning(
+                    "[WSBridge] Inbox from=%s — reply to _inbox:%s",
+                    from_name, from_agent,
+                )
+
             # Mention mode: only respond when keyword present
-            if self._mention_mode and self._mention_keywords:
+            # R82+: inbox messages (_inbox:*) bypass mention filtering
+            broadcast_channel = msg.get(FIELD_CHANNEL, "lobby")
+            if self._mention_mode and self._mention_keywords                     and not broadcast_channel.startswith("_inbox:"):
                 if not any(kw in content for kw in self._mention_keywords):
                     logger.warning(
                         "[WSBridge] Silent: no mention keyword in %s",
@@ -438,7 +476,6 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
         elif msg_type == MSG_AUTH_OK:
             self._agent_id = msg.get("agent_id", self._agent_id)
-            self._active_channel = msg.get(FIELD_ACTIVE_CHANNEL, "lobby")
             logger.warning(
                 "[WSBridge] Re-auth OK — agent_id=%s", self._agent_id[:20]
             )
@@ -450,15 +487,17 @@ class WSBridgeAdapter(BasePlatformAdapter):
             await self._handle_workspace_closing(msg)
 
         elif msg_type == MSG_SET_ACTIVE_CHANNEL:
-            self._active_channel = msg.get(FIELD_CHANNEL, "lobby")
+            # DEPRECATED in R82+ — active channel switching is no longer used
+            # All messages are inbox-only now
             logger.warning(
-                "[WSBridge] Active channel set to: %s", self._active_channel
+                "[WSBridge] (DEPRECATED) set_active_channel: %s", msg.get(FIELD_CHANNEL, "?")
             )
 
         elif msg_type == MSG_CHANNEL_UPDATED:
-            new_channel = msg.get(FIELD_ACTIVE_CHANNEL, "lobby")
-            self._active_channel = new_channel
-            logger.warning("[WSBridge] Active channel updated to '%s'", new_channel)
+            # DEPRECATED in R82+ — active channel switching is no longer used
+            logger.warning(
+                "[WSBridge] (DEPRECATED) channel_updated: %s", msg.get(FIELD_ACTIVE_CHANNEL, "?")
+            )
 
     async def _handle_workspace_closing(self, msg: dict) -> None:
         """Handle workspace closing notification — clean up and ACK."""
@@ -470,7 +509,8 @@ class WSBridgeAdapter(BasePlatformAdapter):
             workspace_id, deadline_ts,
         )
 
-        self._active_channel = "lobby"
+        # R82+: active channel no longer relevant, but keep workspace_id for logging
+        logger.warning("[WSBridge] Workspace '%s' — no active channel to reset", workspace_id)
 
         ack = _json.dumps({
             "type": MSG_WORKSPACE_ACK_CLOSE,
@@ -492,7 +532,25 @@ class WSBridgeAdapter(BasePlatformAdapter):
                     )
 
     def _determine_channel(self, content: str, context_channel: str) -> str:
-        """Determine channel: @admin goes to lobby, others use active channel."""
+        """Determine channel: @admin goes to lobby, others use active channel.
+
+        R82+: inbox messages use context_channel (the resolved sender's inbox)
+        as the reply target, not _active_channel.
+
+        R87: ACK ✅ and ✅ 完成 replies route to _inbox:server (server relay).
+        """
+        # ═══ R87: server relay — ACK and completion go to _inbox:server ═══
+        started_content = content.strip()
+        if started_content.startswith("ACK ✅") or started_content.startswith("✅ 完成"):
+            logger.warning(
+                "[WSBridge] R87 relay: %s → _inbox:server",
+                content[:60],
+            )
+            return "_inbox:server"
+        # ═══════════════════════════════════════════════════════════════════
+
+        if context_channel.startswith("_inbox:"):
+            return context_channel
         if any(f"@{kw}" in content for kw in self._mention_keywords):
             return "lobby"
         return self._active_channel or "lobby"
@@ -503,8 +561,16 @@ class WSBridgeAdapter(BasePlatformAdapter):
         from gateway.platforms.base import MessageEvent, MessageType
 
         broadcast_channel = raw_msg.get(FIELD_CHANNEL, "lobby")
-        if broadcast_channel != "lobby":
-            self._active_channel = broadcast_channel
+        # R82+: active channel tracking is deprecated — all messages are inbox
+
+        # R82+ inbox routing: redirect reply to sender's inbox
+        from_agent = raw_msg.get("from_agent") or raw_msg.get("agent_id") or ""
+        if broadcast_channel.startswith("_inbox:") and from_agent:
+            broadcast_channel = f"_inbox:{from_agent}"
+            logger.warning(
+                "[WSBridge] Inbox redirect: %s → %s (reply to sender's inbox)",
+                raw_msg.get(FIELD_CHANNEL, ""), broadcast_channel,
+            )
 
         source = self.build_source(
             chat_id=broadcast_channel,
@@ -549,12 +615,16 @@ def register(ctx) -> None:
         emoji="🌉",
         allow_update_command=False,
         platform_hint=(
-            "You are chatting via WS Bridge — a self-hosted broadcast group chat for bots. "
-            "STRICT RULES: "
-            "1. This is a shared channel — ALL connected bots see your messages. "
-            "2. Text-only — NO files, images, voice, or media. "
-            "3. Do NOT output internal thinking, reasoning traces, or tool calls. "
-            "4. Keep responses concise and conversational. "
-            "5. If the message doesn't start with your name, it may not be directed at you."
+            "You are a bot on WS Bridge inbox system. "
+            "RULES (strict — violate = warning): "
+            "1. Inbox = task communication, NOT a chat. "
+            "2. ONLY 2 messages per task: "
+            "   Message 1 (on receive): one line 「ACK ✅ R85 收到」 "
+            "   Message 2 (on done): one line 「✅ 完成，已推 dev: abc1234」 "
+            "3. PROHIBITED: thinking, reasoning, 「我先…」, 「现在…」, empty msgs, progress updates, analysis steps. "
+            "4. You NEVER explain what you are about to do or have done. You ONLY send the result line. "
+            "5. ONE message per step — never split. "
+            "6. After Message 2, STOP. No follow-ups. "
+            "7. R87+ relay: ACK and ✅ 完成 replies go to _inbox:server automatically."
         ),
     )

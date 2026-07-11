@@ -167,6 +167,63 @@ def clear_messages_by_channel(channel: str, data_dir: Path):
     conn.commit()
 
 
+# ── R76: LIKE pattern query ──────────────────────────────────────────
+
+
+def get_messages_by_channel_pattern(
+    pattern: str, data_dir: Path, limit: int = 50, since: float | None = None
+) -> list[dict]:
+    """Retrieve messages from channels matching a SQL LIKE pattern.
+
+    Pattern uses '%' as wildcard (e.g. '_inbox:%' matches all inbox channels).
+    Since the `channel` column has an index (idx_messages_channel),
+    a LIKE query with a prefix pattern still hits the index.
+    """
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return []
+    conn = _get_conn(db_path)
+    try:
+        query = (
+            "SELECT msg_id, msg_type, from_agent, from_name, content, ts, channel "
+            "FROM messages WHERE channel LIKE ?"
+        )
+        params: list = [pattern]
+        if since is not None:
+            query += " AND ts > ?"
+            params.append(since)
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# ── R76: Time range query ────────────────────────────────────────────
+
+
+def get_messages_by_time_range(
+    start_ts: float, end_ts: float, data_dir: Path
+) -> list[dict]:
+    """Retrieve all messages within a time range, ordered by timestamp ascending."""
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return []
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT msg_id, msg_type, from_agent, from_name, content, ts, channel "
+            "FROM messages WHERE ts >= ? AND ts <= ? ORDER BY ts ASC",
+            (start_ts, end_ts),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+
+
 def clean_old_messages(
     data_dir: Path,
     max_age_days: int = MAX_AGE_DAYS,

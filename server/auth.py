@@ -1,71 +1,13 @@
-"""Pairing code generation and approval logic."""
+"""Agent authentication and permission checking."""
 import hashlib
 import os
 import secrets
-import string
-import time
 
 from . import persistence
 
-PAIRING_CODE_TTL = 300  # 5 minutes
-
-
-def _code_expired(entry: dict) -> bool:
-    """Check if a pairing code entry has expired."""
-    created = entry.get("created_at", 0)
-    return time.time() - created > PAIRING_CODE_TTL
-
-
-def generate_code() -> str:
-    chars = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(chars) for _ in range(8))
-
-
-def create_pairing_code(agent_id: str, app_id: str, name: str, code: str) -> None:
-    codes = persistence.get_pairing_codes()
-    codes[code] = {
-        "agent_id": agent_id,
-        "app_id": app_id,
-        "name": name,
-        "created_at": time.time(),
-    }
-    persistence.set_pairing_codes(codes)
-
-
-def approve(code: str, role: str = "member") -> dict:
-    codes = persistence.get_pairing_codes()
-    if code not in codes:
-        return {"type": "approve_error", "error": "Code not found or expired"}
-
-    entry = codes[code]
-    if _code_expired(entry):
-        del codes[code]
-        persistence.set_pairing_codes(codes)
-        return {"type": "approve_error", "error": "Code expired"}
-
-    agent_id = entry["agent_id"]
-    users = persistence.get_approved_users()
-    users[agent_id] = {"name": entry.get("name", agent_id), "role": role}
-    persistence.set_approved_users(users)
-    # ── R68: Register inbox channel for approved agent ──
-    persistence.set_agent_channel(agent_id, persistence.get_inbox_channel(agent_id))
-    del codes[code]
-    persistence.set_pairing_codes(codes)
-    return {"type": "approve_ok", "agent_id": agent_id}
-
-
-def cleanup_expired_codes() -> int:
-    """Remove expired pairing codes. Returns count of removed codes."""
-    codes = persistence.get_pairing_codes()
-    expired = [code for code, entry in codes.items() if _code_expired(entry)]
-    for code in expired:
-        del codes[code]
-    if expired:
-        persistence.set_pairing_codes(codes)
-    return len(expired)
-
 
 def is_approved(agent_id: str) -> bool:
+    """Check if agent is approved."""
     # R73: Check approved users first
     if agent_id in persistence.get_approved_users():
         return True
@@ -76,18 +18,6 @@ def is_approved(agent_id: str) -> bool:
 
 def get_users() -> dict:
     return persistence.get_approved_users()
-
-
-# ── R6: Role Level System ──────────────────────────────────────────────
-
-
-def role_level(agent_id: str) -> int:
-    """Return role level: 4=global_admin, 3=workspace_admin, 2=member, 1=observer."""
-    users = get_users()
-    user = users.get(agent_id, {})
-    if user.get("role") == "admin":
-        return 4
-    return 2  # All authenticated agents default to L2 member
 
 
 def is_workspace_admin(ws_id: str, agent_id: str) -> bool:
@@ -120,60 +50,6 @@ def set_workspace_admin(ws_id: str, agent_id: str, by_agent: str) -> bool:
         return False
     ws_mod.set_admin(ws_id, agent_id)
     return True
-
-
-# ── Web viewer bind codes ──────────────────────────────
-
-WEB_CODE_PREFIX = "WEB-"
-
-
-def generate_web_bind_code() -> str:
-    """Generate a web viewer bind code (e.g. WEB-A1B2)."""
-    chars = string.ascii_uppercase + string.digits
-    return WEB_CODE_PREFIX + "".join(secrets.choice(chars) for _ in range(4))
-
-
-def create_web_bind_code(code: str) -> None:
-    """Create a bind code entry awaiting admin approval."""
-    codes = persistence.get_web_bind_codes()
-    codes[code] = {
-        "created_at": time.time(),
-        "approved": False,
-    }
-    persistence.set_web_bind_codes(codes)
-
-
-def approve_web_bind_code(code: str, name: str = "大宏") -> dict:
-    """Admin approves a web bind code. Returns a session token."""
-    import hashlib
-
-    codes = persistence.get_web_bind_codes()
-    if code not in codes:
-        return {"type": "error", "error": "Bind code not found"}
-    if codes[code].get("approved"):
-        return {"type": "error", "error": "Already approved"}
-    if _code_expired(codes[code]):
-        del codes[code]
-        persistence.set_web_bind_codes(codes)
-        return {"type": "error", "error": "Bind code expired"}
-
-    # Generate session token
-    raw = f"{code}:{name}:{time.time()}:{secrets.token_hex(8)}"
-    token = hashlib.sha256(raw.encode()).hexdigest()
-
-    sessions = persistence.get_web_sessions()
-    sessions[token] = {
-        "name": name,
-        "created_at": time.time(),
-    }
-    persistence.set_web_sessions(sessions)
-
-    codes[code]["approved"] = True
-    codes[code]["token"] = token
-    codes[code]["name"] = name
-    persistence.set_web_bind_codes(codes)
-
-    return {"type": "approve_ok", "token": token, "name": name}
 
 
 # ── R72: API Key 核心逻辑 ────────────────────────────────────────
@@ -216,3 +92,65 @@ def revoke_api_key(agent_id: str) -> bool:
     keys[agent_id]["status"] = "revoked"
     persistence.set_api_keys(keys)
     return True
+
+
+# ── R76: Agent ID → display name resolver ──────────────────────────
+
+
+# ── R99: Level 权限等级 ──────────────────────────────────────────
+
+
+def get_level(agent_id: str) -> int:
+    """返回 agent 的权限等级 (1-4)。
+
+    查询链路: agent_id → persistence.get_api_key_record() → .level
+    规则：
+      - 未在 _api_key 记录中 → L1（未注册）
+      - 记录中无 level 字段 → L4（向后兼容存量 bot）
+      - 有 level 字段 → 返回实际值
+    """
+    record = persistence.get_api_key_record(agent_id)
+    if record is None:
+        return 1  # L1 — 未注册
+    return record.get("level", 4)  # 默认 L4 向后兼容
+
+
+def set_level(agent_id: str, new_level: int) -> bool:
+    """设置 agent 的 level 字段并持久化。
+
+    Args:
+        agent_id: 目标 agent
+        new_level: 1-4 的新等级
+
+    Returns:
+        True  — 更新成功
+        False — 该 agent 无 api_key 记录
+    """
+    keys = persistence.get_api_keys()
+    if agent_id not in keys:
+        return False
+    keys[agent_id]["level"] = new_level
+    persistence.set_api_keys(keys)
+    from . import config
+    persistence.save_api_keys(config.DATA_DIR)
+    return True
+
+
+def get_agent_name(agent_id: str, default: str | None = None) -> str:
+    """Return display name for an agent_id.
+
+    Priority:
+    1. Traditional users (pre-R72)
+    2. R72 users (registered via api_key, stored in handler._r72_users)
+    3. Truncated agent_id as fallback (e.g. 'ws_xxxxxxxxxxxx')
+    """
+    users = get_users()
+    name = users.get(agent_id, {}).get("name")
+    if name:
+        return name
+    try:
+        from . import state as _state
+        r72 = _state._r72_users
+        return r72.get(agent_id, {}).get("name", default or agent_id[:12])
+    except ImportError:
+        return default or agent_id[:12]

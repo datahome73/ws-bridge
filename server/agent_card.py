@@ -380,15 +380,38 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
     _cards[agent_id] = card
     save_cards()
 
+    # ── R99: Agent Card 提交成功 → L2→L3 自动晋升 ──
+    try:
+        from . import auth as _auth_mod
+        current_level = _auth_mod.get_level(agent_id)
+        if current_level == 2:
+            _auth_mod.set_level(agent_id, 3)
+            logger.info(
+                "[R99] 自动晋升: %s L2→L3 (Agent Card 提交)",
+                agent_id[:20],
+            )
+    except Exception:
+        logger.warning("[R99] 自动晋升失败 (非致命): %s", agent_id[:20])
+    # ──────────────────────────────────────────────
+
     # Update _ROLE_AGENT_MAP from handler for role-based routing
     if pipeline_roles:
         try:
-            from . import handler as _handler_mod
+            # R78 A3: 先走 PipelineContextManager（新路径）
+            from . import state as _state
+            mgr = _state._pipeline_manager
+            if mgr is not None:
+                current_map = mgr.get_global_role_map()
+                for r in pipeline_roles:
+                    if agent_id not in current_map.setdefault(r, []):
+                        current_map[r].append(agent_id)
+                mgr.set_global_role_map(current_map)
+            # 双写旧变量（过渡期后删除）
             for r in pipeline_roles:
-                if r not in _handler_mod._ROLE_AGENT_MAP:
-                    _handler_mod._ROLE_AGENT_MAP[r] = []
-                if agent_id not in _handler_mod._ROLE_AGENT_MAP[r]:
-                    _handler_mod._ROLE_AGENT_MAP[r].append(agent_id)
+                if r not in _state._ROLE_AGENT_MAP:
+                    _state._ROLE_AGENT_MAP[r] = []
+                if agent_id not in _state._ROLE_AGENT_MAP[r]:
+                    _state._ROLE_AGENT_MAP[r].append(agent_id)
         except Exception:
             pass
 
