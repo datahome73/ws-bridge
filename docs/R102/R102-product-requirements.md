@@ -253,8 +253,6 @@ if channel == "_inbox:server" and to_agent:
         "ts": time.time(),
     }
     sent = await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
-    # 通知 PM 派活成功（告知目标 bot 名和 sent 数）
-    await _notify_sender(sender_id, f"✅ 派活已转发到 {to_agent}")
 ```
 
 #### B. Bot 回复过滤（在对 `_inbox:server` 消息的处理中新增）
