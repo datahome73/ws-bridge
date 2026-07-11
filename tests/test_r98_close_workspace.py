@@ -35,7 +35,7 @@ from server.pipeline_context import (
     DEFAULT_STEPS,
 )
 
-HANDLER_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "handler.py")
+HANDLER_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "main.py")
 PIPELINE_CTX_PATH = os.path.join(
     os.path.dirname(__file__), "..", "server", "pipeline_context.py"
 )
