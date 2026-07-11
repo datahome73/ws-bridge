@@ -94,33 +94,18 @@ def _build_online_list(users: dict) -> str:
     return "、".join(parts) if parts else "无"
 
 async def handle_auth(ws, msg: dict) -> str | None:
-    """R72: api_key 认证.支持旧版 agent_id+app_id 向后兼容."""
+    """R72: api_key 认证.不再支持 agent_id + app_id + pairing_code."""
     api_key = msg.get(p.FIELD_API_KEY, "").strip()
-    agent_id = msg.get("agent_id", "").strip()
-    display_name = None
-
-    if api_key:
-        # R72+ api_key 认证
-        agent_id = auth.validate_api_key(api_key)
-        if not agent_id:
-            await _send(ws, {"type": "auth_error", "error": "Invalid api_key"})
-            return None
-        display_name = persistence.get_api_keys().get(agent_id, {}).get("display_name", agent_id)
-    elif agent_id:
-        # 旧版 agent_id 认证（向后兼容）
-        users_db = auth.get_users()
-        api_keys_db = persistence.get_api_keys() if hasattr(persistence, 'get_api_keys') else {}
-        if agent_id not in users_db and agent_id not in api_keys_db:
-            await _send(ws, {"type": "auth_error", "error": "Unknown agent_id"})
-            return None
-        display_name = (
-            users_db.get(agent_id, {}).get("name")
-            or api_keys_db.get(agent_id, {}).get("display_name")
-            or agent_id[:12]
-        )
-    else:
-        await _send(ws, {"type": "auth_error", "error": "Missing api_key or agent_id"})
+    if not api_key:
+        await _send(ws, {"type": "auth_error", "error": "Missing api_key"})
         return None
+
+    agent_id = auth.validate_api_key(api_key)
+    if not agent_id:
+        await _send(ws, {"type": "auth_error", "error": "Invalid api_key"})
+        return None
+
+    display_name = persistence.get_api_keys().get(agent_id, {}).get("display_name", agent_id)
     await _send(ws, {
         "type": "auth_ok",
         "agent_id": agent_id,
