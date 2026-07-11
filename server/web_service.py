@@ -85,7 +85,7 @@ def main():
 
     # R102: register /api/bot_status + start background poll
     app.router.add_get("/api/bot_status", _api_status)
-    app.on_startup.append(lambda a: asyncio.create_task(_poll_bot_status_loop(a)))
+    app.on_startup.append(lambda a: asyncio.ensure_future(_poll_bot_status_loop(a)))
 
     asyncio.run(_run_app(app))
 
