@@ -23,18 +23,6 @@ logger = logging.getLogger("ws-bridge.web")
 # ── In-memory chat log buffer (per channel) ────────────────────
 _chat_buffers: dict[str, list[dict]] = {"lobby": []}
 _MAX_BUFFER = 1000
-_ws_clients: set = set()  # single set, JS does channel dispatch
-
-
-async def _do_ws_send(ws, payload: str) -> None:
-    """Fire-and-forget helper: safely send a WS payload, discard dead clients."""
-    try:
-        await ws.send_str(payload)
-    except (ConnectionError, RuntimeError, OSError):
-        _ws_clients.discard(ws)
-    except Exception:
-        pass
-
 
 # ── Daily chat log file (per channel) ──────────────────────────
 
@@ -89,7 +77,7 @@ def _today_str() -> str:
 
 def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> None:
     """Append a chat message to channel-specific daily log file + buffer."""
-    global _ws_clients, _chat_buffers
+    global _chat_buffers
     ict_now = datetime.now(timezone.utc) + timedelta(hours=7)
     # 🔧 F-8: Use numeric ts (time.time()) for dedup consistency with DB path
     # Keep human-readable format for log file line
@@ -121,15 +109,6 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     _chat_buffers[channel].append(entry)
     if len(_chat_buffers[channel]) > _MAX_BUFFER:
         _chat_buffers[channel][:100] = []
-
-    # Push live to all WS clients with channel field
-    payload = json.dumps({
-        "type": "chat_message",
-        "channel": channel,
-        "message": entry,
-    })
-    for ws in list(_ws_clients):
-        asyncio.create_task(_do_ws_send(ws, payload))
 
 
 def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
@@ -347,29 +326,6 @@ async def handle_api_channels(request: web.Request) -> web.Response:
         archive_state = {"active": True, "last_archive_ts": 0}
 
     return web.json_response({"channels": channels, "archive_state": archive_state})
-
-
-async def handle_ws_chat(request: web.Request) -> web.WebSocketResponse:
-    """WebSocket endpoint for live chat updates."""
-    token = request.query.get("token", "")
-    if not validate_token(token):
-        return web.WebSocketResponse()
-
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    _ws_clients.add(ws)
-
-    try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.PONG:
-                continue
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                break
-    except Exception:
-        pass
-    finally:
-        _ws_clients.discard(ws)
-    return ws
 
 
 async def handle_api_approve_web(request: web.Request) -> web.Response:
@@ -706,7 +662,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/check", handle_api_check)
     app.router.add_get("/api/chat", handle_api_chat)
     app.router.add_post("/api/approve_web", handle_api_approve_web)
-    app.router.add_get("/ws/chat", handle_ws_chat)
     app.router.add_get("/api/channels", handle_api_channels)
     app.router.add_get("/health", _handle_health)
     # R8: logout

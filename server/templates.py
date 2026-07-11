@@ -531,79 +531,72 @@ async function init() {
   var firstTab = 'tab1';
   selectTab(firstTab);
 
-  // 3. WS live
-  let ws = null;
-  function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = proto + '//' + location.host + '/ws/chat?token=' + encodeURIComponent(TOKEN);
-    ws = new WebSocket(url);
-    ws.onmessage = function(e) {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'chat_message') {
-          const ch = data.channel || '';
-          // R83: inbox messages → separate handling with unread badge
-          if (ch.startsWith('_inbox:')) {
-            const msg = data.message || data;
-            _inboxCache.push(msg);
-            if (activeTabId === 'tab1') {
-              const list = document.getElementById('msgList');
-              list.insertBefore(createInboxMessageEl(msg), list.firstChild);
-            } else {
-              unreadCounts['__inbox__'] = (unreadCounts['__inbox__'] || 0) + 1;
-              renderTabBar();
-            }
-          } else {
-            appendMessage(ch, data.message || data);
-          }
-        }
-        // R6: workspace archived event → refresh panel cache
-        if (data._workspace_event === 'archived') {
-          wsPanelCache = null; // invalidate cache
-        }
-        // R76: workspace created → reset archive mode
-        if (data.type === 'workspace_created') {
-          archiveMode = false;
-          renderTabBar();
-        }
-      } catch(_) {}
-    };
-    ws.onclose = function(e) {
-      // R33: auth failure (code 4000-4999) → don't retry, redirect to bind page
-      if (e.code >= 4000 && e.code < 5000) {
-        try { localStorage.removeItem('ws_bridge_token'); } catch(_) {}
-        location.href = '/chat';
-        return;
-      }
-      setTimeout(connectWS, 3000);
-    };
-  }
-  connectWS();
+  // 3. Poll-based live updates (R101: replaced WS push with 5s polling)
+  // ── Per-tab since tracking ──
+  let lastTsByChannel = {};
 
-  // 4. Poll fallback for messages (F-2: 10s timeout, F-3: incremental append)
-  setInterval(async function() {
+  async function pollActiveChannel() {
+    const activeTab = TAB_STATE[activeTabId];
+    let channel = activeTab ? activeTab.channel : null;
+    let endpoint, url;
+
+    if (activeTabId === 'tab1') {
+      // Inbox tab — use /api/chat/inbox
+      endpoint = '/api/chat/inbox?limit=50&token=' + encodeURIComponent(TOKEN);
+      const since = lastTsByChannel['__inbox__'] || 0;
+      if (since > 0) endpoint += '&since=' + since;
+    } else if (channel) {
+      endpoint = '/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN);
+      const since = lastTsByChannel[channel] || 0;
+      if (since > 0) endpoint += '&since=' + since;
+    } else {
+      return;
+    }
+
     try {
-      const activeTab = TAB_STATE[activeTabId];
-      const channel = activeTab ? activeTab.channel : null;
-      if (!channel) return;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
-      const resp = await fetch('/api/chat?channel=' + encodeURIComponent(channel) + '&limit=50&token=' + encodeURIComponent(TOKEN), {signal: controller.signal});
+      const resp = await fetch(endpoint, {signal: controller.signal});
       clearTimeout(timeout);
       if (!resp.ok) return;
       const data = await resp.json();
       const msgs = data.messages || [];
-      const existing = msgContainers[channel] || [];
-      // F-3: incremental append — only new messages, no full reload
-      const newMsgs = msgs.slice(existing.length);
-      for (let i = 0; i < newMsgs.length; i++) {
-        appendMessage(channel, newMsgs[i]);
+
+      if (activeTabId === 'tab1') {
+        // Inbox tab: display with createInboxMessageEl
+        for (const m of msgs) {
+          if (m.ts && m.ts > (lastTsByChannel['__inbox__'] || 0)) {
+            lastTsByChannel['__inbox__'] = m.ts;
+          }
+          const list = document.getElementById('msgList');
+          const empty = list.querySelector('.empty');
+          if (empty) empty.remove();
+          list.insertBefore(createInboxMessageEl(m), list.firstChild);
+        }
+      } else if (channel) {
+        for (const m of msgs) {
+          if (m.ts && m.ts > (lastTsByChannel[channel] || 0)) {
+            lastTsByChannel[channel] = m.ts;
+          }
+          appendMessage(channel, m);
+        }
       }
     } catch(_) {}
-  }, 5000);
+  }
 
+  // Initial poll + every 5 seconds
+  setTimeout(pollActiveChannel, 500);
+  setInterval(pollActiveChannel, 5000);
 
-  // 5. R83: Poll workspaces — refresh panel cache + detect history tab changes
+  // Touch pull-to-refresh
+  let touchStartY = 0;
+  document.addEventListener('touchstart', function(e) { touchStartY = e.touches[0].clientY; });
+  document.addEventListener('touchend', function(e) {
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    if (dy > 100) pollActiveChannel();
+  });
+
+  // 4. R83: Poll workspaces — refresh panel cache + detect history tab changes
   setInterval(async function() {
     try {
       const resp = await fetch('/api/workspaces');
@@ -632,7 +625,7 @@ async function init() {
     } catch(_) {}
   }, 15000);
 
-  // 6. R8: Poll bot status
+  // 5. R8: Poll bot status
   let offlineSince = {};
   async function pollStatus() {
     try {
@@ -674,7 +667,7 @@ async function init() {
   setInterval(pollStatus, 15000);
   pollStatus();
 
-  // 7. R20: Workspace list panel
+  // 6. R20: Workspace list panel
   const wsPanel = document.createElement('div');
   wsPanel.className = 'ws-panel';
   wsPanel.id = 'wsPanel';
@@ -697,7 +690,7 @@ async function init() {
     }
   });
 
-  // 8. R8: Search toggle
+  // 7. R8: Search toggle
   document.getElementById('toggleSearchBtn').addEventListener('click', function() {
     const bar = document.getElementById('searchBar');
     if (searchMode) {
@@ -749,7 +742,7 @@ async function init() {
   document.getElementById('searchBtn').addEventListener('click', doSearch);
   document.getElementById('searchClearBtn').addEventListener('click', exitSearchMode);
 
-  // 9. R8: Logout button
+  // 8. R8: Logout button
   document.getElementById('logoutBtn').addEventListener('click', async function() {
     await fetch('/api/logout', {method: 'POST'});
     window.location.href = '/chat';
