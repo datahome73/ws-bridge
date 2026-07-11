@@ -1,9 +1,12 @@
 """R100: admin domain commands — extracted from handler.py."""
 
 from .. import state, auth, command_utils, persistence
+import time
+from .. import workspace as ws_mod
 
 async def _cmd_list_agents(sender_id: str, params: dict) -> str:
     """List approved agents with online status."""
+    from ..main import _connections
     users = auth.get_users()
     online_ids = set(_connections.keys())
     role_filter = params.get("role", "").lower()
@@ -21,6 +24,7 @@ async def _cmd_list_agents(sender_id: str, params: dict) -> str:
 
 async def _cmd_agent_status(sender_id: str, params: dict) -> str:
     """Show detailed agent info."""
+    from ..main import _connections
     target = params.get("_positional", [None])[0] or params.get("agent")
     if not target:
         return "❌ 用法: !agent_status <agent_id|agent_name>"
@@ -92,6 +96,7 @@ async def _cmd_list_pending(sender_id: str, params: dict) -> str:
 
 async def _cmd_audit_log(sender_id: str, params: dict) -> str:
     """Query audit log. P3 (own) / P4 (all)."""
+    from ..main import _audit_logger
     limit_str = params.get("limit", "10")
     try:
         limit = int(limit_str)

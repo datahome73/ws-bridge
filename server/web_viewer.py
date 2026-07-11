@@ -541,9 +541,9 @@ async def handle_api_agents_status(request: web.Request) -> web.Response:
     if not validate_token(token):
         return web.json_response({"error": "unauthorized"}, status=401)
 
-    # Lazy import to avoid circular dep (handler.py imports web_viewer.write_chat_log)
-    from . import handler as _handler
-    connections = _handler.get_connections()
+    # Lazy import to avoid circular dep
+    from .main import get_connections
+    connections = get_connections()
     users = auth.get_users()
     result = {}
     for agent_id, user_info in users.items():
