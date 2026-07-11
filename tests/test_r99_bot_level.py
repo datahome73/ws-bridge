@@ -28,10 +28,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from server.auth import get_level, set_level
 from server.persistence import get_api_key_record
 
-HANDLER_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "handler.py")
+HANDLER_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "main.py")
 AUTH_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "auth.py")
 AGENT_CARD_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "agent_card.py")
 PERSISTENCE_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "persistence.py")
+STATE_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "state.py")
+PIPELINE_PATH = os.path.join(os.path.dirname(__file__), "..", "server", "commands", "pipeline.py")
 
 PASS = "✅"
 FAIL = "❌"
@@ -262,7 +264,7 @@ class TestT5_InboxServerAllLevels(unittest.TestCase):
 
     def test_SERVER_INBOX_CHANNEL_constant(self):
         """验证 SERVER_INBOX_CHANNEL 常量正确"""
-        with open(HANDLER_PATH) as f:
+        with open(STATE_PATH) as f:
             content = f.read()
 
         check(
@@ -346,8 +348,8 @@ class TestT7_SystemNameUnified(unittest.TestCase):
         )
 
     def test_SYSTEM_AGENT_ID_value(self):
-        """验证 SYSTEM_AGENT_ID = \"_system\""""
-        with open(HANDLER_PATH) as f:
+        """验证 SYSTEM_AGENT_ID = \"_system\" (在 state.py)"""
+        with open(STATE_PATH) as f:
             content = f.read()
 
         check(
@@ -357,8 +359,8 @@ class TestT7_SystemNameUnified(unittest.TestCase):
         )
 
     def test_pm_agent_id_uses_constant(self):
-        """验证 pm_agent_id 默认值使用 SYSTEM_AGENT_ID"""
-        with open(HANDLER_PATH) as f:
+        """验证 pm_agent_id 默认值使用 SYSTEM_AGENT_ID (在 pipeline.py)"""
+        with open(PIPELINE_PATH) as f:
             content = f.read()
 
         check(
