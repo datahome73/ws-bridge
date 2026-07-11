@@ -64,6 +64,17 @@ async def _api_status(request: web.Request) -> web.Response:
 # ── Main ──────────────────────────────────────────────────────────
 
 
+async def _run_app(app: web.Application) -> None:
+    """async runner: AppRunner + TCPSite, replacing web.run_app (which fails under supervisor)."""
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, HOST, MY_PORT)
+    await site.start()
+    print(f"WEB READY: http://{HOST}:{MY_PORT}/", flush=True)
+    # Block forever — supervisor handles restart on crash
+    await asyncio.Event().wait()
+
+
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     persistence.load_web_sessions(DATA_DIR)
@@ -76,8 +87,7 @@ def main():
     app.router.add_get("/api/bot_status", _api_status)
     app.on_startup.append(lambda a: asyncio.create_task(_poll_bot_status_loop(a)))
 
-    print(f"WEB READY: http://{HOST}:{MY_PORT}/", flush=True)
-    web.run_app(app, host=HOST, port=MY_PORT)
+    asyncio.run(_run_app(app))
 
 
 if __name__ == "__main__":
