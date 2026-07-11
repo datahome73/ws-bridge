@@ -10,7 +10,7 @@ import uuid
 from aiohttp import web
 
 from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS
-from .handler import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
+from .main import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
 from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
@@ -88,7 +88,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await handle_broadcast(ws, agent_id, data)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
-                from .handler import handle_agent_card_register
+                from .main import handle_agent_card_register
                 result = await handle_agent_card_register(ws, agent_id, data)
                 await ws.send_json(result)
 
@@ -104,7 +104,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 "workspace_remove_member",
             ) and agent_id:
                 # Route to handler's workspace processing
-                from .handler import handler as _handler_fn
+                from .main import handler as _handler_fn
                 # Re-use the same logic — delegate to handler
                 if msg_type == "workspace_create":
                     ws_name = data.get("name", "").strip()
@@ -456,7 +456,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 workspace_id = data.get("workspace_id", "").strip()
                 all_flag = data.get("all", False)
                 target_id = data.get("target", "").strip()
-                from .handler import _offline_push_queue, _offline_timers, _flush_offline_push
+                from .state import _offline_push_queue, _offline_timers
+                from .main import _flush_offline_push
 
                 # ── R34: Workspace-scoped reset ──────────────────
                 if workspace_id:
@@ -608,7 +609,7 @@ async def _broadcast_workspace_closing_aiohttp(ws_id: str):
     
     import json as _json
     import shared.protocol as _p
-    from .handler import _connections as _conns
+    from .main import _connections as _conns
     
     deadline_ts = time.time() + _p.WORKSPACE_CLOSING_TIMEOUT
     payload = _json.dumps({

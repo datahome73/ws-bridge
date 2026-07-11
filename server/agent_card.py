@@ -398,7 +398,7 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
     if pipeline_roles:
         try:
             # R78 A3: 先走 PipelineContextManager（新路径）
-            from . import handler as _handler_mod
+            from . import main as _handler_mod
             mgr = _handler_mod._pipeline_manager
             if mgr is not None:
                 current_map = mgr.get_global_role_map()

@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""R100: WS message handler core — extracted from handler.py (renamed to main.py).
+
+This file was created by splitting the original handler.py (7,024 lines)
+into state.py + command_utils.py + commands/ + main.py.
+Only the core WS routing and subsystems that will be split in Phase 2 remain.
+"""
+
 """WebSocket handler and broadcast logic — admin-relay mode + channel routing."""
 import asyncio
 import os
@@ -9,6 +17,8 @@ import uuid
 
 from . import agent_card as ac_mod  # R67: unified Agent Card interface
 from . import auth, config, persistence
+from . import state  # R100: shared state container
+from . import command_utils  # R100: command routing utilities
 from . import message_store as ms
 from . import workspace as ws_mod
 from .audit import AuditLogger
@@ -22,105 +32,21 @@ import shared.protocol as p
 logger = logging.getLogger("ws-bridge")
 
 _connections: dict[str, set] = {}
-
 # P6: message send stats
-_send_stats: dict = {"total": 0, "total_latency": 0.0}
-
-# R35: Audit logger for admin commands
+state._send_stats: dict = {"total": 0, "total_latency": 0.0}
 _audit_logger = AuditLogger(config.DATA_DIR)
-
-_SILENT_PREFIXES = (
-    "Operation interrupted",
-    "Gateway is shutting down",
-    "Gateway shut",
-    "⚡ Interrupting",
-    "⚠️ Gateway",
-    "⏳ Gateway",
-    "🤐",
-)
-
-# R11 P1.1: Delivery status per message per agent
-_delivery_status: dict[str, dict[str, str]] = {}
-# R11 P1.2: Offline push queue
-_offline_push_queue: dict[str, list[dict]] = {}
-
-# R79: 系统消息发送者标识
-SYSTEM_AGENT_ID: str = "_system"
-# R79 D: 注册后大厅广播开关（默认关闭）
-REGISTRATION_BROADCAST_ENABLED: bool = (
-    os.environ.get("REGISTRATION_BROADCAST_ENABLED", "0") == "1"
-)
-
-# ── R87: _inbox:server 中继通道 ──────────────────────────
-SERVER_INBOX_CHANNEL = "_inbox:server"
-
-
-def is_server_inbox(channel: str) -> bool:
-    """判断 channel 是否为 server 中继通道。"""
-    return channel == SERVER_INBOX_CHANNEL
-
-# ── R42: Pipeline state ──────────────────────────────────────────
-_PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
-
-# ── R62: Pipeline config (read-only, separate from runtime state) ──
-_PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
-
-# R78 A: DEPRECATED — 迁移到 PipelineContextManager._global_role_map
-_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
-
-# R78 B: DEPRECATED — 迁移到 PipelineContext.ack_states
-_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
-
-# ── R77: PipelineContextManager — 统一管线上下文管理 ──────────────
-_pipeline_manager: PipelineContextManager | None = None
-
-
 def _ensure_pipeline_manager() -> PipelineContextManager:
-    """惰性初始化 PipelineContextManager。"""
-    global _pipeline_manager
-    if _pipeline_manager is None:
-        _pipeline_manager = PipelineContextManager(data_dir=config.DATA_DIR)
-    return _pipeline_manager
-
-
-_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...]
-_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info
-
-# ── R65: Git pipeline sync state ───────────────────────────────
-_GIT_SYNC_TASK: asyncio.Task | None = None
-
-_LOBBY_PAUSED: bool = False
-_LOBBY_PAUSED_ROUND: str = ""
-
-# ── R55 A: Step advance 2s serialization buffer ────────────────
-_step_advance_buffer: dict[str, float] = {}
-
-# ── R57 A: Rollcall ACK events for 30s rollcall timeout ──────
-_r57_rollcall_events: dict[str, asyncio.Event] = {}
-
-# ── R43: Watchdog state ─────────────────────────────────────
-_watchdog_started: bool = False
-_watchdog_task: asyncio.Task | None = None
-_watchdog_alerts: dict[str, float] = {}  # "{round}/{step}" → last_alert_ts
-
-_offline_timers: dict[str, asyncio.Task] = {}
-
-# ── R72 C: R72 认证 agent 的用户名映射（auth.get_users 不包含 R72 agent）──
-_r72_users: dict[str, dict] = {}
-
-# R11 P1.3: Expose connections for web status API
+    """惰性初始化 PipelineContextManager."""
+    if state._pipeline_manager is None:
+        state._pipeline_manager = PipelineContextManager(data_dir=config.DATA_DIR)
+    return state._pipeline_manager
 def get_connections() -> dict[str, set]:
     return _connections
 
 def get_delivery_status(msg_id: str) -> dict[str, str]:
-    return _delivery_status.get(msg_id, {})
-
-
-# ── R86 C1: Force-disconnect a revoked agent ────────────────────────
-
-
+    return state._delivery_status.get(msg_id, {})
 def _force_disconnect_revoked_agent(agent_id: str) -> None:
-    """吊销 api_key 后强制断连 agent 的所有连接。"""
+    """吊销 api_key 后强制断连 agent 的所有连接."""
     conns = list(_connections.get(agent_id, set()))
     for conn in conns:
         try:
@@ -129,41 +55,6 @@ def _force_disconnect_revoked_agent(agent_id: str) -> None:
         except Exception:
             pass
     _connections.pop(agent_id, None)
-
-
-# ── R12 P0.3: Task ack tracking ────────────────────────────────────────
-_task_ack_timers: dict[str, asyncio.Task] = {}
-
-# ── R12 P1.1: Rate limiting ──────────────────────────────────────────────
-_rate_limits: dict[str, dict[str, list[float]]] = {}
-RATE_LIMIT_WINDOW = 3    # Max messages
-RATE_LIMIT_SECONDS = 10  # Per this many seconds
-
-# ── R12 P1.2: Duplicate content tracking ────────────────────────────────
-_last_message: dict[str, dict] = {}
-
-# ── R24: Lobby message prefix constants ─────────────────────────────
-PREFIX_ANNOUNCE = "📢"
-PREFIX_CHECKIN = "📋"
-PREFIX_HELP = "🆘"
-
-# ── R24: Lobby-specific rate limiter ─────────────────────────────────
-_lobby_rate_limits: dict[str, list[float]] = {}
-LOBBY_RATE_WINDOW_P1P2 = 2
-LOBBY_RATE_WINDOW_P3 = 5
-LOBBY_RATE_SECONDS = 60
-
-# ── R53: Channel switch ACK state (replaces R37 rollcall) ────────
-_channel_ack_state: dict[str, dict] = {}
-# ws_id → {
-#   "ack_task_id": str,           # per-broadcast unique ID
-#   "online_members": set[str],   # members that were online at send time
-#   "acked_members": dict[str,float],  # {agent_id: ack_timestamp}
-#   "timer": asyncio.Task | None  # 30s timeout task
-#   "callback": callable | None   # called on completion/partial
-# }
-
-
 async def _send(ws, data: dict) -> None:
     """Send JSON to a WebSocket (compatible with both websockets & aiohttp)."""
     if hasattr(ws, "send_json"):
@@ -173,12 +64,10 @@ async def _send(ws, data: dict) -> None:
     elif hasattr(ws, "send"):
         await ws.send(json.dumps(data))
 
-
-# ── R29: Online member list builder ───────────────────────────────
 def _build_online_list(users: dict) -> str:
     """Build a comma-separated online member list with admin annotation.
     Uses _connections (global) to determine who is online.
-    R72 B: 也包含通过 api_key 注册的 agent（不在 approved_users 中）。"""
+    R72 B: 也包含通过 api_key 注册的 agent（不在 approved_users 中）."""
     # Build a name map: approved_users first, then api_keys as fallback
     api_keys = persistence.get_api_keys() if hasattr(persistence, 'get_api_keys') else {}
     online_ids = set(_connections.keys())
@@ -203,9 +92,8 @@ def _build_online_list(users: dict) -> str:
         parts.append(f"{prefix}{name}")
     return "、".join(parts) if parts else "无"
 
-
 async def handle_auth(ws, msg: dict) -> str | None:
-    """R72: api_key 认证。不再支持 agent_id + app_id + pairing_code。"""
+    """R72: api_key 认证.不再支持 agent_id + app_id + pairing_code."""
     api_key = msg.get(p.FIELD_API_KEY, "").strip()
     if not api_key:
         await _send(ws, {"type": "auth_error", "error": "Missing api_key"})
@@ -228,14 +116,14 @@ async def handle_auth(ws, msg: dict) -> str | None:
     _update_agent_online_status(agent_id)
 
     # ── R72 C: 将 R72 agent 注册到 users 字典，确保大厅路由可查 ──
-    _r72_users[agent_id] = {"name": display_name}
+    state._r72_users[agent_id] = {"name": display_name}
 
     return agent_id
 
 
 def _update_agent_online_status(agent_id: str) -> None:
-    """R72 B: 认证/注册后同步更新 Agent Card 状态为 online 并刷新 last_online。
-    确保 card 状态与 WebSocket 连接状态一致，防止 mark_stale_offline 后无法恢复。"""
+    """R72 B: 认证/注册后同步更新 Agent Card 状态为 online 并刷新 last_online.
+    确保 card 状态与 WebSocket 连接状态一致，防止 mark_stale_offline 后无法恢复."""
     import server.agent_card as ac_mod
     cards = ac_mod.get_all_cards()
     card = cards.get(agent_id)
@@ -249,7 +137,7 @@ def _update_agent_online_status(agent_id: str) -> None:
 
 
 def _find_agent_by_name(keys: dict, display_name: str) -> str | None:
-    """在 _api_keys 中按 display_name 查找已存在的 agent_id。返回 agent_id 或 None。"""
+    """在 _api_keys 中按 display_name 查找已存在的 agent_id.返回 agent_id 或 None."""
     for agent_id, record in keys.items():
         if record.get("display_name") == display_name:
             return agent_id
@@ -257,7 +145,7 @@ def _find_agent_by_name(keys: dict, display_name: str) -> str | None:
 
 
 async def handle_register(ws, msg: dict) -> str | None:
-    """R72: 新 bot 注册。返回 agent_id + api_key，同一连接立即生效。"""
+    """R72: 新 bot 注册.返回 agent_id + api_key，同一连接立即生效."""
     display_name = msg.get("display_name", "").strip()
     if not display_name:
         await _send(ws, {"type": "auth_error", "error": "Missing display_name"})
@@ -269,7 +157,7 @@ async def handle_register(ws, msg: dict) -> str | None:
     if existing:
         await _send(ws, {
             "type": "auth_error",
-            "error": f"'{display_name}' 已存在，请使用 auth 或换一个 display_name。如遗忘 api_key 请联系管理员重置。",
+            "error": f"'{display_name}' 已存在，请使用 auth 或换一个 display_name.如遗忘 api_key 请联系管理员重置.",
             "existing_agent_id": existing,
         })
         return None
@@ -305,8 +193,8 @@ async def handle_register(ws, msg: dict) -> str | None:
     # ── 同步更新 Agent Card 状态（如存在历史卡片） ──
     _update_agent_online_status(agent_id)
 
-    # ── R72 C: 注册后写入 _r72_users，确保大厅路由可查 ──
-    _r72_users[agent_id] = {"name": display_name}
+    # ── R72 C: 注册后写入 state._r72_users，确保大厅路由可查 ──
+    state._r72_users[agent_id] = {"name": display_name}
 
     return agent_id
 
@@ -316,7 +204,7 @@ async def handle_register(ws, msg: dict) -> str | None:
 
 def _build_registration_welcome(agent_id: str, display_name: str,
                                 pipeline_roles: list[str]) -> str:
-    """构建注册欢迎消息文本。"""
+    """构建注册欢迎消息文本."""
     roles_str = ", ".join(pipeline_roles) if pipeline_roles else "未声明"
     return (
         f"🎉 欢迎加入 ws-bridge！\n\n"
@@ -332,7 +220,7 @@ def _build_registration_welcome(agent_id: str, display_name: str,
 
 def _build_admin_notification(agent_id: str, display_name: str,
                               pipeline_roles: list[str]) -> str:
-    """构建管理员通知消息文本。"""
+    """构建管理员通知消息文本."""
     roles_str = ", ".join(pipeline_roles) if pipeline_roles else "未声明"
     return (
         f"📢 新 bot 注册通知\n\n"
@@ -345,47 +233,15 @@ def _build_admin_notification(agent_id: str, display_name: str,
 
 
 def _should_notify_admins(display_name: str) -> bool:
-    """R82: 简化 — 管理员注册不发通知。"""
+    """R82: 简化 — 管理员注册不发通知."""
     # R82: BROADCAST_ADMINS removed; always notify for non-admin registrations
     return True
 
 
-async def _broadcast_to_channel(channel: str, payload: dict) -> int:
-    """向指定频道的所有连接广播消息。返回发送数。同时持久化。"""
-    payload_json = json.dumps(payload)
-    sent = 0
-    for aid, conns in _connections.items():
-        for conn in list(conns):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload_json)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload_json)
-                sent += 1
-            except Exception:
-                pass
-    # 同时持久化到 DB + chat log
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="broadcast",
-            from_agent=SYSTEM_AGENT_ID,
-            from_name="系统",
-            content=payload.get("content", ""),
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
-            channel=channel,
-        )
-        write_chat_log("系统", payload.get("content", ""), channel=channel)
-    except Exception:
-        pass
-    return sent
-
-
 async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
-    """R72: Bot 自主注册 Agent Card。返回确认消息。
+    """R72: Bot 自主注册 Agent Card.返回确认消息.
 
-    R79: 追加欢迎消息 + 管理员通知 + 频道切换 + 大厅广播。
+    R79: 追加欢迎消息 + 管理员通知 + 频道切换 + 大厅广播.
     """
     result = ac_mod.register_from_agent(agent_id, msg)
 
@@ -401,7 +257,7 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
             target_ch = p.LOBBY
             await _send(ws, {
                 "type": p.MSG_BROADCAST, "channel": target_ch,
-                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
                 "content": welcome, "ts": time.time(),
             })
             logger.info("R79 A: Welcome sent to %s", agent_id[:20])
@@ -414,7 +270,7 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
                 notify = _build_admin_notification(agent_id, display_name, pipeline_roles)
                 await _broadcast_to_channel(p.ADMIN_CHANNEL, {
                     "type": p.MSG_BROADCAST, "channel": p.ADMIN_CHANNEL,
-                    "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                    "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
                     "content": notify, "ts": time.time(),
                 })
                 logger.info("R79 B: Admin notified for %s", agent_id[:20])
@@ -429,7 +285,7 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
                 bcast = f"🆕 新伙伴加入：{display_name}\n角色：{', '.join(pipeline_roles) if pipeline_roles else '未声明'}"
                 await _broadcast_to_channel(p.LOBBY, {
                     "type": p.MSG_BROADCAST, "channel": p.LOBBY,
-                    "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+                    "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
                     "content": bcast, "ts": time.time(),
                 })
             except Exception as e:
@@ -461,8 +317,8 @@ async def _flush_offline_push(agent_id: str) -> None:
     """R11 P1.2: Wait 3s for agent to come online, then flush (or discard)."""
     await asyncio.sleep(3)
     conns = _connections.get(agent_id, set())
-    pending = _offline_push_queue.pop(agent_id, [])
-    _offline_timers.pop(agent_id, None)
+    pending = state._offline_push_queue.pop(agent_id, [])
+    state._offline_timers.pop(agent_id, None)
     if conns and pending:
         for conn in conns:
             for item in pending:
@@ -508,637 +364,6 @@ async def _persist_admin_response(ws, sender_id: str, from_name: str, content: s
     write_chat_log(from_name, content, channel=p.ADMIN_CHANNEL)
 
 
-async def _send_cmd_response(ws, sender_id: str, from_name: str, content: str, channel: str) -> None:
-    """Send command response to the source channel (any channel, not just _admin).
-    Used by R49 universal ! command routing."""
-    msg = {
-        "type": "broadcast",
-        "channel": channel,
-        "from_name": from_name,
-        "from": from_name,
-        "agent_id": "",
-        "from_agent": "",
-        "content": content,
-    }
-    await _send(ws, msg)
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent=sender_id, from_name=from_name,
-            content=content, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=channel,
-        )
-    except Exception:
-        pass
-    write_chat_log(from_name, content, channel=channel)
-
-
-
-def _parse_command(content: str) -> tuple[str | None, dict]:
-    """Parse '!<command> [args...]' into (command_name, params dict)."""
-    if not content.startswith("!"):
-        return None, {}
-
-    parts = content[1:].strip().split()
-    if not parts:
-        return None, {}
-
-    cmd = parts[0].lower()
-    params: dict = {"_raw": content}
-    positional: list[str] = []
-    i = 1
-    while i < len(parts):
-        token = parts[i]
-        if token.startswith("--"):
-            key = token[2:]
-            i += 1
-            if i < len(parts):
-                val = parts[i]
-                if (val.startswith('"') and val.endswith('"')) or \
-                   (val.startswith("'") and val.endswith("'")):
-                    val = val[1:-1]
-                params[key] = val
-            else:
-                params[key] = ""
-        else:
-            positional.append(token)
-        i += 1
-
-    if positional:
-        params["_positional"] = positional
-    return cmd, params
-
-
-def _is_any_workspace_admin(agent_id: str) -> bool:
-    """Check if agent is a workspace admin of ANY workspace (P3 level)."""
-    for ws in ws_mod.get_all_workspaces():
-        if agent_id in ws.admin_ids or agent_id == ws.owner_id:
-            return True
-    return False
-
-
-def _log_audit(
-    agent_id: str, command: str, params: dict,
-    result: str, detail: str = "",
-) -> None:
-    """Log an admin command execution to the audit logger."""
-    _audit_logger.log(agent_id, command, params, result, detail)
-
-
-def _check_command_permission(
-    agent_id: str, cmd_name: str, cmd: dict, params: dict,
-) -> tuple[bool, str]:
-    """Check if agent has permission to run this command."""
-    # P4 → always allowed
-    if auth.is_global_admin(agent_id):
-        return True, ""
-
-    min_role = cmd.get("min_role", 4)
-    ws_scope = cmd.get("workspace_scope", False)
-
-    # ── R44 F-12: PM pipeline_start bypass ────────────────
-    # Allow any authenticated member to trigger !pipeline_start
-    # from the _admin channel. Only this one command is exempted.
-    if cmd_name == "pipeline_start" and min_role <= 3:
-        return True, ""
-
-    # ── R55 A: step_complete auto-mode bypass ──────────────
-    # Any workspace member can advance a pending step in auto mode.
-    # The actual step-level validity + mode check happens inside
-    # _cmd_step_complete, where we have the round context.
-    if cmd_name == "step_complete" and min_role <= 1:
-        return True, ""
-
-    # ── R73: Member-level commands (min_role=2) ───────────────
-    if min_role <= 2:
-        if auth.is_approved(agent_id):
-            return True, ""
-        return False, "权限不足：仅已认证成员可执行"
-
-    # P3: verify actual workspace admin before allowing ws_scope commands
-    if min_role <= 3 and ws_scope:
-        if _is_any_workspace_admin(agent_id) or auth.is_global_admin(agent_id):
-            return True, ""
-        return False, "权限不足：仅工作区管理员或超级管理员可执行"
-
-    if min_role <= 3 and not ws_scope:
-        if _is_any_workspace_admin(agent_id):
-            return True, ""
-        return False, "权限不足：仅工作区管理员或超级管理员可执行"
-
-    return False, "权限不足：管理操作仅限管理员"
-
-
-# ── R35: Admin command handlers ──────────────────────────────────
-
-
-def _resolve_workspace(sender_id: str, params: dict) -> tuple[str | None, str]:
-    """R82: 确定目标工作区 ID — 仅用 --workspace 参数，不再依赖活跃频道。"""
-    ws_id = params.get("workspace", "") or ""
-    if not ws_id:
-        return (None, "❌ 无法确定工作区。请使用 --workspace <ws_id> 指定。")
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return (None, f"❌ 工作区 {ws_id} 不存在")
-    return (ws_id, "")
-
-
-async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
-    """Create a new workspace. P3+ (workspace admin / global admin).
-
-    R37: After creation, auto-bind creator's active channel and send
-    roll-call notification to workspace as background task.
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法: !create_workspace <name> --members <ids>"
-    ws_name = positional[0]
-    member_ids_raw = params.get("members", "")
-    member_ids = [m.strip() for m in member_ids_raw.split(",") if m.strip()]
-    ws_id = f"{p.WORKSPACE_ID_PREFIX}{sender_id[:8]}-{ws_name[:20]}"
-    users = auth.get_users()
-    sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
-    
-    # ── R70 Fix: Resolve member names to agent IDs ──
-    def _resolve_member(name_or_id: str) -> str | None:
-        if name_or_id in users:
-            return name_or_id
-        for aid, u in users.items():
-            if u.get("name") == name_or_id:
-                return aid
-        return None
-    
-    result = ws_mod.create_workspace(ws_id, ws_name, sender_id, sender_name)
-    if not result:
-        # R91 🅱️: 区分重名 vs 超限
-        existing_ws = ws_mod.get_workspace(ws_id)
-        if existing_ws:
-            return (
-                f"❌ 创建失败：工作室「{ws_name}」已存在。\n"
-                f"  使用 --workspace-id {ws_id} 附着，或先 !close_workspace {ws_id}"
-            )
-        active_count = sum(
-            1 for w in ws_mod.get_all_workspaces()
-            if w.owner_id == sender_id and w.state == ws_mod.WorkspaceState.ACTIVE
-        )
-        max_ws = int(os.environ.get("MAX_ACTIVE_WORKSPACES", "3"))
-        return (
-            f"❌ 创建失败：管理者名下已有 {active_count}/{max_ws} 活跃工作室。\n"
-            f"  请先 !close_workspace 关闭旧工作室后再创建"
-        )
-    for mid_raw in member_ids:
-        resolved = _resolve_member(mid_raw)
-        if resolved:
-            ws_mod.add_member(ws_id, resolved)
-
-    # R82: removed auto-bind active channel — bot uses inbox only
-    member_names = []
-    for mid in member_ids:
-        name = users.get(mid, {}).get("name", "")
-        if not name:
-            role = users.get(mid, {}).get("role", "")
-            name = role if role else mid[:12]
-        member_names.append(name)
-    member_list = ", ".join(member_names) if member_names else "无"
-
-    # R82: Removed MSG_SET_ACTIVE_CHANNEL broadcast — tasks delivered via inbox
-    return f"✅ 工作室 {ws_name} 已创建。成员: {member_list}"
-
-
-async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
-    """Close a workspace. P3+ (P3: own managed only)."""
-    ws_id = params.get("_positional", [None])[0] or params.get("workspace")
-    if not ws_id:
-        return "❌ 用法: !close_workspace <ws_id> [--reason <text>]"
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作室 {ws_id} 不存在"
-    if not auth.is_global_admin(sender_id):
-        if not (sender_id in ws.admin_ids or sender_id == ws.owner_id):
-            return "❌ 权限不足：你不是该工作室的管理员"
-    reason = params.get("reason", "管理操作")
-    ws_mod.start_closing(ws_id)
-    timeout_tracker.reset()
-
-    # R76 B2: check if no active workspace remains → trigger archive state
-    try:
-        active_ws = [w for w in ws_mod.get_all_workspaces()
-                     if w.state == ws_mod.WorkspaceState.ACTIVE]
-        if not active_ws:
-            from . import web_viewer as wv
-            start_ts = ws.created_at if isinstance(ws.created_at, (int, float)) else time.time()
-            wv.set_archive_state(
-                ws_id=ws.id,
-                ws_name=ws.name,
-                start_ts=start_ts,
-            )
-            logger.info("R76: Archive triggered — last workspace '%s' closed", ws.name)
-    except Exception as e:
-        logger.warning("R76: Archive state write failed (non-fatal): %s", e)
-
-    # ── R79+: Notify all workspace members that the round is over ──
-    # ── R98: 合并 ws.members + PipelineContext 参与者 ──
-    try:
-        _round_name = ws.name.split('-')[0] if '-' in ws.name else ws.name
-        _end_msg = (
-            f"📋 {_round_name} 轮的开发工作已经结束，更新记忆，话题归档。\n\n"
-            f"工作室「{ws.name}」已关闭。下一轮开发将另启新工作室。"
-        )
-
-        # R98: 构建通知目标集合（member + pipeline 参与者，去重）
-        _notify_ids = set(ws.members)
-        _mgr = _ensure_pipeline_manager()
-        _ctx = _mgr.get_context(_round_name)
-        if _ctx and isinstance(_ctx, dict):
-            for _step in _ctx.get("steps", {}).values():
-                if isinstance(_step, dict) and _step.get("agent_id"):
-                    _notify_ids.add(_step["agent_id"])
-        _notify_ids.discard(sender_id)
-
-        for _member_id in list(_notify_ids):
-            _inbox_ch = f"_inbox:{_member_id}"
-            write_chat_log("系统", _end_msg, channel=_inbox_ch)
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent=SYSTEM_AGENT_ID, from_name="系统",
-                content=_end_msg, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=_inbox_ch,
-            )
-            _payload = json.dumps({
-                "type": "broadcast", "channel": _inbox_ch,
-                "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-                "content": _end_msg, "ts": time.time(),
-            })
-            for _conn in list(_connections.get(_member_id, set())):
-                try:
-                    if hasattr(_conn, "send_str"):
-                        await _conn.send_str(_payload)
-                    elif hasattr(_conn, "send"):
-                        await _conn.send(_payload)
-                except Exception:
-                    pass
-        _member_count = len(_notify_ids)
-        if _member_count > 0:
-            logger.info("Round-end notifications sent to %d recipient(s) for %s",
-                        _member_count, _round_name)
-    except Exception as e:
-        logger.warning("Round-end notification failed (non-fatal): %s", e)
-
-    return f"✅ 工作室 {ws.name} 已归档。（原因：{reason}）"
-
-
-async def _cmd_list_workspaces(sender_id: str, params: dict) -> str:
-    """List workspaces. P3 (own) / P4 (all)."""
-    all_ws = ws_mod.get_all_workspaces()
-    if auth.is_global_admin(sender_id):
-        visible = all_ws
-    else:
-        visible = [w for w in all_ws
-                   if sender_id in w.admin_ids or sender_id == w.owner_id]
-    if not visible:
-        return "📋 暂无工作室"
-    lines = ["📋 工作室列表："]
-    for w in visible:
-        status_icon = {"active": "🟢", "closing": "🟡", "archived": "⚫"}.get(
-            w.state.value if hasattr(w.state, 'value') else str(w.state), "⚪")
-
-    # ── R66 B4: Display step outputs in status ──
-    step_outputs = pstate.get("step_outputs", {})
-    if step_outputs:
-        lines.append("  📦 Step 产出:")
-        for out_step_key, out_info in sorted(step_outputs.items(), key=lambda x: _step_sort_key(x[0])):
-            sha = out_info.get("sha", "")[:7]
-            title = out_info.get("title", out_step_key)
-            summary = out_info.get("summary", "")
-            url = out_info.get("artifact_url", "")
-            line = f"    {out_step_key} {title} — {sha}"
-            if summary:
-                line += f"\n      └ 💡 {summary[:80]}"
-            if url:
-                line += f"\n      └ 🔗 {url}"
-            lines.append(line)
-
-        lines.append(f"  {status_icon} {w.id} \"{w.name}\" ({len(w.members)}人)")
-    return "\n".join(lines)
-
-
-async def _cmd_list_agents(sender_id: str, params: dict) -> str:
-    """List approved agents with online status."""
-    users = auth.get_users()
-    online_ids = set(_connections.keys())
-    role_filter = params.get("role", "").lower()
-    lines = [f"📋 共 {len(users)} 个已认证 agent："]
-    for aid, u in sorted(users.items()):
-        role = u.get("role", "member")
-        if role_filter and role != role_filter:
-            continue
-        name = u.get("name", aid[:12])
-        status = "🟢" if aid in online_ids else "🟡"
-        lines.append(f"  {status} {name} ({role})")
-    return "\n".join(lines)
-
-
-async def _cmd_agent_status(sender_id: str, params: dict) -> str:
-    """Show detailed agent info."""
-    target = params.get("_positional", [None])[0] or params.get("agent")
-    if not target:
-        return "❌ 用法: !agent_status <agent_id|agent_name>"
-    users = auth.get_users()
-    found_id = target if target in users else None
-    if not found_id:
-        for aid, u in users.items():
-            if u.get("name") == target:
-                found_id = aid
-                break
-    if not found_id:
-        return f"❌ 未找到 agent: {target}"
-    u = users[found_id]
-    channel = "lobby"  # R82: active channel removed
-    online = "🟢" if found_id in _connections else "🟡"
-    ws_list = ws_mod.get_workspaces_for_agent(found_id)
-    ws_names = ", ".join(w.id for w in ws_list) if ws_list else "无"
-    return (f"🔍 {u.get('name', found_id)}：\n"
-            f"  角色={u.get('role', 'member')}\n"
-            f"  活跃频道={channel}\n"
-            f"  所属工作室={ws_names}\n"
-            f"  在线={online}")
-
-
-async def _cmd_approve_ws_admin(sender_id: str, params: dict) -> str:
-    """Approve workspace admin request. P4 only."""
-    ws_id = params.get("workspace", "")
-    agent = params.get("agent", "")
-    if not ws_id or not agent:
-        return "❌ 用法: !approve_ws_admin --workspace <ws_id> --agent <agent>"
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作室 {ws_id} 不存在"
-    result = ws_mod.approve_admin_request(ws_id, agent)
-    if result:
-        return f"✅ {agent} 已升级为 {ws_id} 的工作室管理员。"
-    return f"❌ 审批失败：{agent} 没有待审批的管理员申请。"
-
-
-async def _cmd_reject_ws_admin(sender_id: str, params: dict) -> str:
-    """Reject workspace admin request. P4 only."""
-    ws_id = params.get("workspace", "")
-    agent = params.get("agent", "")
-    reason = params.get("reason", "未说明原因")
-    if not ws_id or not agent:
-        return "❌ 用法: !reject_ws_admin --workspace <ws_id> --agent <agent> --reason <text>"
-    result = ws_mod.reject_admin_request(ws_id, agent)
-    if result:
-        return f"ℹ️ {agent} 的管理员申请已拒绝（原因：{reason}）。"
-    return f"❌ 拒绝失败：{agent} 没有待审批的管理员申请。"
-
-
-async def _cmd_list_pending(sender_id: str, params: dict) -> str:
-    """List pending admin requests. P4 only."""
-    pending = ws_mod.get_pending_requests()
-    if not pending:
-        return "📋 暂无待审批的管理员申请。"
-    lines = ["📋 待审批的管理员申请："]
-    for req in pending:
-        ws_id = req.get("workspace_id", "?")
-        agent = req.get("agent_id", "?")
-        lines.append(f"  - {agent} → {ws_id}")
-    return "\n".join(lines)
-
-
-async def _cmd_audit_log(sender_id: str, params: dict) -> str:
-    """Query audit log. P3 (own) / P4 (all)."""
-    limit_str = params.get("limit", "10")
-    try:
-        limit = int(limit_str)
-    except (ValueError, TypeError):
-        limit = 10
-    if auth.is_global_admin(sender_id):
-        entries = _audit_logger.query(tail=limit)
-    else:
-        all_entries = _audit_logger.query(tail=100)
-        entries = [e for e in all_entries
-                   if e.get("agent_id") == sender_id][:limit]
-    if not entries:
-        return "📋 暂无审计记录"
-    lines = [f"📋 最近 {len(entries)} 条操作记录："]
-    for i, e in enumerate(entries, 1):
-        ts_str = time.strftime("%H:%M", time.localtime(e.get("ts", 0)))
-        op = e.get("agent_id", "")[:12]
-        action = e.get("command", e.get("action", "?"))
-        result = e.get("result", "")
-        lines.append(f"  {i}. [{ts_str}] {op} → {action} ({result})")
-    return "\n".join(lines)
-
-
-async def _cmd_list_workspace_admins(sender_id: str, params: dict) -> str:
-    """List workspace admins. P3 (own) / P4 (all)."""
-    ws_id = params.get("workspace", "")
-    if ws_id:
-        ws = ws_mod.get_workspace(ws_id)
-        if not ws:
-            return f"❌ 工作室 {ws_id} 不存在"
-        workspaces = [ws]
-    else:
-        all_ws = ws_mod.get_all_workspaces()
-        if auth.is_global_admin(sender_id):
-            workspaces = all_ws
-        else:
-            workspaces = [w for w in all_ws
-                          if sender_id in w.admin_ids or sender_id == w.owner_id]
-    if not workspaces:
-        return "📋 暂无工作室管理员"
-    lines = ["📋 工作室管理员列表："]
-    for w in workspaces:
-        admins = list(w.admin_ids) if hasattr(w, 'admin_ids') else []
-        owner = w.owner_id if hasattr(w, 'owner_id') else ""
-        admin_names = ", ".join(admins) if admins else "无"
-        lines.append(f"  {w.id}: 管理员={admin_names}, 所有者={owner}")
-    return "\n".join(lines)
-
-
-# ── R38: Task command handlers ─────────────────────────────────────
-
-async def _cmd_task_create(sender_id: str, params: dict) -> str:
-    """Create a new task in SUBMITTED state.
-    Usage: !task_create --context <R{N}> --name <step> [--role <role>]"""
-    context_id = params.get("context", "")
-    name = params.get("name", "")
-    if not context_id or not name:
-        return "❌ 用法：!task_create --context <R{N}> --name <step> [--role <role>]"
-    assigned_role = params.get("role", "")
-    task = ts.create_task(
-        context_id=context_id, name=name,
-        assigned_role=assigned_role,
-        created_by=sender_id,
-        data_dir=config.DATA_DIR,
-    )
-    # R41 C: Broadcast task_notify on creation
-    asyncio.create_task(_broadcast_task_notify(task, f"{task['state']} → {task['state']}"))
-    return (f"✅ Task 已创建：{task['name']} ({task['state']})\n"
-            f"  ID: {task['id']}\n"
-            f"  Context: {task['context_id']}\n"
-            f"  Role: {task.get('assigned_role', '未指定')}")
-
-
-async def _cmd_task_update(sender_id: str, params: dict) -> str:
-    """Update a task's state.
-    Usage: !task_update <task_id> --state <new_state> [--output <path>]"""
-    positional = params.get("_positional", [])
-    task_id = params.get("_task_id", positional[0] if positional else "")
-    new_state = params.get("state", "")
-    if not task_id or not new_state:
-        return "❌ 用法：!task_update <task_id> --state <new_state> [--output <path>]"
-    task = ts.get_task(task_id, config.DATA_DIR)
-    if not task:
-        return f"❌ Task {task_id[:12]} 不存在"
-    # Permission: assigned_role match or global admin bypass
-    if task.get("assigned_role"):
-        users = auth.get_users()
-        sender_info = users.get(sender_id, {})
-        if sender_info.get("role") != "admin":
-            if task["assigned_role"] not in (sender_id, sender_info.get("name", "")):
-                return f"❌ 权限不足：Task 分配给 {task['assigned_role']}，你不可更新"
-    try:
-        current = p.TaskState(task["state"])
-        target = p.TaskState(new_state)
-    except ValueError:
-        valid = [s.value for s in p.TaskState]
-        return f"❌ 无效状态：{new_state}。有效值：{', '.join(valid)}"
-    allowed = p.TASK_VALID_TRANSITIONS.get(current, [])
-    if target not in allowed:
-        return f"❌ 不允许的转换：{current.value} → {target.value}"
-    # Reject ceiling check
-    if target == p.TaskState.INPUT_REQUIRED:
-        ts.increment_reject_count(task_id, config.DATA_DIR)
-        task_d = ts.get_task(task_id, config.DATA_DIR)
-        if task_d["reject_count"] >= p.TASK_REJECT_CEILING:
-            ts.update_state(task_id, p.TaskState.FAILED.value, config.DATA_DIR)
-            task_d = ts.get_task(task_id, config.DATA_DIR)
-            return (f"❌ 审查已达上限 ({p.TASK_REJECT_CEILING}次)，已锁定 FAILED\n"
-                    f"  {task_d['name']}: {task_d['state']} (rejects: {task_d['reject_count']})")
-    ts.update_state(task_id, new_state, config.DATA_DIR)
-    output_ref = params.get("output", "")
-    if output_ref:
-        ts.add_output_ref(task_id, output_ref, config.DATA_DIR)
-    task = ts.get_task(task_id, config.DATA_DIR)
-    # R41 C: Broadcast task_notify on update
-    asyncio.create_task(_broadcast_task_notify(task,
-        f"{task['state']} → {new_state}"))
-    refs = task.get("output_refs", [])
-    refs_str = f", 产出: {', '.join(refs)}" if refs else ""
-    return f"✅ Task 已更新：{task['name']} → {task['state']}{refs_str}"
-
-
-async def _cmd_task_query(sender_id: str, params: dict) -> str:
-    """Query tasks by context or single task.
-    Usage: !task_query --context <R{N}> | !task_query <task_id>"""
-    positional = params.get("_positional", [])
-    task_id = params.get("_task_id", positional[0] if positional else "")
-    context_id = params.get("context", "")
-    if task_id:
-        task = ts.get_task(task_id, config.DATA_DIR)
-        if not task:
-            return f"❌ Task {task_id[:12]} 不存在"
-        refs = task.get("output_refs", [])
-        refs_str = f", 产出: {'; '.join(refs)}" if refs else ""
-        return (f"📋 Task：{task['name']}\n"
-                f"  State: {task['state']}\n"
-                f"  Context: {task['context_id']}\n"
-                f"  Assigned: {task.get('assigned_role', '未指定')}\n"
-                f"  Rejects: {task.get('reject_count', 0)}{refs_str}\n"
-                f"  Updated: {task['updated_at']}")
-    elif context_id:
-        tasks = ts.list_tasks_by_context(context_id, config.DATA_DIR)
-        if not tasks:
-            return f"📋 Context {context_id} 暂无 Task"
-        lines = [f"📋 {context_id} 任务列表 ({len(tasks)}):"]
-        for t in tasks:
-            icon = p.TASK_STATE_ICONS.get(t["state"], "❓")
-            lines.append(f"  {icon} {t['name']:20s} [{t['state']}]  {t['id'][:8]}")
-        return "\n".join(lines)
-    else:
-        return "❌ 用法：!task_query <task_id> | !task_query --context <R{N}>"
-
-
-async def _cmd_task_list(sender_id: str, params: dict) -> str:
-    """List recent tasks across all contexts.
-    Usage: !task_list [--limit <n>]"""
-    limit = int(params.get("limit", "10"))
-    tasks = ts.list_all_tasks(config.DATA_DIR, limit)
-    if not tasks:
-        return "📋 暂无 Task"
-    lines = [f"📋 最近 {len(tasks)} 个 Task:"]
-    for t in tasks:
-        icon = p.TASK_STATE_ICONS.get(t["state"], "❓")
-        lines.append(f"  {icon} [{t['context_id']}] {t['name']:20s} [{t['state']}]  {t['id'][:8]}")
-    return "\n".join(lines)
-
-
-async def _cmd_rollcall_role(sender_id: str, params: dict) -> str:
-    """点名指定角色成员 — 使用 ACK 确认制代替文本「到」。
-    Usage: !rollcall_role <role> [--context <msg>]
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法: !rollcall_role <role> [--context <msg>]"
-    target_role = positional[0].lower()
-    context_msg = params.get("context", "")
-    ws_id = params.get("workspace", "")
-    if not ws_id:
-        return "❌ 请使用 --workspace <ws_id> 指定工作区"
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return f"❌ 工作区 {ws_id} 不存在或已归档"
-    sender_ch = ws_id
-    users = auth.get_users()
-    matched = [aid for aid in ws_obj.members
-               if users.get(aid, {}).get("role", "member") == target_role]
-    if not matched:
-        return f"❌ 工作区中未找到角色为「{target_role}」的成员"
-    sender_name = users.get(sender_id, {}).get("name", sender_id[:12])
-    names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
-    names_str = ", ".join(names)
-    suffix = f"（背景：{context_msg}）" if context_msg else ""
-    # ★ R53: Use ACK-driven broadcast instead of text "回复到"
-    _persist_broadcast(sender_ch, "系统", f"📋 {sender_name} 点名 {target_role} 成员{suffix}")
-    # R82: removed _broadcast_active_channel
-    return f"✅ 已点名 {target_role}：{names_str}"
-
-
-async def _cmd_rollcall_next(sender_id: str, params: dict) -> str:
-    """点名下一环节负责人 — 使用 ACK 确认制代替文本「到」。
-    Usage: !rollcall_next <role> --context <摘要>
-    
-    不再发送「请回复到开始」文本消息。
-    改为通过 _broadcast_active_channel(ws_id) 启动 ACK 等待。
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法: !rollcall_next <role> --context <摘要>"
-    target_role = positional[0].lower()
-    context_summary = params.get("context", "")
-    if not context_summary:
-        return "❌ 请提供 --context <摘要>"
-    ws_id = params.get("workspace", "")
-    if not ws_id:
-        return "❌ 请使用 --workspace <ws_id> 指定工作区"
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return f"❌ 工作区 {ws_id} 不存在或已归档"
-    sender_ch = ws_id
-    users = auth.get_users()
-    matched = [aid for aid in ws_obj.members
-               if users.get(aid, {}).get("role", "member") == target_role]
-    if not matched:
-        return f"❌ 工作区中未找到角色为「{target_role}」的成员"
-    names = [users.get(aid, {}).get("name", aid[:12]) for aid in matched]
-    names_str = ", ".join(names)
-    # Persist the rollcall context for audit
-    _persist_broadcast(sender_ch, "系统", f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}")
-    # R82: removed _broadcast_active_channel
-    return f"🏗️ 下一环节：{context_summary}\n📋 负责人：{names_str}"
-
-
 def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
     """Persist a broadcast message to message store and chat log.
 
@@ -1177,72 +402,16 @@ def _get_agent_display(agent_id: str) -> str:
         return u["role"]
     return agent_id[:12]
 
-
-def _get_agent_card_roles(agent_id: str, cards: dict = None) -> list[str]:
-    """Get pipeline roles for an agent from cards. Returns [] if not found."""
-    if cards is None:
-        cards = ac_mod.get_all_cards()
-    card = cards.get(agent_id, {})
-    return card.get("pipeline_roles", [])
-
-
-def _find_agents_by_role(role: str, member_ids: list[str], cards: dict) -> list[str]:
-    """Find workspace members whose agent card has the given pipeline role."""
-    return [
-        aid for aid in member_ids
-        if role in _get_agent_card_roles(aid, cards)
-    ]
-
-
-# ── R63 Phase 3: Role-agent mapping ────────────────────────────────
-
-
-def _refresh_role_agent_map() -> None:
-    """Rebuild _ROLE_AGENT_MAP from Agent Card pipeline_roles.
-
-    Called on:
-    - Agent card registration / update
-    - !agent_role_map --refresh command
-    - Handler initialization (load_cards)
-    """
-    global _ROLE_AGENT_MAP
-    cards = ac_mod.get_all_cards()
-    _ROLE_AGENT_MAP = {}
-    for aid, card in cards.items():
-        roles = card.get("pipeline_roles", [])
-        for role in roles:
-            if role not in _ROLE_AGENT_MAP:
-                _ROLE_AGENT_MAP[role] = []
-            if aid not in _ROLE_AGENT_MAP[role]:
-                _ROLE_AGENT_MAP[role].append(aid)
-    logger.info("R63 role-agent map refreshed: %d roles, %d entries",
-                len(_ROLE_AGENT_MAP),
-                sum(len(v) for v in _ROLE_AGENT_MAP.values()))
-    # R78 A2: 同步写到 Manager 全局快照
-    try:
-        mgr = _ensure_pipeline_manager()
-        mgr.set_global_role_map(dict(_ROLE_AGENT_MAP))
-    except Exception:
-        pass
-
-
-# ---- R67 B1: Startup card load + watcher ------------------------------
-# These run at module import time (after _refresh_role_agent_map is defined).
-_cards_loaded_guard: bool = False
-_card_watcher: "ac_mod.CardFileWatcher | None" = None  # type: ignore[name-defined]
-
-
 def _ensure_agent_cards_loaded() -> None:
     """Ensure agent cards are loaded and role map is built at startup.
     Idempotent — only runs on first call.
     """
-    global _cards_loaded_guard
-    if _cards_loaded_guard:
+    if state._cards_loaded_guard:
         return
     if not ac_mod.is_loaded():
         ac_mod.load_cards()
     _refresh_role_agent_map()
-    _cards_loaded_guard = True
+    state._cards_loaded_guard = True
 
 
 def _ensure_card_watcher() -> None:
@@ -1263,7 +432,7 @@ def _get_agents_by_role(role: str,
 
     Priority chain:
     1. PipelineContextManager.get_role_agents() (R78 new path)
-    2. _ROLE_AGENT_MAP (DEPRECATED fallback)
+    2. state._ROLE_AGENT_MAP (DEPRECATED fallback)
     3. Fallback: auth.get_users().role (legacy compat)
     4. Optional: filter by workspace_members
 
@@ -1281,7 +450,7 @@ def _get_agents_by_role(role: str,
     except Exception:
         agents = []
     if not agents:
-        agents = _ROLE_AGENT_MAP.get(role, [])
+        agents = state._ROLE_AGENT_MAP.get(role, [])
     if not agents:
         # Fallback to auth roles
         users = auth.get_users()
@@ -1298,352 +467,34 @@ async def _handle_rollcall_ack(sender_id: str, content: str,
 
     R63 Phase 3: When agent replies to rollcall, register or update card.
     R67: Unified — always go through ac_mod.register_agent.
-
-    Args:
-        sender_id: Agent ID who replied.
-        content: Message content (checked for ack keywords).
-        ws_id: Workspace ID (for context, unused in registration).
     """
-    users = auth.get_users()
-    u = users.get(sender_id, {})
-    name = u.get("name", sender_id[:12])
-    role = u.get("role", "member")
-
-    # R67: Unified — always go through ac_mod.register_agent
-    ac_mod.register_agent(sender_id, name, role)
-    _refresh_role_agent_map()
-# ── R63 Phase 3: End ──
-
-
-# ── R42: Pipeline helpers ──────────────────────────────────────────
-
-
-# ── R62: NoFrontmatterError ──
-class NoFrontmatterError(ValueError):
-    """Raised when WORK_PLAN content has no YAML frontmatter block."""
-    pass
-
-
-# ── R62 A2: Lightweight YAML frontmatter parser ──
-
-
-def _parse_scalar(value: str):
-    """Parse a scalar YAML value."""
-    value = value.strip()
-    if not value:
-        return value
-    if (value.startswith('"') and value.endswith('"')) or \
-       (value.startswith("'") and value.endswith("'")):
-        value = value[1:-1]
-    if value.lower() in ('true', 'yes', 'on'):
-        return True
-    if value.lower() in ('false', 'no', 'off'):
-        return False
-    try:
-        if '.' in value:
-            return float(value)
-        return int(value)
-    except ValueError:
-        pass
-    return value
-
-
-def _parse_frontmatter(content: str) -> dict:
-    """Extract and parse YAML frontmatter from WORK_PLAN.md content.
-    Supports: strings, nested dicts via indentation, list values.
-    Returns: pipeline section dict or raises NoFrontmatterError.
-    """
-    parts = content.split('---')
-    if len(parts) < 3:
-        raise NoFrontmatterError("No YAML frontmatter block found")
-    frontmatter_text = parts[1].strip()
-    lines = frontmatter_text.split('\n')
-    result = {}
-    stack = [(0, None, result)]
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#'):
-            continue
-        indent = len(line) - len(line.lstrip(' '))
-        while stack and indent <= stack[-1][0]:
-            stack.pop()
-        if stripped.startswith('- '):
-            item_text = stripped[2:].strip()
-            if stack and stack[-1][2] is not None:
-                parent_key = stack[-1][1]
-                parent_dict = stack[-1][2]
-                if parent_key and parent_key not in parent_dict:
-                    parent_dict[parent_key] = []
-                if parent_key:
-                    parent_dict[parent_key].append(_parse_scalar(item_text))
-        elif ':' in stripped:
-            key, _, value = stripped.partition(':')
-            key = key.strip()
-            value = value.strip()
-            if stack:
-                parent_dict = stack[-1][2]
-                if value:
-                    parent_dict[key] = _parse_scalar(value)
-                    stack.append((indent, key, {}))
-                else:
-                    parent_dict[key] = {}
-                    stack.append((indent, key, parent_dict[key]))
-    return result
-
-
-def _build_pipeline_config(frontmatter: dict, round_name: str, base_urls: dict) -> dict:
-    """Build _PIPELINE_CONFIG from frontmatter dict.
-
-    R74 A2: frontmatter 中的 URL 字段优先，base_urls 仅作为无定义时的补充。
-    不再拼接 docs/轮次/ 路径。
-    """
-    config = frontmatter.get("pipeline", {})
-    if not config:
-        raise ValueError("Frontmatter missing 'pipeline' key")
-    config["round"] = round_name
-
-    # R74 A2: 仅当 frontmatter 无定义时才从 base_urls 获取
-    if not config.get("work_plan_url"):
-        config["work_plan_url"] = base_urls.get("work_plan_url", "")
-    if not config.get("requirements_url"):
-        config["requirements_url"] = base_urls.get("requirements_url", "")
-
-    config["steps"] = config.get("steps", {})
-    for step_key, step_cfg in config["steps"].items():
-        context = step_cfg.get("context", {})
-        for ctx_key, ctx_value in list(context.items()):
-            if isinstance(ctx_value, str) and "${pipeline." in ctx_value:
-                ref_key = ctx_value.replace("${pipeline.", "").rstrip("}")
-                if ref_key in config:
-                    context[ctx_key] = str(config[ref_key])
-    return config
-
-
-def _build_fallback_config(round_name: str, base_urls: dict) -> dict:
-    """Build _PIPELINE_CONFIG from hardcoded PIPELINE_STEP_MAP (old format compat)."""
-    step_map = _r42cfg.PIPELINE_STEP_MAP
-    work_plan_url = base_urls.get("work_plan_url", "")
-    requirements_url = base_urls.get("requirements_url",
-        f"{_r42cfg.WORK_PLAN_REPO_URL}/docs/{round_name}/{round_name}-product-requirements.md")
-    steps = {}
-    for step_key, step_cfg in step_map.items():
-        if step_key == "step1":
-            continue
-        role = step_cfg.get("role", "")
-        steps[step_key] = {
-            "role": role,
-            "title": step_cfg.get("name", step_key),
-            "context": {
-                "requirements_url": requirements_url,
-                "work_plan_url": work_plan_url,
-            },
-            "output_desc": "",
-            "feedback_channel": "_admin",
-            "timeout_minutes": int(step_cfg.get("timeout_hours", 6) * 60),
-            "escalation": step_cfg.get("escalation", "notify_pm"),
-        }
-    return {
-        "round": round_name,
-        "goal": "",
-        "work_plan_url": work_plan_url,
-        "requirements_url": requirements_url,
-        "steps": steps,
-    }
-
-
-def _step_sort_key(step_name: str) -> tuple:
-    """Sort step1, step2, ..., step10 naturally."""
-    import re
-    m = re.match(r'step(\d+)', step_name.lower())
-    return (int(m.group(1)),) if m else (0, step_name)
-
-
-# ── R69 A1 + R74 B2: Auto-infer artifact URL by step type ──
-def _infer_artifact_url(step_name: str, round_name: str, step_config: dict | None = None) -> str:
-    """Auto-infer artifact URL based on step type. Returns '' if unknown.
-
-    R74 B2: 优先从 frontmatter step_config 读取 artifact_url，无配置时走硬编码回退（main 分支）。
-    """
-    # R74 B2: 优先读 frontmatter 的 artifact_url
-    if step_config and step_name in step_config:
-        art = step_config.get(step_name, {}).get("artifact_url", "")
-        if art:
-            return art
-
-    # Fallback: hardcoded paths (main branch — R72/R73 already merged)
-    step_urls = {
-        "step2": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/{round_name}-tech-plan.md",
-        "step4": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/{round_name}-review-report.md",
-        "step5": f"https://raw.githubusercontent.com/datahome73/ws-bridge/main/docs/{round_name}/test-report.md",
-    }
-    return step_urls.get(step_name, "")
-
-
-from . import config as _r42cfg
-
-
-def _load_step_config() -> dict[str, dict]:
-    """Load step map from config."""
-    return _r42cfg.PIPELINE_STEP_MAP
-
-
-
-def _get_step_config(round_name: str) -> dict[str, dict]:
-    """Unified step config reader: prefer PipelineContext.steps, then frontmatter, then legacy fallback.
-
-    R78 C3: 优先从 PipelineContext.steps 读取。
-    """
-    # R78 C3: 优先走 Manager
-    try:
-        mgr = _ensure_pipeline_manager()
-        ctx_steps = mgr.get_step_config(round_name)
-        if ctx_steps:
-            return ctx_steps
-    except Exception:
-        pass
-    pconfig = _PIPELINE_CONFIG.get(round_name, {})
-    psteps = pconfig.get("steps", {})
-    if psteps:
-        return psteps
-    return _build_fallback_steps(round_name)
-
-
-def _build_fallback_steps(round_name: str) -> dict[str, dict]:
-    """Build fallback steps from PIPELINE_STEP_MAP, syncing primary/backup."""
-    step_map = config.PIPELINE_STEP_MAP
-    steps = {}
-    for step_key, step_cfg in step_map.items():
-        if step_key == "step1":
-            continue
-        steps[step_key] = {
-            "role": step_cfg.get("role", ""),
-            "title": step_cfg.get("name", step_key),
-            "primary": step_cfg.get("primary"),
-            "backup": step_cfg.get("backup"),
-            "context": {
-                "requirements_url": _get_requirements_url(round_name),
-                "work_plan_url": _get_work_plan_url(round_name),
-            },
-            "output_desc": "",
-            "feedback_channel": "_admin",
-            "timeout_minutes": int(step_cfg.get("timeout_hours", 6) * 60),
-            "escalation": step_cfg.get("escalation", "notify_pm"),
-        }
-    return steps
-
-
-def _render_context(context: dict, round_name: str, step_outputs: dict) -> dict:
-    """Resolve template variables like ${steps.stepN.sha} in context values."""
-    resolved = {}
-    for ctx_key, ctx_value in context.items():
-        if not isinstance(ctx_value, str):
-            resolved[ctx_key] = ctx_value
-            continue
-        value = ctx_value
-        if "${steps." in value:
-            for match in _find_template_refs(value, "${steps."):
-                parts = match.split(".", 1)
-                if len(parts) == 2:
-                    step_key, field = parts
-                    step_out = step_outputs.get(step_key, {})
-                    replacement = str(step_out.get(field, ""))
-                    value = value.replace("${steps." + match + "}", replacement)
-        resolved[ctx_key] = value
-    return resolved
-
-
-def _find_template_refs(template_str: str, prefix: str) -> list[str]:
-    """Extract all template variable references from a string."""
-    refs = []
-    start = 0
-    while True:
-        pos = template_str.find(prefix, start)
-        if pos == -1:
-            break
-        end = template_str.find("}", pos)
-        if end == -1:
-            break
-        ref = template_str[pos + len(prefix):end]
-        refs.append(ref)
-        start = end + 1
-    return refs
-
-
-def _set_pipeline_state(round_name: str, state: dict) -> None:
-    _PIPELINE_STATE[round_name] = state
-
-
-def _update_pipeline_step(round_name: str, step: str) -> None:
-    if round_name in _PIPELINE_STATE:
-        _PIPELINE_STATE[round_name]["current_step"] = step
-
-
-def _clear_pipeline_state(round_name: str) -> None:
-    _PIPELINE_STATE.pop(round_name, None)
-    # R62: _PIPELINE_CONFIG is NOT cleared here — config/state separation
-
-
-def pipeline_is_active(round_name: str) -> bool:
-    state = _PIPELINE_STATE.get(round_name)
-    return bool(state and state.get("active"))
-
-
-def pipeline_exists(round_name: str) -> bool:
-    """Check if pipeline exists (created but may or may not be active)."""
-    return round_name in _PIPELINE_STATE
-
-
-def set_lobby_paused(paused: bool, round_name: str = "") -> None:
-    global _LOBBY_PAUSED, _LOBBY_PAUSED_ROUND
-    _LOBBY_PAUSED = paused
-    _LOBBY_PAUSED_ROUND = round_name if paused else ""
-    logger.info("R42 lobby-pause: %s (round=%s)", paused, _LOBBY_PAUSED_ROUND)
-
-
-# ── R43: Watchdog helpers ──────────────────────────────────────────
-
-
-WATCHDOG_SCAN_INTERVAL: int = 600       # 10 分钟（秒）
-WATCHDOG_REALERT_INTERVAL: int = 1800   # 30 分钟（秒）
-
-# 超时默认值（与 config.py STEP_TIMEOUT_DEFAULTS 保持一致）
-_STEP_TIMEOUT_DEFAULTS: dict[str, float] = {
-    "step1": 2.0,
-    "step2": 6.0,
-    "step3": 12.0,
-    "step4": 4.0,
-    "step5": 6.0,
-    "step6": 2.0,
-}
-
 
 def _ensure_watchdog() -> None:
     """Lazily start the background watchdog loop on first call."""
-    global _watchdog_started, _watchdog_task
-    if _watchdog_started:
+    state._watchdog_task
+    if state._watchdog_started:
         return
-    _watchdog_task = asyncio.create_task(_watchdog_loop())
-    _watchdog_started = True
+    state._watchdog_task = asyncio.create_task(_watchdog_loop())
+    state._watchdog_started = True
     logger.info("R43 watchdog started (scan=%ds, realert=%ds)",
-                WATCHDOG_SCAN_INTERVAL, WATCHDOG_REALERT_INTERVAL)
+                state.WATCHDOG_SCAN_INTERVAL, state.WATCHDOG_REALERT_INTERVAL)
 
 
 # ── R65 A2: Git sync lifecycle ──────────────────────────────────
 
 
 def _ensure_git_scan() -> None:
-    """在 handler 初始化时调用一次。启动 git sync 定时循环。"""
-    global _GIT_SYNC_TASK
+    """在 handler 初始化时调用一次.启动 git sync 定时循环."""
     if not config.ENABLE_GIT_SYNC:
         logger.info("[R65] Git sync 已禁用（ENABLE_GIT_SYNC=false）")
         return
-    if _GIT_SYNC_TASK is None or _GIT_SYNC_TASK.done():
-        _GIT_SYNC_TASK = asyncio.create_task(_start_git_sync_loop())
+    if state._GIT_SYNC_TASK is None or state._GIT_SYNC_TASK.done():
+        state._GIT_SYNC_TASK = asyncio.create_task(_start_git_sync_loop())
         logger.info("[R65] Git sync watchdog 已启动（interval=%ds）", config.GIT_SYNC_INTERVAL)
 
 
 async def _start_git_sync_loop():
-    """独立的 git 同步定时循环，每 GIT_SYNC_INTERVAL 秒执行一次。"""
+    """独立的 git 同步定时循环，每 GIT_SYNC_INTERVAL 秒执行一次."""
     while True:
         await asyncio.sleep(config.GIT_SYNC_INTERVAL)
         try:
@@ -1653,15 +504,15 @@ async def _start_git_sync_loop():
 
 
 async def _pipeline_git_sync_scan():
-    """遍历所有活跃管线，检查 git 同步。"""
-    for pid, pstate in list(_PIPELINE_STATE.items()):
+    """遍历所有活跃管线，检查 git 同步."""
+    for pid, pstate in list(state._PIPELINE_STATE.items()):
         if not pstate.get("active"):
             continue
         if not config.ENABLE_GIT_SYNC:
             continue
 
-        # 从 _PIPELINE_CONFIG 读取管线专属配置
-        pconfig = _PIPELINE_CONFIG.get(pid, {})
+        # 从 state._PIPELINE_CONFIG 读取管线专属配置
+        pconfig = state._PIPELINE_CONFIG.get(pid, {})
         sync_config = {
             "branch": pconfig.get("git_sync_branch", config.GIT_SYNC_BRANCH),
             "repo_path": pconfig.get("repo_path", config.REPO_PATH),
@@ -1678,16 +529,16 @@ async def _pipeline_git_sync_scan():
 
 
 async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
-    """Git sync 检测到新产出后自动推进状态机。
+    """Git sync 检测到新产出后自动推进状态机.
 
     Args:
         round_name: 管线标识
         result: PipelineGitSync.sync() 返回值
 
     Returns:
-        广播消息文本。
+        广播消息文本.
     """
-    pstate = _PIPELINE_STATE.get(round_name)
+    pstate = state._PIPELINE_STATE.get(round_name)
     if not pstate:
         return ""
 
@@ -1729,9 +580,9 @@ async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
 
     # 2. 清理旧 ACK FAILED 标记
     old_ack_key = f"{round_name}/{current_step}"
-    if old_ack_key in _step_ack_states:
-        if _step_ack_states[old_ack_key].get("state") == "FAILED":
-            _step_ack_states.pop(old_ack_key, None)
+    if old_ack_key in state._step_ack_states:
+        if state._step_ack_states[old_ack_key].get("state") == "FAILED":
+            state._step_ack_states.pop(old_ack_key, None)
             logger.info("[R65] 清除 %s 的 FAILED 标记（git sync 发现新产出）", old_ack_key)
 
     # 3. 广播自动同步消息
@@ -1804,7 +655,7 @@ async def _watchdog_loop() -> None:
     """Background watchdog loop — scans all active pipelines every 10 min."""
     try:
         while True:
-            await asyncio.sleep(WATCHDOG_SCAN_INTERVAL)
+            await asyncio.sleep(state.WATCHDOG_SCAN_INTERVAL)
             await _watchdog_scan()
     except asyncio.CancelledError:
         logger.info("R43 watchdog loop cancelled — shutting down")
@@ -1812,7 +663,7 @@ async def _watchdog_loop() -> None:
 
 async def _watchdog_scan() -> None:
     """Scan all active pipelines and trigger alerts for timed-out steps."""
-    if not _PIPELINE_STATE:
+    if not state._PIPELINE_STATE:
         return  # A-2: no active pipelines → zero output
 
     # ── R67 C2: Mark stale agents offline ──────────────────────
@@ -1824,7 +675,7 @@ async def _watchdog_scan() -> None:
     now = time.time()
     step_config = _get_step_config("")  # R67 D: unified step config (watchdog global)
 
-    for round_name, pstate in list(_PIPELINE_STATE.items()):
+    for round_name, pstate in list(state._PIPELINE_STATE.items()):
         if not pstate.get("active"):
             continue
 
@@ -1850,7 +701,7 @@ async def _watchdog_scan() -> None:
 
             # Also mark in old watchdog_alerts for backward compat
             key = f"{round_name}/{step_name}"
-            _watchdog_alerts[key] = now
+            state._watchdog_alerts[key] = now
             continue
         # ── R63 Phase 2: End timeout_tracker path ──
 
@@ -1884,7 +735,7 @@ def _get_step_timeout(round_name: str, step_name: str) -> float:
     step_info = step_config.get(step_name, {})
     if step_info and "timeout_hours" in step_info:
         return float(step_info["timeout_hours"])
-    return float(_STEP_TIMEOUT_DEFAULTS.get(step_name, float("inf")))
+    return float(state._STEP_TIMEOUT_DEFAULTS.get(step_name, float("inf")))
 
 
 # ── R63 Phase 2: Timeout escalation ─────────────────────────────
@@ -1902,7 +753,7 @@ async def _trigger_timeout_escalation(round_name: str, step_name: str,
     Returns:
         Alert message string.
     """
-    step_cfg = _PIPELINE_CONFIG.get(round_name, {}).get("steps", {}).get(step_name, {})
+    step_cfg = state._PIPELINE_CONFIG.get(round_name, {}).get("steps", {}).get(step_name, {})
     timeout_mins = step_cfg.get("timeout_minutes", 15)
     remaining = timeout_tracker.get_remaining(round_name, step_name)
     over_by = max(0, int(timeout_mins * 60 - remaining))
@@ -1950,11 +801,11 @@ async def _ack_timeout_task(ack_key: str) -> None:
     If no ACK received within timeout, marks state as ack_timeout
     (not FAILED) — waits for git sync to detect new output instead.
 
-    R65 C1: ACK 超时不标记 FAILED，改为 ack_timeout 等待标记。
-    只有当 git sync + timeout_tracker 都无产出时才标记真正 FAILED。
+    R65 C1: ACK 超时不标记 FAILED，改为 ack_timeout 等待标记.
+    只有当 git sync + timeout_tracker 都无产出时才标记真正 FAILED.
     """
     await asyncio.sleep(ACK_TIMEOUT_SEC)
-    state = _step_ack_states.get(ack_key, {})
+    state = state._step_ack_states.get(ack_key, {})
     if state.get("state") in ("SENT", "DELIVERED"):
         # ── R65 C1: ACK 超时 → 标记 ack_timeout（不标 FAILED）──
         state["state"] = "ack_timeout"
@@ -1965,7 +816,7 @@ async def _ack_timeout_task(ack_key: str) -> None:
 
 
 async def _send_ack_timeout_info(ack_key: str, state: dict) -> str:
-    """ACK 超时信息通知（非告警）。"""
+    """ACK 超时信息通知（非告警）."""
     parts = ack_key.split("/", 1)
     round_name = parts[0] if len(parts) > 0 else "?"
     step_name = parts[1] if len(parts) > 1 else "?"
@@ -1980,7 +831,7 @@ async def _send_ack_timeout_info(ack_key: str, state: dict) -> str:
     )
 
     # 广播到工作室
-    for rname, pstate in _PIPELINE_STATE.items():
+    for rname, pstate in state._PIPELINE_STATE.items():
         if rname == round_name:
             ws_id = pstate.get("ws_id", "")
             if ws_id:
@@ -2012,7 +863,7 @@ async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
     """ACK timeout → PM escalation alert.
 
     Args:
-        ack_key: Key in _step_ack_states.
+        ack_key: Key in state._step_ack_states.
         state: Current state dict.
 
     Returns:
@@ -2034,7 +885,7 @@ async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
     )
 
     # Broadcast to workspace if available
-    for rname, pstate in _PIPELINE_STATE.items():
+    for rname, pstate in state._PIPELINE_STATE.items():
         if rname == round_name:
             ws_id = pstate.get("ws_id", "")
             if ws_id:
@@ -2063,7 +914,7 @@ async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
 
 
 def _update_step_ack_state(sender_id: str, content: str) -> None:
-    """Update _step_ack_states when bot responds in a workspace.
+    """Update state._step_ack_states when bot responds in a workspace.
 
     R63 Phase 4: Bot ACK detection — any message from a target agent
     is treated as ACK. If content contains ack keywords, mark IN_PROGRESS.
@@ -2076,7 +927,7 @@ def _update_step_ack_state(sender_id: str, content: str) -> None:
     ack_keywords = ["收到", "好的", "在", "到", "接", "OK", "ok", "开始", "done"]
     is_ack = any(kw in content for kw in ack_keywords)
 
-    for ack_key, ack_state in _step_ack_states.items():
+    for ack_key, ack_state in state._step_ack_states.items():
         if ack_state.get("agent_id") == sender_id and ack_state["state"] in ("SENT", "DELIVERED"):
             old_state = ack_state["state"]
             if is_ack:
@@ -2099,12 +950,12 @@ def _format_ack_status(ack_key: str) -> str:
     """Format ACK state for pipeline_status display.
 
     Args:
-        ack_key: Key in _step_ack_states.
+        ack_key: Key in state._step_ack_states.
 
     Returns:
         Formatted status string, or empty string if not tracked.
     """
-    state = _step_ack_states.get(ack_key)
+    state = state._step_ack_states.get(ack_key)
     if not state:
         return ""
     s = state["state"]
@@ -2129,27 +980,27 @@ def _check_watchdog_alert(round_name: str, step_name: str) -> str | None:
     """Check dedup state and return 'first', 'repeat', or None (skip)."""
     key = f"{round_name}/{step_name}"
     now = time.time()
-    last_alert = _watchdog_alerts.get(key)
+    last_alert = state._watchdog_alerts.get(key)
 
     if last_alert is None:
         # First-time timeout
-        _watchdog_alerts[key] = now
+        state._watchdog_alerts[key] = now
         return "first"
 
     # Already alerted — check cooldown
     elapsed = now - last_alert
-    if elapsed < WATCHDOG_REALERT_INTERVAL:
+    if elapsed < state.WATCHDOG_REALERT_INTERVAL:
         return None  # Skip — within cooldown
 
-    _watchdog_alerts[key] = now
+    state._watchdog_alerts[key] = now
     return "repeat"
 
 
 def _clear_watchdog_alert(round_name: str, step_name: str) -> bool:
     """Clear watchdog alert marker. Returns True if an alert was active."""
     key = f"{round_name}/{step_name}"
-    if key in _watchdog_alerts:
-        del _watchdog_alerts[key]
+    if key in state._watchdog_alerts:
+        del state._watchdog_alerts[key]
         return True
     return False
 
@@ -2175,7 +1026,7 @@ async def _send_watchdog_alert(
     role = step_info.get("role", "?")
     repeat_tag = f"（重复通知）" if alert_type == "repeat" else ""
 
-    started_at = _PIPELINE_STATE.get(round_name, {}).get("started_at", 0)
+    started_at = state._PIPELINE_STATE.get(round_name, {}).get("started_at", 0)
     import datetime as _dt
     started_dt = _dt.datetime.fromtimestamp(started_at).strftime("%Y-%m-%d %H:%M")
 
@@ -2190,7 +1041,7 @@ async def _send_watchdog_alert(
 
     _persist_broadcast(p.ADMIN_CHANNEL, "系统", msg)
     # R49 C: Also broadcast to active workspace if available
-    pstate = _PIPELINE_STATE.get(round_name, {})
+    pstate = state._PIPELINE_STATE.get(round_name, {})
     ws_id = pstate.get("ws_id", "")
     if ws_id:
         ws_obj = ws_mod.get_workspace(ws_id)
@@ -2224,7 +1075,7 @@ async def _send_watchdog_alert(
 
 async def _watchdog_rerollcall(round_name: str, step_name: str) -> None:
     """After timeout, try to rerollcall the current step owner in workspace."""
-    pstate = _PIPELINE_STATE.get(round_name, {})
+    pstate = state._PIPELINE_STATE.get(round_name, {})
     ws_id = pstate.get("ws_id", "")
     if not ws_id:
         return
@@ -2300,7 +1151,7 @@ async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
 
 
 def _format_pipeline_context(ctx: PipelineContext) -> str:
-    """格式化 PipelineContext 为人类可读文本。R78 D2: 增强版 ACK 展示。"""
+    """格式化 PipelineContext 为人类可读文本.R78 D2: 增强版 ACK 展示."""
     from datetime import datetime
     lines = [
         f"📋 {ctx.round_name} [{ctx.task_kind.value}]",
@@ -2342,2535 +1193,6 @@ def _format_pipeline_context(ctx: PipelineContext) -> str:
     return "\n".join(lines)
 
 
-async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
-    """处理 !pipeline 子命令。
-
-    用法: !pipeline <create|status|list|advance|block|archive|cancel> [args]
-    """
-    from pathlib import Path
-    raw = params.get("_raw", "")
-    # Strip the leading "!pipeline "
-    rest = raw[len("!pipeline "):] if raw.startswith("!pipeline ") else raw
-    parts = rest.strip().split(maxsplit=2)
-    subcmd = parts[0] if len(parts) >= 1 else ""
-    mgr = _ensure_pipeline_manager()
-
-    if subcmd == "create":
-        # R78 D3: !pipeline create R78 dev [--steps 6] [--ws ws_id] [--pm-inbox inbox_id]
-        round_name = parts[1] if len(parts) >= 2 else ""
-        task_kind = parts[2] if len(parts) >= 3 else "dev"
-        extra_args = parts[3] if len(parts) >= 4 else ""
-        total_steps = 6
-        ws_id = ""
-        pm_inbox = ""
-        if "--steps" in extra_args:
-            try:
-                total_steps = int(extra_args.split("--steps")[1].strip().split()[0])
-            except (IndexError, ValueError):
-                pass
-        if "--ws" in extra_args:
-            try:
-                ws_id = extra_args.split("--ws")[1].strip().split()[0]
-            except (IndexError, ValueError):
-                pass
-        if "--pm-inbox" in extra_args:
-            try:
-                pm_inbox = extra_args.split("--pm-inbox")[1].strip().split()[0]
-            except (IndexError, ValueError):
-                pass
-        if not round_name:
-            return "❌ 用法: !pipeline create <round> <kind> [--steps N] [--ws id] [--pm-inbox id]"
-        try:
-            ctx = await mgr.create(
-                round_name=round_name,
-                task_kind=PipelineTaskKind(task_kind),
-                workspace_dir=Path(config.REPO_PATH) if hasattr(config, 'REPO_PATH') else Path("/opt/data/ws-bridge"),
-                workspace_id=ws_id,
-                pm_inbox_id=pm_inbox,
-                total_steps=total_steps,
-                created_by=sender_id,
-            )
-            return f"✅ Pipeline {round_name} created (kind={task_kind}, status={ctx.status.value}, steps={total_steps})"
-        except ValueError as e:
-            return f"❌ {e}"
-        except Exception as e:
-            return f"❌ 创建失败: {e}"
-
-    elif subcmd == "status":
-        # !pipeline status [R77]
-        round_name = parts[1] if len(parts) >= 2 else ""
-        if round_name:
-            ctx = mgr.get(round_name)
-            if not ctx:
-                return f"❌ Pipeline {round_name} not found"
-            return _format_pipeline_context(ctx)
-        active = mgr.get_all_active()
-        if not active:
-            return "📋 当前无活跃管线"
-        out = ["📋 活跃管线:"]
-        for ctx in sorted(active, key=lambda c: c.round_name, reverse=True):
-            out.append(f"  • {ctx.round_name} [{ctx.task_kind.value}] status={ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
-        return "\n".join(out)
-
-    elif subcmd == "list":
-        active = mgr.get_all_active()
-        if not active:
-            return "📋 当前无活跃管线"
-        lines = ["📋 活跃管线:"]
-        for ctx in sorted(active, key=lambda c: c.round_name):
-            lines.append(f"  • {ctx.round_name} [{ctx.task_kind.value}] status={ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
-        return "\n".join(lines)
-
-    elif subcmd == "advance":
-        # !pipeline advance [R77]
-        round_name = parts[1] if len(parts) >= 2 else ""
-        if not round_name:
-            return "❌ 用法: !pipeline advance <round>"
-        ok = await mgr.advance_step(round_name)
-        if not ok:
-            return f"❌ 推进失败: {round_name} 不存在或已结束"
-        ctx = mgr.get(round_name)
-        return f"✅ {round_name} advanced to step {ctx.current_step}/{ctx.total_steps}"
-
-    elif subcmd == "block":
-        # !pipeline block R77 等素材
-        round_name = parts[1] if len(parts) >= 2 else ""
-        reason = parts[2] if len(parts) >= 3 else "阻塞（无原因）"
-        ok = await mgr.transition_to(round_name, PipelineStatus.BLOCKED, blocked_reason=reason)
-        if not ok:
-            return f"❌ 阻塞失败: {round_name} 不存在或状态转换非法"
-        return f"⏸️ {round_name} blocked: {reason}"
-
-    elif subcmd == "archive":
-        round_name = parts[1] if len(parts) >= 2 else ""
-        if not round_name:
-            return "❌ 用法: !pipeline archive <round>"
-        ok = await mgr.archive(round_name)
-        return f"📦 {round_name} archived {'✅' if ok else '❌ not found'}"
-
-    elif subcmd == "cancel":
-        round_name = parts[1] if len(parts) >= 2 else ""
-        if not round_name:
-            return "❌ 用法: !pipeline cancel <round>"
-        ok = await mgr.cancel(round_name)
-        return f"🚫 {round_name} cancelled {'✅' if ok else '❌ not found'}"
-
-    elif subcmd == "resume":
-        # R78 D1: !pipeline resume R77 — 从历史恢复已归档管线
-        round_name = parts[1] if len(parts) >= 2 else ""
-        if not round_name:
-            return "❌ 用法: !pipeline resume <round>"
-        ctx = await mgr.restore_from_history(round_name)
-        if ctx is None:
-            return f"❌ {round_name} 不存在或已终态（COMPLETED/CANCELLED），不可恢复"
-        return (
-            f"✅ {round_name} 已恢复\n"
-            f"  状态: {ctx.status.value}\n"
-            f"  Step: {ctx.current_step}/{ctx.total_steps}\n"
-            f"  成员: {len(ctx.role_agent_map)} 个角色\n"
-        )
-
-    elif subcmd == "history":
-        entries = mgr.get_history(limit=10)
-        if not entries:
-            return "📋 暂无历史记录"
-        lines = ["📋 最近归档:"]
-        for e in reversed(entries):
-            lines.append(f"  • {e.get('round_name', '?')} [{e.get('task_kind', '?')}] status={e.get('status', '?')}")
-        return "\n".join(lines)
-
-    return "❌ 未知子命令。支持: create, status, list, advance, block, archive, cancel, history"
-
-
-# ── R42: Pipeline commands ─────────────────────────────────────────
-
-async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
-    """启动管线 — R97 简化版。
-
-    用法：!pipeline_start <R{N}>
-    仅需 round_name，零 frontmatter/workspace 依赖。
-    通过 PipelineContextManager + AutoRouter 自动调度 Step 链。
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!pipeline_start <R{N}>"
-    round_name = positional[0].upper()
-
-    # 防重复
-    mgr = _ensure_pipeline_manager()
-    existing = mgr.get_context(round_name)
-    if existing and isinstance(existing, dict):
-        if existing.get("status") in ("running",):
-            return f"❌ {round_name} 管线已活跃，不可重复启动"
-    elif existing and hasattr(existing, "is_active") and existing.is_active():
-        return f"❌ {round_name} 管线已活跃，不可重复启动"
-
-    # 获取发起者名称
-    sender_name = auth.get_users().get(sender_id, {}).get("name", sender_id[:16])
-
-    # 创建 R97 PipelineContext（dict 格式，轻量）
-    from .pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
-    ctx = {
-        "round_name": round_name,
-        "status": "running",
-        "created_at": time.time(),
-        "triggerer_id": sender_id,
-        "triggerer_name": sender_name,
-        "steps": {
-            k: {
-                "step_key": v.step_key,
-                "role": v.role,
-                "title": v.title,
-                "status": "pending",
-                "agent_id": "",
-                "agent_name": "",
-                "output": None,
-                "result_msg": "",
-            }
-            for k, v in DEFAULT_STEPS.items()
-        },
-        "step_order": list(DEFAULT_STEP_ORDER),
-        "work_plan_url": "",
-        "references": {},
-    }
-
-    # 持久化
-    mgr.set_context(round_name, ctx)
-
-    # 广播 _admin
-    step_chain = " → ".join(
-        f"{s['step_key']}({s['role']})"
-        for s in ctx["steps"].values()
-    )
-    try:
-        await _broadcast_to_channel(p.ADMIN_CHANNEL, {
-            "type": "broadcast",
-            "channel": p.ADMIN_CHANNEL,
-            "from_name": "系统",
-            "from_agent": SYSTEM_AGENT_ID,
-            "content": (
-                f"🚀 **{round_name} 管线已启动**\n"
-                f"  发起者: {sender_name}\n"
-                f"  Step 链: {step_chain}"
-            ),
-            "ts": time.time(),
-        })
-    except Exception as e:
-        logger.warning("R97: _admin 广播失败: %s", e)
-
-    return (
-        f"🚀 **{round_name} 管线已启动**\n"
-        f"  Step 链: {step_chain}\n"
-        f"  AutoRouter 将自动派活 Step 1 → PM（{DEFAULT_STEPS['step1'].role}）"
-    )
-
-
-# ── R50: Pipeline activate command ────────────────────────────────
-
-
-async def _cmd_pipeline_activate(sender_id: str, params: dict) -> str:
-    """激活已启动但未活跃的管线。
-    用法：!pipeline_activate <R{N}> [--ws <workspace_id>]
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!pipeline_activate <R{N}> [--ws <workspace_id>]"
-    round_name = positional[0].upper()
-    ws_id = params.get("ws", "")
-
-    if not pipeline_exists(round_name):
-        return f"❌ {round_name} 管线不存在，请先执行 !pipeline_start {round_name}"
-    if pipeline_is_active(round_name):
-        return f"❌ {round_name} 管线已激活，无需重复激活"
-
-    # Use provided --ws or fallback to pipeline state
-    if not ws_id:
-        ws_id = _PIPELINE_STATE.get(round_name, {}).get("ws_id", "")
-    if not ws_id:
-        return f"❌ {round_name} 未找到工作室 ID，请用 --ws <workspace_id> 指定"
-
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return f"❌ 工作室 {ws_id} 不存在"
-
-    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
-    # Activate pipeline
-    _set_pipeline_state(round_name, {
-        "active": True,
-        "current_step": _PIPELINE_STATE.get(round_name, {}).get("current_step", "step1"),
-        "ws_id": ws_id,
-        "activated_at": __import__("time").time(),
-    })
-
-    return (
-        f"🚀 **{round_name} 管线已激活**\n"
-        f"  工作室: {ws_id}\n"
-        f"  任务将通过 inbox 分发给各成员"
-    )
-
-
-# ── R95: Pipeline stop command ────────────────────────────────
-
-
-async def _cmd_pipeline_stop(sender_id: str, params: dict) -> str:
-    """停止 AutoRouter 管线调度。
-    用法：!pipeline_stop <R{N}>
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!pipeline_stop <R{N}>"
-    round_name = positional[0].upper()
-
-    # 1. 从 PipelineContextManager 查找
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-
-    # 2. 从 _PIPELINE_STATE 查找（旧系统）
-    pstate = _PIPELINE_STATE.get(round_name)
-
-    if not ctx and not pstate:
-        return f"❌ 管线 {round_name} 不存在"
-
-    # 3. 权限校验：仅发起者可 stop
-    creator = ""
-    if ctx:
-        creator = ctx.created_by if hasattr(ctx, "created_by") else ctx.get("created_by", "")
-    elif pstate:
-        creator = pstate.get("triggerer_id", "")
-    if creator and sender_id != creator:
-        return f"❌ 只有发起者可以 stop 此管线"
-
-    # 4. 状态检查
-    if ctx:
-        _ctx_status = ctx.status.value if hasattr(ctx, "status") and hasattr(ctx.status, "value") else \
-                      ctx.status if hasattr(ctx, "status") else \
-                      ctx.get("status", "")
-        if _ctx_status in ("stopped", "done"):
-            return f"✅ Pipeline {round_name} 已停止（无需操作）"
-    if pstate and not pstate.get("active", False):
-        # 旧系统中 inactive = 已结束/停止
-        return f"✅ Pipeline {round_name} 已停止（无需操作）"
-
-    # 5. 执行停止
-    if ctx:
-        ok = await mgr.transition_to(round_name, PipelineStatus.STOPPED)
-        if not ok:
-            return f"❌ 无法停止 {round_name}（状态转换失败）"
-    if pstate:
-        pstate["active"] = False
-        pstate["stopped_at"] = __import__("time").time()
-
-    # 6. 广播到 _admin
-    try:
-        await _broadcast_to_channel(p.ADMIN_CHANNEL, {
-            "type": "broadcast",
-            "channel": p.ADMIN_CHANNEL,
-            "from_name": "系统",
-            "from_agent": SYSTEM_AGENT_ID,
-            "content": f"🛑 Pipeline {round_name} 已停止（发起者: {sender_id[:12]}...）",
-            "ts": time.time(),
-        })
-    except Exception:
-        pass  # 不阻断 return
-
-    return f"🛑 Pipeline {round_name} 已停止"
-
-
-# ── R68 A3: Send inbox task assignment + workspace notification ──
-async def _send_inbox_task(
-    target_agent_id: str,
-    round_name: str,
-    next_step: str,
-    step_config: dict,
-    output_ref: str,
-    workspace_id: str,
-    pm_name: str,
-    pm_agent_id: str = SYSTEM_AGENT_ID,  # ← R69 B1 / R99: 常量统一
-) -> None:
-    """Send full task to target agent's inbox + lightweight workspace notification."""
-    inbox_ch = persistence.get_inbox_channel(target_agent_id)
-    _pstate = _PIPELINE_STATE.get(round_name, {})
-    _pconfig = _PIPELINE_CONFIG.get(round_name, {})
-
-    # Collect context URLs
-    req_url = _pconfig.get("requirements_url",
-        f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/{round_name}-product-requirements.md")
-    plan_url = _pconfig.get("work_plan_url",
-        _pstate.get("work_plan_url",
-            f"https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/{round_name}/WORK_PLAN.md"))
-
-    # ── R69 A3: Build rich context from step_outputs ──
-    _pstate_step_outputs = _pstate.get("step_outputs", {})
-    _prev_step_key = None
-    if _pstate_step_outputs:
-        for _sk in reversed(sorted(_pstate_step_outputs.keys(), key=_step_sort_key)):
-            if _sk != next_step:
-                _prev_step_key = _sk
-                break
-    _prev_section = ""
-    if _prev_step_key:
-        _prev_out = _pstate_step_outputs[_prev_step_key]
-        _prev_sha = _prev_out.get("sha", "")[:7]
-        _prev_title = _prev_out.get("title", _prev_step_key)
-        _prev_summary = _prev_out.get("summary", "")
-        _prev_url = _prev_out.get("artifact_url", "")
-        _prev_section = f"🏗️ 前序 Step {_prev_step_key.replace('step','')}「{_prev_title}」✅ ({_prev_sha})\n"
-        if _prev_summary:
-            _prev_section += f"  └ 💡 {_prev_summary}\n"
-        if _prev_url:
-            _prev_section += f"  └ 🔗 {_prev_url}\n"
-
-    _step_title = _pconfig.get("steps", {}).get(next_step, {}).get("title", next_step)
-    inbox_msg = (
-        f"📥 任务分配 — {round_name} Step「{_step_title}」\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{_prev_section}\n"
-        f"📄 参考资料:\n"
-        f"  📄 需求：{req_url}\n"
-        f"  📋 WORK_PLAN：{plan_url}\n\n"
-        f"🎯 你的任务: 请按技术方案完成 {next_step}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"完成后: git push dev → !step_complete {next_step} --output <sha>"
-    )
-
-    # Persist inbox message
-    write_chat_log(pm_name, inbox_msg, channel=inbox_ch)
-    ms.save_message(
-        msg_id=str(uuid.uuid4()), msg_type="broadcast",
-        from_agent=SYSTEM_AGENT_ID, from_name=pm_name,
-        content=inbox_msg, ts=time.time(),
-        data_dir=config.DATA_DIR, channel=inbox_ch,
-    )
-
-    # Send to target agent's connections (unicast)
-    inbox_payload = json.dumps({
-        "type": "broadcast", "channel": inbox_ch,
-        "from_name": pm_name, "from": pm_name,
-        "agent_id": pm_agent_id,       # ← R69 B1
-        "from_agent": pm_agent_id,     # ← R69 B1
-        "content": inbox_msg, "ts": time.time(),
-    })
-    conns = _connections.get(target_agent_id, set())
-    for conn in list(conns):
-        try:
-            if hasattr(conn, "send_str"):
-                await conn.send_str(inbox_payload)
-            elif hasattr(conn, "send"):
-                await conn.send(inbox_payload)
-        except Exception:
-            pass
-
-    logger.info("Inbox task [%s] %s → %s", round_name, pm_name, target_agent_id[:12])
-
-    # 🏠 工作室轻量通知
-    ws_obj = ws_mod.get_workspace(workspace_id)
-    if ws_obj:
-        users = auth.get_users()
-        target_name = users.get(target_agent_id, {}).get("name", target_agent_id[:12])
-        notify_msg = f"@{target_name} 🔔 Step「{_step_title}」已分配，请查看收件箱 📥"
-        _persist_broadcast(workspace_id, "系统", notify_msg)
-        notify_payload = json.dumps({
-            "type": "broadcast", "channel": workspace_id,
-            "from_name": "系统", "from": "系统",
-            "content": notify_msg, "ts": time.time(),
-        })
-        for member_id in ws_obj.members:
-            for conn in list(_connections.get(member_id, set())):
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(notify_payload)
-                    elif hasattr(conn, "send"):
-                        await conn.send(notify_payload)
-                except Exception:
-                    pass
-
-
-# ── R80: Validation hook helpers ─────────────────────────────────────
-
-
-def _check_pm_or_admin(sender_id: str) -> bool:
-    """检查发送者是否有「强制推进」权限。
-
-    满足任一条件即可：
-    1. 全局管理员（auth.is_global_admin）
-    2. PM Agent（sender_id == config.PIPELINE_PM_AGENT_ID，如有配置）
-    """
-    if auth.is_global_admin(sender_id):
-        return True
-    pm_agent = getattr(config, "PIPELINE_PM_AGENT_ID", None)
-    if pm_agent and sender_id == pm_agent:
-        return True
-    return False
-
-
-async def _run_validation_hook(
-    round_name: str, step_name: str, output_ref: str, step_config: dict,
-) -> tuple[bool, str]:
-    """执行验证钩子。从 step_config 读取 validation 配置，执行子进程验证脚本。"""
-    val_config = step_config.get(step_name, {}).get("validation", {})
-    if not val_config:
-        return (True, "⏭️ 无验证脚本，跳过")
-
-    script_template = val_config.get("script", config.VALIDATION_DEFAULT_SCRIPT)
-    if not script_template:
-        return (True, "⏭️ 验证脚本为空，跳过")
-    timeout = val_config.get("timeout", config.VALIDATION_DEFAULT_TIMEOUT)
-    required = val_config.get("required", True)
-
-    # 模板渲染
-    script = script_template.replace("{output_ref}", output_ref or "")
-    script = script.replace("{step_name}", step_name)
-    script = script.replace("{round_name}", round_name)
-
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
-        if proc.returncode == 0:
-            return (True, "✅ 验证通过（exit=0）")
-        err_msg = (stderr.decode().strip()[:300]
-                   or stdout.decode().strip()[:300])
-        if required:
-            return (False, f"❌ 验证失败（exit={proc.returncode}）: {err_msg}")
-        return (True, f"⚠️ 验证警告（exit={proc.returncode}，非必需）: {err_msg}")
-    except asyncio.TimeoutError:
-        if required:
-            return (False, f"❌ 验证超时（>{timeout}s）")
-        return (True, f"⚠️ 验证超时（非必需）")
-    except Exception as e:
-        if required:
-            return (False, f"❌ 验证异常: {e}")
-        return (True, f"⚠️ 验证异常（非必需）: {e}")
-
-
-async def _cmd_step_complete(sender_id: str, params: dict) -> str:
-    """标记 Step 完成，自动点名下一人。
-    用法：!step_complete <step_name> [--output <commit/file>]
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!step_complete <step_name> [--output <commit/file>]"
-    step_name = positional[0].lower()
-    output_ref = params.get("output", "")
-
-    # ── R65 B1: Auto-detect SHA when --output is missing ──
-    if not output_ref and config.ENABLE_GIT_SYNC:
-        try:
-            branch = config.GIT_SYNC_BRANCH
-            proc = await asyncio.create_subprocess_exec(
-                "git", "log", "-1", "--format=%H", f"origin/{branch}",
-                cwd=config.REPO_PATH,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-            if proc.returncode == 0:
-                sha = stdout.decode().strip()
-                if sha:
-                    output_ref = sha
-                    logger.info("[R65 B1] 自动检测最新 SHA: %s", sha)
-            else:
-                logger.warning("[R65 B1] git log 失败: %s", stderr.decode().strip())
-        except Exception as e:
-            logger.warning("[R65 B1] 自动检测 SHA 异常: %s", e)
-    # ── R65 B1: End ──
-
-    if not output_ref:
-        return "❌ 缺少 --output <sha>，且无法自动检测最新 commit"
-
-    # ── R84 FIX: 用发送者所在的工作区取代 lobby ──
-    active_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
-    active_ws = [w for w in active_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
-    if not active_ws:
-        return "❌ 请在工作区中使用此命令（你不在任何活跃工作室中）"
-    sender_ch = active_ws[0].id
-    ws_obj = ws_mod.get_workspace(sender_ch)
-    if not ws_obj:
-        return "❌ 请在工作区中使用此命令"
-
-    # 从 ws name 提取 round_name
-    round_name = None
-    for rname, pstate in _PIPELINE_STATE.items():
-        if pstate.get("ws_id") == sender_ch:
-            round_name = rname
-            break
-    if not round_name:
-        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
-
-    # ── R55 E: Mode check ──
-    # In manual mode, only the step's role can advance
-    pstate = _PIPELINE_STATE.get(round_name, {})
-    # ── R70 Fix: step_config always defined (was inside manual block) ──
-    step_config = _get_step_config(round_name)
-    if pstate.get("mode", "auto") == "manual":
-        step_role = step_config.get(step_name, {}).get("role", "")
-        if step_role:
-            users = auth.get_users()
-            sender_role = users.get(sender_id, {}).get("role", "member")
-            if sender_role != step_role and not auth.is_global_admin(sender_id):
-                return f"❌ manual 模式下仅 {step_role} 可推进 Step「{step_name}」"
-
-    # ── R55 C: Git commit verification ──
-    if output_ref:
-        git_ok, git_msg = await _verify_git_commit(output_ref)
-        if not git_ok:
-            return git_msg  # ❌ prevents advance
-
-    # ── R55 A: 2s serialization buffer ──
-    buffer_key = f"{round_name}:{step_name}"
-    last_ts = _step_advance_buffer.get(buffer_key, 0.0)
-    if time.time() - last_ts < 2.0:
-        return f"❌ {step_name} 正在被推进中（2 秒序列化缓冲），请稍后重试"
-    _step_advance_buffer[buffer_key] = time.time()
-
-    # 提取 ws_id
-    ws_id = sender_ch
-
-    # 标记当前 Task completed
-    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-    current_task = None
-    for t in tasks:
-        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
-            current_task = t
-            break
-    if not current_task:
-        return f"❌ 未找到 Step「{step_name}」的活跃 Task（可能已完成）"
-
-    task_update_params = {
-        "_positional": [current_task["id"]],
-        "state": p.TaskState.COMPLETED.value,
-        "output": output_ref,
-    }
-    task_result = await _cmd_task_update(sender_id, task_update_params)
-
-    # ── R57: Clear backup_active marker on step completion ──
-    pstate.pop("backup_active", None)
-
-    # ── R66 B1 + R69 A1: Record step output with context ──
-    pstate_b1 = _PIPELINE_STATE.get(round_name)
-    if pstate_b1:
-        step_outputs = pstate_b1.setdefault("step_outputs", {})
-        step_outputs[step_name] = {
-            "sha": output_ref or "",
-            "title": step_config.get(step_name, {}).get("title", step_name),
-            "output_desc": step_config.get(step_name, {}).get("output_desc", ""),
-            "summary": params.get("summary", step_config.get(step_name, {}).get("output_desc", "")),
-            "artifact_url": params.get("artifact_url",
-                _infer_artifact_url(step_name, round_name, step_config)),
-            "timestamp": time.time(),
-        }
-
-    # ── R80 A: Validation hook gate ──────────────────────────────
-    force_bypass = (
-        params.get("_force_mode", False)
-        and _check_pm_or_admin(sender_id)
-    )
-    if config.ENABLE_VALIDATION_HOOK and not force_bypass:
-        val_passed, val_msg = await _run_validation_hook(
-            round_name, step_name, output_ref, step_config
-        )
-        if not val_passed:
-            # Block the pipeline
-            mgr = _ensure_pipeline_manager()
-            try:
-                await mgr.transition_to(
-                    round_name, PipelineStatus.BLOCKED,
-                    blocked_reason=val_msg,
-                )
-            except Exception:
-                pass
-            # Notify PM
-            pm_agent_id = getattr(config, "PIPELINE_PM_AGENT_ID", "")
-            if pm_agent_id:
-                pm_inbox = f"_inbox:{pm_agent_id}"
-                try:
-                    await _broadcast_to_channel(pm_inbox, {
-                        "type": "broadcast",
-                        "channel": pm_inbox,
-                        "from_name": "系统",
-                        "from_agent": SYSTEM_AGENT_ID,
-                        "content": (
-                            f"🔴 {round_name} {step_name} 验证失败\n\n"
-                            f"{val_msg}\n\n"
-                            f"操作：`!step_force {step_name} --output {output_ref}` 强制推进\n"
-                            f"或修复后 `!step_verify {step_name}` 重新验证"
-                        ),
-                        "ts": time.time(),
-                    })
-                except Exception:
-                    pass
-            return f"🔴 **{round_name} {step_name} 验证失败** ❌\n\n{val_msg}\n\n管线已进入 BLOCKED 状态。"
-    # ── R80 A: End ──
-
-    # 查 Step 映射表 → 找下一角色
-    step_config = _get_step_config(round_name)
-    step_keys = sorted(step_config.keys(), key=_step_sort_key)
-    current_idx = None
-    for i, k in enumerate(step_keys):
-        if k == step_name:
-            current_idx = i
-            break
-    if current_idx is None or current_idx + 1 >= len(step_keys):
-        # 最后一步 → 管线结束
-        # R48 B: 在清理前提取触发者信息
-        triggerer_id = _PIPELINE_STATE.get(round_name, {}).get("triggerer_id", "")
-
-        close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
-        if "❌" in str(close_result):
-            return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
-        set_lobby_paused(False)
-
-        # ── R48 B: 写入 _admin 频道完结通知 ──
-        try:
-            admin_channel = p.ADMIN_CHANNEL
-            cleanup_msg = (
-                f"🔔 [PIPELINE_COMPLETE] {round_name} — 所有 Step 已完结 ✅\n"
-                f"最终产出: {output_ref}\n"
-                f"工作室已关闭，大厅已恢复接收"
-            )
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=cleanup_msg, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=admin_channel,
-            )
-            write_chat_log("系统", cleanup_msg, channel=admin_channel)
-        except Exception:
-            pass
-        # ── R48 B: End ──
-
-        _clear_pipeline_state(round_name)
-
-        return (
-            f"🏁 **{round_name} 管线已完成！**\n"
-            f"  🎯 产出: {output_ref}\n"
-            f"  {task_result}\n"
-            f"  工作室已关闭，大厅已恢复接收"
-        )
-
-    next_step = step_keys[current_idx + 1]
-    next_role = step_config[next_step]["role"]
-    # ── R59 C: Apply role override if configured ──
-    _role_overrides = getattr(config, "PIPELINE_ROLE_OVERRIDES", {})
-    if next_step in _role_overrides:
-        next_role = _role_overrides[next_step]
-    # ── R59 C: End role override ──
-
-    # ── R43 D: Resolve next role display name ──
-    # ── R49 B: Use agent cards if available ──
-    users = auth.get_users()
-    cards = ac_mod.get_all_cards()
-    if cards:
-        matched = _find_agents_by_role(next_role, ws_obj.members, cards)
-        next_role_names = [
-            users.get(aid, {}).get("name", aid[:12])
-            for aid in matched
-        ]
-    else:
-        next_role_names = [
-            users.get(aid, {}).get("name", aid[:12])
-            for aid in ws_obj.members
-            if users.get(aid, {}).get("role", "member") == next_role
-        ]
-    next_role_display = ", ".join(next_role_names) if next_role_names else next_role
-
-    # ── R66 B2: Render context for rollcall ──
-    _b2_step_outputs = pstate.get("step_outputs", {}) if pstate else {}
-    _b2_next_context = step_config.get(next_step, {}).get("context", {})
-    _b2_rendered = _render_context(_b2_next_context, round_name, _b2_step_outputs)
-    _b2_context_lines = []
-    for _k, _v in _b2_rendered.items():
-        if _v:
-            _labels = {
-                "requirements_url": "📄 需求",
-                "work_plan_url": "📋 WORK_PLAN",
-                "tech_plan_url": "🏗️ 技术方案",
-                "bug_report_url": "🐛 Bug 报告",
-            }
-            _label = _labels.get(_k, f"📎 {_k}")
-            _b2_context_lines.append(f"  {_label}: {_v}")
-    _b2_suffix = "\n" + "\n".join(_b2_context_lines) if _b2_context_lines else ""
-
-    # ── R55 F: Targeted handoff (replace broadcast rollcall) ──
-    # Send MSG_SET_ACTIVE_CHANNEL + task notification only to next step's agents
-    context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
-    targeted_notify = f"🎯 新任务：{round_name} {next_step} ({next_role})\n{context_summary}{_b2_suffix}"
-
-    # ── R57 A: Online pre-check + rollcall with backup fallback ──
-    member_ids = list(ws_obj.members)
-
-    # Read primary/backup config
-    primary_role = step_config[next_step].get("primary")
-    backup_role = step_config[next_step].get("backup")
-
-    # Resolve primary agent
-    primary_agents: list[str] = []
-    if cards and primary_role:
-        primary_agents = _find_agents_by_role(primary_role, member_ids, cards)
-
-    if not primary_agents:
-        # No primary config → fallback to original full-notify behaviour (A-9 compat)
-        if cards:
-            target_agents = _find_agents_by_role(next_role, member_ids, cards)
-        else:
-            target_agents = [
-                aid for aid in member_ids
-                if users.get(aid, {}).get("role", "member") == next_role
-            ]
-        for agent_id in target_agents:
-            await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
-        rollcall_result = f"📨 已通知 {next_role_display}（{len(target_agents)} 人）接管 {next_step}"
-    else:
-        target_agents = []
-        primary_agent = primary_agents[0]
-        primary_name = users.get(primary_agent, {}).get("name", primary_agent[:12])
-        conns = _connections.get(primary_agent, set())
-
-        if not conns:
-            # ── Primary offline → direct backup, 0s wait ──
-            rollcall_result = await _r57_switch_to_backup(
-                round_name, next_step, next_role,
-                backup_role, member_ids, cards, users,
-                ws_obj, sender_ch, targeted_notify, primary_name,
-                reason="primary_offline",
-            )
-        else:
-            # ── R68 A3: inbox task assignment + workspace notification ──
-            if next_role == "arch":
-                pm_name = config.PIPELINE_ARCH_FROM_NAME
-            else:
-                pm_name = config.PIPELINE_PM_NAME
-
-            # Send full task to inbox
-            await _send_inbox_task(
-                target_agent_id=primary_agent,
-                round_name=round_name,
-                next_step=next_step,
-                step_config=step_config,
-                output_ref=output_ref,
-                workspace_id=sender_ch,
-                pm_name=pm_name,
-                pm_agent_id=sender_id,  # ← R69 B1
-            )
-
-            # Start 30s rollcall timer (keep existing rollcall logic)
-            ack_received = await _r57_wait_for_ack(primary_agent, timeout=30)
-
-            if ack_received:
-                # Primary confirmed ✓ normal handoff
-                if cards:
-                    target_agents = _find_agents_by_role(next_role, member_ids, cards)
-                else:
-                    target_agents = [
-                        aid for aid in member_ids
-                        if users.get(aid, {}).get("role", "member") == next_role
-                    ]
-                for agent_id in target_agents:
-                    await _send_to_agent(agent_id, targeted_notify, ws_id=sender_ch)
-                rollcall_result = f"✅ 主角 {primary_name} 已确认，正常交接 {next_step}"
-            else:
-                # Primary 30s no response → switch to backup
-                rollcall_result = await _r57_switch_to_backup(
-                    round_name, next_step, next_role,
-                    backup_role, member_ids, cards, users,
-                    ws_obj, sender_ch, targeted_notify, primary_name,
-                    reason="primary_timeout",
-                )
-
-    # 创建下一步的 Task
-    next_task_result = await _cmd_task_create(sender_id, {
-        "context": round_name,
-        "name": next_step,
-        "role": next_role,
-    })
-
-    # ── R58 C2: Record notification status to pstate ──
-    step_notifications = pstate.setdefault("step_notifications", {})
-    step_notifications[next_step] = {
-        "status": "notified",
-        "notified_at": time.time(),
-        "target_agents": target_agents,
-    }
-    # ── R58 C2: End notification status ──
-
-    # ── R59 B3: PM auto-fallback monitor for dev ──
-    # dev(爱泰) 无法通过 ws-bridge 代码自动触发（方向 A 实验确认任何 from_name 均无效）。
-    # B3 兜底成为 dev 触发的主要通道（而非备用）。
-    if next_role == "dev" and next_step != "step6":
-        asyncio.create_task(_r59_auto_fallback_monitor(
-            round_name=round_name,
-            next_step=next_step,
-            next_role=next_role,
-            primary_agent=locals().get('primary_agent', None),
-            primary_name=locals().get('primary_name', next_role),
-            sender_ch=sender_ch,
-            ws_obj=ws_obj,
-            timeout_minutes=5,
-        ))
-    # ── R59 B3: End ──
-
-    # 更新管线状态
-    _update_pipeline_step(round_name, next_step)
-
-    # 通知 PM（在 _admin 频道发进度）
-    try:
-        admin_channel = p.ADMIN_CHANNEL
-        notify_msg = (
-            f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
-        )
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent="系统", from_name="系统",
-            content=notify_msg, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=admin_channel,
-        )
-    except Exception:
-        pass
-
-    # ── Notify PM inbox of step progress (同步通知小谷收件箱) ──
-    try:
-        pm_users = auth.get_users()
-        pm_agent_id = None
-        for aid_u, u in pm_users.items():
-            if u.get("name") == config.PIPELINE_PM_NAME:
-                pm_agent_id = aid_u
-                break
-        if pm_agent_id:
-            pm_inbox_ch = persistence.get_inbox_channel(pm_agent_id)
-            _out_short = output_ref[:7] if output_ref else "(未提供)"
-            pm_notify = (
-                f"📋 {round_name} 进度：{step_name} ✅ → "
-                f"下一棒 {next_role_display}（{next_step}）\n"
-                f"  🎯 产出: {_out_short}"
-            )
-            write_chat_log("系统", pm_notify, channel=pm_inbox_ch)
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=pm_notify, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=pm_inbox_ch,
-            )
-            pm_payload = json.dumps({
-                "type": "broadcast", "channel": pm_inbox_ch,
-                "from_name": "系统", "from": "系统",
-                "content": pm_notify, "ts": time.time(),
-            })
-            for conn in list(_connections.get(pm_agent_id, set())):
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(pm_payload)
-                    elif hasattr(conn, "send"):
-                        await conn.send(pm_payload)
-                except Exception:
-                    pass
-            logger.info("PM inbox notified: %s %s ✅ → %s", round_name, step_name, next_step)
-    except Exception:
-        pass
-
-    # ── R43 C: Send clear alert if watchdog was active ──
-    if _clear_watchdog_alert(round_name, step_name):
-        await _send_clear_alert(round_name, step_name, output_ref)
-
-    # ── Step-complete: clear old timer, start next step timer ──
-    timeout_tracker.clear_timer(round_name)
-    _step_timeout_mins = step_config.get(next_step, {}).get("timeout_minutes",
-        int(step_config.get(next_step, {}).get("timeout_hours", 6) * 60))
-    timeout_tracker.start_timer(round_name, next_step, int(_step_timeout_mins))
-
-    # ── Start ACK state machine for next step assignment ──
-    ack_key = f"{round_name}/{next_step}"
-    _step_ack_states[ack_key] = {
-        "state": "SENT",
-        "agent_id": primary_agent if 'primary_agent' in dir() and primary_agents else "",
-        "sent_at": time.time(),
-        "deadline": time.time() + 30,
-        "delivery_sent": 0,
-    }
-    asyncio.create_task(_ack_timeout_task(ack_key))
-
-    # ── R53 D: Enhanced return value with ACK confirm ──
-    # ── R55 F: Use targeted handoff result ──
-    return (
-        f"✅ **{step_name} 完成** → 交接给 {next_role} {next_step}\n"
-        f"  📨 已定向通知 {next_role_display}（{len(target_agents)} 人）接管\n"
-        f"  {task_result}\n"
-        f"  {next_task_result}"
-    )
-
-
-# ── R80 B: Step force command ────────────────────────────────
-
-
-async def _cmd_step_force(sender_id: str, params: dict) -> str:
-    """强制推进 Step（跳过验证钩子）。
-
-    用法：!step_force <step_name> --output <sha> [--reason "原因"]
-    权限：仅 PM 或全局管理员可执行。
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!step_force <step_name> --output <sha> [--reason \"原因\"]"
-
-    step_name = positional[0].lower()
-    output_ref = params.get("output", "")
-    reason = params.get("reason", "无说明")
-
-    if not output_ref:
-        return "❌ 缺少 --output <sha>"
-
-    if not _check_pm_or_admin(sender_id):
-        return "❌ 权限不足：仅 PM 或管理员可强制推进"
-
-    # 审计日志
-    _audit_logger.log(
-        sender_id, "step_force",
-        {"step": step_name, "output": output_ref, "reason": reason},
-        "forced",
-    )
-
-    # 传给 _cmd_step_complete，携带 _force_mode 标志
-    params["_force_mode"] = True
-    return await _cmd_step_complete(sender_id, params)
-
-
-# ── R80 C: Step verify command ───────────────────────────────
-
-
-async def _cmd_step_verify(sender_id: str, params: dict) -> str:
-    """BLOCKED 状态下重新执行验证钩子。
-
-    用法：!step_verify <step_name> [--output <sha>]
-    若不传 --output，从 step_outputs 复用上次的 SHA。
-    验证通过后将管线从 BLOCKED 恢复为 RUNNING。
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!step_verify <step_name> [--output <sha>]"
-
-    step_name = positional[0].lower()
-    output_ref = params.get("output", "")
-
-    # 确定 round_name（从发送者的活跃频道推断）
-    sender_ch = p.LOBBY
-    round_name = next(
-        (r for r, s in _PIPELINE_STATE.items() if s.get("ws_id") == sender_ch),
-        None,
-    )
-    if not round_name:
-        return "❌ 当前工作区无活跃管线"
-
-    # 未提供 --output 时，从 step_outputs 复用
-    if not output_ref:
-        pstate = _PIPELINE_STATE.get(round_name, {})
-        output_ref = (
-            pstate.get("step_outputs", {})
-            .get(step_name, {})
-            .get("sha", "")
-        )
-        if not output_ref:
-            return f"❌ 未找到 {step_name} 的历史产出 SHA，请使用 --output 指定"
-
-    step_config = _get_step_config(round_name)
-    val_passed, val_msg = await _run_validation_hook(
-        round_name, step_name, output_ref, step_config,
-    )
-
-    if val_passed:
-        # 恢复管线运行
-        mgr = _ensure_pipeline_manager()
-        try:
-            await mgr.transition_to(round_name, PipelineStatus.RUNNING)
-        except Exception:
-            pass
-        return (
-            f"✅ **{round_name} {step_name} 验证通过** ✓\n\n"
-            f"{val_msg}\n\n"
-            f"管线已恢复 RUNNING 状态。"
-        )
-
-    return f"🔴 **{round_name} {step_name} 验证仍失败** ❌\n\n{val_msg}"
-
-
-# ── R55 F: Targeted send helper ────────────────────────────
-
-
-async def _send_to_agent(agent_id: str, text: str, ws_id: str = "") -> bool:
-    """Send a text message directly to a specific agent (not broadcast).
-    If the agent has live connections, send the text. If not, and ws_id
-    is provided, fall back to broadcasting to all workspace members.
-    Returns True if at least one connection received it.
-    """
-    conns = _connections.get(agent_id, set())
-    if not conns:
-        # Offline fallback: broadcast to workspace members
-        if ws_id:
-            ws_obj = ws_mod.get_workspace(ws_id)
-            if ws_obj:
-                fallback = json.dumps({
-                    "type": "broadcast",
-                    "channel": ws_id,
-                    "from_name": "系统",
-                    "content": text,
-                    "ts": time.time(),
-                })
-                for member_id in ws_obj.members:
-                    for conn in list(_connections.get(member_id, set())):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(fallback)
-                            elif hasattr(conn, "send"):
-                                await conn.send(fallback)
-                        except Exception:
-                            pass
-                write_chat_log("系统", f"[回退广播 @{ws_id}] {text}", channel=ws_id)
-        else:
-            write_chat_log("系统", f"[定向通知 @{_get_agent_display(agent_id)}] {text}")
-        return False
-    payload = {
-        "type": p.MSG_BROADCAST,
-        "from_agent": "系统",
-        "from_name": "系统",
-        "content": text,
-        "ts": time.time(),
-    }
-    sent = False
-    for ws in conns:
-        try:
-            await _send(ws, payload)
-            sent = True
-        except Exception:
-            pass
-    if not sent:
-        write_chat_log("系统", f"[定向通知 @{_get_agent_display(agent_id)}] {text}")
-    return sent
-
-
-# ── R57 A: Backup takeover handler ──────────────────────────
-async def _r57_switch_to_backup(
-    round_name: str, next_step: str, next_role: str,
-    backup_role: str | None, member_ids: list[str],
-    cards: dict, users: dict, ws_obj, sender_ch: str,
-    targeted_notify: str, primary_name: str,
-    reason: str,
-) -> str:
-    """R57: 主角离线或无响应时，切换备用接替。
-
-    reason: "primary_offline" | "primary_timeout"
-    返回 rollcall_result 字符串。
-    """
-    # Broadcast swap announcement to workspace
-    if reason == "primary_offline":
-        swap_msg = f"⚠️ 主角 {primary_name} 离线，{next_step} 由备用接替"
-    else:
-        swap_msg = f"⚠️ 主角 {primary_name} 未响应，{next_step} 由备用接替"
-    _persist_broadcast(sender_ch, "系统", swap_msg)
-
-    backup_assigned = False
-
-    # Find backup agent
-    backup_agents: list[str] = []
-    if cards and backup_role:
-        backup_agents = _find_agents_by_role(backup_role, member_ids, cards)
-    if not backup_agents:
-        # No backup config → notify all matching role (A-9 compatibility)
-        if cards:
-            backup_agents = _find_agents_by_role(next_role, member_ids, cards)
-        else:
-            backup_agents = [
-                aid for aid in member_ids
-                if users.get(aid, {}).get("role", "member") == next_role
-            ]
-
-    for backup_agent in backup_agents:
-        backup_conns = _connections.get(backup_agent, set())
-        backup_name = users.get(backup_agent, {}).get("name", backup_agent[:12])
-        if backup_conns:
-            # Backup online → targeted notification with full context
-            backup_notify = targeted_notify + "\n（🔧 您作为备用接替此 Step）"
-            await _send_to_agent(backup_agent, backup_notify, ws_id=sender_ch)
-            backup_assigned = True
-            # Record backup_active in pipeline state for !pipeline_status marker
-            for rname, pstate in _PIPELINE_STATE.items():
-                if pstate.get("ws_id") == sender_ch:
-                    pstate["backup_active"] = {"step": next_step, "role": backup_role or next_role}
-                    break
-
-    if not backup_assigned:
-        # Backup also offline → system broadcast in workspace
-        critical_msg = f"🔴 {next_step} 主角和备用均不在线，等待协调"
-        _persist_broadcast(sender_ch, "系统", critical_msg)
-        # _admin channel log
-        try:
-            admin_channel = p.ADMIN_CHANNEL
-            admin_msg = f"📋 {round_name} | {next_step} | 主角+备用均离线，需人工介入"
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=admin_msg, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=admin_channel,
-            )
-            write_chat_log("系统", admin_msg, channel=admin_channel)
-        except Exception:
-            pass
-
-    # _admin channel: log the swap
-    try:
-        admin_channel = p.ADMIN_CHANNEL
-        log_msg = f"📋 {round_name} | {next_step} | {reason.replace('_', ' ')} → 备用接替"
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent="系统", from_name="系统",
-            content=log_msg, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=admin_channel,
-        )
-        write_chat_log("系统", log_msg, channel=admin_channel)
-    except Exception:
-        pass
-
-    return f"🔄 {next_step} — 由备用接替（{reason.replace('_', ' ')}）"
-
-
-async def _r57_wait_for_ack(agent_id: str, timeout: int = 30) -> bool:
-    """等待 agent 在 timeout 秒内回复确认消息。返回是否收到确认。
-
-    使用 asyncio.Event 实现点名等待。当 agent 在工作室发送任意消息时，
-    通过 ACK 监听钩入点触发 event set。
-    """
-    event = asyncio.Event()
-    _r57_rollcall_events[agent_id] = event
-    try:
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-        return True
-    except asyncio.TimeoutError:
-        return False
-    finally:
-        _r57_rollcall_events.pop(agent_id, None)
-
-
-# ── R59 B3: PM auto-fallback monitor ──────────────────────────
-
-
-async def _r59_auto_fallback_monitor(
-    round_name: str, next_step: str, next_role: str,
-    primary_agent: str | None, primary_name: str,
-    sender_ch: str, ws_obj,
-    timeout_minutes: int = 5,
-) -> None:
-    """R59 B3: PM 自动兜底 — 检查 dev 是否在超时内响应。
-
-    R59 方向 A 实验证实 dev(爱泰) 对任何 from_name 均无响应。
-    此兜底机制成为 dev 触发的主要通道（而非备用）。
-
-    超时后：
-    1. 在工作室内输出催促消息（@bot 点名）
-    2. 通过 _admin 频道日志通知项目负责人（由 TG 桥接转发）
-    """
-    await asyncio.sleep(timeout_minutes * 60)
-
-    try:
-        # 检查 pipeline_state 中的 notification status
-        pstate = _PIPELINE_STATE.get(round_name, {})
-        step_notif = pstate.get("step_notifications", {}).get(next_step, {})
-        ack_status = step_notif.get("ack_status", "")
-
-        # 检查是否有活跃 Task（表示 bot 已响应并开始工作）
-        has_active_task = False
-        try:
-            tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-            has_active_task = any(
-                t.get("name") == next_step and
-                t.get("state") not in ("completed", "pending")
-                for t in tasks
-            )
-        except Exception:
-            pass
-
-        already_responded = has_active_task or ack_status in ("acknowledged", "completed")
-
-        if not already_responded:
-            # Bot 未响应 → 在工作室内催促
-            reminder_msg = (
-                f"@{primary_name} ⏰ Step「{next_step}」已通知 {timeout_minutes} 分钟，"
-                f"请确认收到。若无法响应，请联系项目负责人处理。"
-            )
-            _persist_broadcast(sender_ch, config.PIPELINE_PM_NAME, reminder_msg)
-            reminder_payload = json.dumps({
-                "type": "broadcast", "channel": sender_ch,
-                "from_name": config.PIPELINE_PM_NAME, "from": config.PIPELINE_PM_NAME,
-                "content": reminder_msg, "ts": time.time(),
-            })
-            for member_id in ws_obj.members:
-                for conn in list(_connections.get(member_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(reminder_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(reminder_payload)
-                    except Exception:
-                        pass
-
-            # TG 通知项目负责人（走 _admin 频道日志，由 TG 桥接转发）
-            try:
-                admin_channel = p.ADMIN_CHANNEL
-                tg_alert = (
-                    f"📋 [R59_FALLBACK] {round_name} | Step「{next_step}」({next_role}) "
-                    f"已通知 {timeout_minutes} 分钟但 bot {primary_name} 未响应。\n"
-                    f"工作室: {sender_ch}\n"
-                    f"请检查是否需要 TG 转发触发。"
-                )
-                ms.save_message(
-                    msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                    from_agent="系统", from_name="系统",
-                    content=tg_alert, ts=time.time(),
-                    data_dir=config.DATA_DIR, channel=admin_channel,
-                )
-                write_chat_log("系统", tg_alert, channel=admin_channel)
-            except Exception:
-                pass
-    except Exception as e:
-        write_chat_log("系统", f"[R59_FALLBACK 异常] {e}")
-# ── R59 B3: End ──
-# ── R55 B: Step reject command ─────────────────────────────
-
-
-async def _cmd_step_reject(sender_id: str, params: dict) -> str:
-    """退回 Step N 到 pending 状态，附退回理由。
-    用法：!step_reject <step_name> --reason <原因>
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!step_reject <step_name> --reason <原因>"
-    step_name = positional[0].lower().strip()
-    reason = params.get("reason", "")
-    if not reason:
-        return "❌ 退回必须附理由：!step_reject <step_name> --reason <原因>"
-
-    # 解析管线上下文
-    sender_ch = p.LOBBY
-    ws_obj = ws_mod.get_workspace(sender_ch)
-    if not ws_obj:
-        return "❌ 请在工作区中使用此命令"
-
-    round_name = None
-    for rname, pstate in _PIPELINE_STATE.items():
-        if pstate.get("ws_id") == sender_ch:
-            round_name = rname
-            break
-    if not round_name:
-        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
-
-    # 前置校验：step 必须在 PIPELINE_STEP_MAP 中
-    step_config = _get_step_config(round_name)
-    if step_name not in step_config:
-        return f"❌ Step「{step_name}」不存在于管线映射中"
-
-    # 找到当前 active task for this step
-    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-    current_task = None
-    for t in tasks:
-        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
-            current_task = t
-            break
-    if not current_task:
-        return f"❌ Step「{step_name}」没有活跃 Task，无法退回"
-
-    # 检查退回次数上限
-    reject_count = current_task.get("reject_count", 0) + 1
-    if reject_count >= p.TASK_REJECT_CEILING:
-        # R55 W-3: 第 TASK_REJECT_CEILING 次退回 → 升级给 PM
-        # TASK_REJECT_CEILING=2 表示第 2 次退回（即 2 次机会后）升级
-        # 第 3 次退回 → 升级给 PM
-        try:
-            admin_channel = p.ADMIN_CHANNEL
-            escalation_msg = (
-                f"🚨 [ESCALATION] {round_name} {step_name} 已被退回 "
-                f"{reject_count} 次，需 PM 介入协调\n"
-                f"最近理由: {reason}\n"
-                f"退回者: {sender_id[:12]}"
-            )
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=escalation_msg, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=admin_channel,
-            )
-        except Exception:
-            pass
-        return (
-            f"🚨 {step_name} 已被退回 {reject_count} 次，"
-            f"超过上限（{p.TASK_REJECT_CEILING}），自动升级给 PM 协调"
-        )
-
-    # 处理原 task: 标记 INPUT_REQUIRED + 写入 reject_count
-    ts.update_state(current_task["id"], p.TaskState.INPUT_REQUIRED.value, config.DATA_DIR)
-    ts.increment_reject_count(current_task["id"], config.DATA_DIR)
-
-    # 写入退回记录到 _PIPELINE_STATE
-    pstate = _PIPELINE_STATE.setdefault(round_name, {})
-    rejected_steps = pstate.setdefault("rejected_steps", {})
-    rejected_steps[step_name] = {
-        "reject_count": reject_count,
-        "last_reason": reason,
-        "rejected_by": sender_id,
-        "rejected_at": time.time(),
-    }
-
-    # 更新 step 指针（如果当前已推进到此 step 之后，回退）
-    current_pstate = _PIPELINE_STATE.get(round_name, {})
-    current_step = current_pstate.get("current_step", "")
-    step_keys = sorted(step_config.keys(), key=_step_sort_key)
-    current_idx = None
-    target_idx = None
-    for i, k in enumerate(step_keys):
-        if k == step_name:
-            target_idx = i
-        if k == current_step:
-            current_idx = i
-    if target_idx is not None and current_idx is not None and current_idx > target_idx:
-        _update_pipeline_step(round_name, step_name)
-
-    # 创建新 task（重新从 SUBMITTED 开始）
-    next_task_result = await _cmd_task_create(sender_id, {
-        "context": round_name,
-        "name": step_name,
-        "role": step_config[step_name].get("role", ""),
-    })
-
-    # 通知被退回角色（方向 F：定向发送）
-    users = auth.get_users()
-    step_role = step_config[step_name].get("role", "")
-    cards = ac_mod.get_all_cards()
-    member_ids = list(ws_obj.members)
-    if cards:
-        target_agents = _find_agents_by_role(step_role, member_ids, cards)
-    else:
-        target_agents = [
-            aid for aid in member_ids
-            if users.get(aid, {}).get("role", "member") == step_role
-        ]
-    reject_notify = f"🔄 {step_name} 被退回（第 {reject_count} 轮）：{reason}"
-    for agent_id in target_agents:
-        await _send_to_agent(agent_id, reject_notify, ws_id=sender_ch)
-
-    # _admin 频道记录退回日志（PM 可见）
-    try:
-        admin_channel = p.ADMIN_CHANNEL
-        log_msg = (
-            f"📋 {round_name} 退回：{step_name} ❌（第 {reject_count} 轮）\n"
-            f"  理由：{reason}\n"
-            f"  退回者：{sender_id[:12]}"
-        )
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent="系统", from_name="系统",
-            content=log_msg, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=admin_channel,
-        )
-    except Exception:
-        pass
-
-    return f"🔄 {step_name} 已退回（第 {reject_count} 轮）：{reason}\n{next_task_result}"
-
-
-# ── R69 B2: Workspace reset ──
-async def _cmd_workspace_reset(sender_id: str, params: dict) -> str:
-    """R82: 重置工作室：关闭 + 清理管线状态。"""
-    ws_id_param = params.get("_positional", [None])[0] or params.get("workspace", "")
-    if not ws_id_param:
-        return "❌ 请使用 --workspace <ws_id> 指定工作区"
-    ws_obj = ws_mod.get_workspace(ws_id_param)
-    if not ws_obj:
-        return "❌ 未找到活跃工作室"
-    ws_id = ws_obj.id
-    ws_name = ws_obj.name
-    close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
-    # R82: removed _broadcast_active_channel
-    for pid, pst in list(_PIPELINE_STATE.items()):
-        if pst.get("ws_id") == ws_id:
-            _PIPELINE_STATE[pid]["active"] = False
-    return f"✅ 工作室「{ws_name}」({ws_id[:12]}) 已重置 — 归档 + 回大厅 + 管线清理完成"
-
-
-# ── R50: Step handoff command ──────────────────────────────────────
-
-
-async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
-    """标记 Step 完成并交接给下一角色，同时广播 MSG_SET_ACTIVE_CHANNEL。
-    用法：!step_handoff <step_name> --output <commit/file>
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!step_handoff <step_name> --output <commit/file>"
-    step_name = positional[0].lower()
-    output_ref = params.get("output", "")
-    if not output_ref:
-        return "❌ --output 为必填参数，请提供 commit SHA 或文件路径"
-
-    sender_ch = p.LOBBY
-    ws_obj = ws_mod.get_workspace(sender_ch)
-    if not ws_obj:
-        return "❌ 请在工作区中使用此命令"
-
-    # Extract round_name from pipeline state
-    round_name = None
-    for rname, pstate in _PIPELINE_STATE.items():
-        if pstate.get("ws_id") == sender_ch:
-            round_name = rname
-            break
-    if not round_name:
-        return "❌ 当前工作区无活跃管线（可能已结束或被手动创建）"
-
-    ws_id = sender_ch
-
-    # Mark current Task completed
-    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-    current_task = None
-    for t in tasks:
-        if t.get("name") == step_name and t.get("state") != p.TaskState.COMPLETED.value:
-            current_task = t
-            break
-    if not current_task:
-        return f"❌ 未找到 Step「{step_name}」的活跃 Task（可能已完成）"
-
-    task_update_params = {
-        "_positional": [current_task["id"]],
-        "state": p.TaskState.COMPLETED.value,
-        "output": output_ref,
-    }
-    task_result = await _cmd_task_update(sender_id, task_update_params)
-
-    # Look up next step
-    step_config = _get_step_config(round_name)
-    step_keys = sorted(step_config.keys(), key=_step_sort_key)
-    current_idx = None
-    for i, k in enumerate(step_keys):
-        if k == step_name:
-            current_idx = i
-            break
-    if current_idx is None or current_idx + 1 >= len(step_keys):
-        # Final step → pipeline complete
-        close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
-        if "❌" in str(close_result):
-            return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
-        set_lobby_paused(False)
-        _clear_pipeline_state(round_name)
-
-        # Cleanup progress notification (R47 A4)
-        try:
-            cleanup_msg = f"📊 {round_name} 管线已完成 ✅ 所有 Step 已完结，工作室已关闭"
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=cleanup_msg, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
-            )
-            write_chat_log("系统", cleanup_msg, channel=p.ADMIN_CHANNEL)
-        except Exception:
-            pass
-
-        return (
-            f"🏁 **{round_name} 管线已完成！**\n"
-            f"  {task_result}\n"
-            f"  工作室已关闭，大厅已恢复接收"
-        )
-
-    next_step = step_keys[current_idx + 1]
-    next_role = step_config[next_step]["role"]
-
-    # Resolve next role display names
-    users = auth.get_users()
-    next_role_names = [
-        users.get(aid, {}).get("name", aid[:12])
-        for aid in ws_obj.members
-        if users.get(aid, {}).get("role", "member") == next_role
-    ]
-    next_role_display = ", ".join(next_role_names) if next_role_names else next_role
-
-    # Rollcall next role
-    # ── R66 B2/B3: Render context for handoff rollcall ──
-    _h_pstate = _PIPELINE_STATE.get(round_name, {})
-    _h_step_outputs = _h_pstate.get("step_outputs", {})
-    _h_next_context = step_config.get(next_step, {}).get("context", {})
-    _h_rendered = _render_context(_h_next_context, round_name, _h_step_outputs)
-    _h_context_lines = []
-    for _k, _v in _h_rendered.items():
-        if _v:
-            _h_context_lines.append(f"  📎 {_k}: {_v}")
-    _h_suffix = "\n" + "\n".join(_h_context_lines) if _h_context_lines else ""
-    context_summary = f"上一 Step「{step_name}」产出: {output_ref}"
-    rollcall_result = await _cmd_rollcall_next(sender_id, {
-        "_positional": [next_role],
-        "context": f"{round_name} {next_step}: {context_summary}{_h_suffix}",
-    })
-
-    # ── R68 A3: Send inbox task to primary agent (with workspace fallback) ──
-    _h_cards = ac_mod.get_all_cards()
-    _h_member_ids = list(ws_obj.members)
-    _h_primary_role = step_config.get(next_step, {}).get("primary")
-    _h_primary_agents = (
-        _find_agents_by_role(_h_primary_role, _h_member_ids, _h_cards)
-        if _h_cards and _h_primary_role else []
-    )
-    if _h_primary_agents:
-        await _send_inbox_task(
-            target_agent_id=_h_primary_agents[0],
-            round_name=round_name,
-            next_step=next_step,
-            step_config=step_config,
-            output_ref=output_ref,
-            workspace_id=ws_id,
-            pm_name="PM",
-            pm_agent_id=sender_id,  # ← R69 B1
-        )
-    else:
-        _h_fb_users = auth.get_users()
-        _h_fb_role_names = [
-            _h_fb_users.get(aid, {}).get("name", aid[:12])
-            for aid in ws_obj.members
-            if _h_fb_users.get(aid, {}).get("role", "member") == next_role
-        ]
-        _h_fb_display = ", ".join(_h_fb_role_names) if _h_fb_role_names else next_role
-        _h_fb_plan_url = _PIPELINE_CONFIG.get(round_name, {}).get("work_plan_url", "")
-        _h_fb_msg = (
-            f"@{_h_fb_display} 🚨 Step「{next_step}」到你了！\n\n"
-            f"📋 WORK_PLAN：{_h_fb_plan_url}\n"
-            f"🔗 上一步产出：{output_ref}\n\n"
-            f"请确认收到后开始工作。完成后调用 !step_complete {next_step} --output <sha>"
-        )
-        _persist_broadcast(ws_id, "系统", _h_fb_msg)
-        _h_fb_payload = json.dumps({
-            "type": "broadcast", "channel": ws_id,
-            "from_name": "系统", "from": "系统",
-            "content": _h_fb_msg, "ts": time.time(),
-        })
-        for _h_fb_mid in ws_obj.members:
-            for _h_fb_conn in list(_connections.get(_h_fb_mid, set())):
-                try:
-                    if hasattr(_h_fb_conn, "send_str"):
-                        await _h_fb_conn.send_str(_h_fb_payload)
-                    elif hasattr(_h_fb_conn, "send"):
-                        await _h_fb_conn.send(_h_fb_payload)
-                except Exception:
-                    pass
-        logger.info("R68 inbox fallback: broadcast @mention to workspace %s (no primary agent for %s)", ws_id, next_role)
-
-    # Create next step Task
-    next_task_result = await _cmd_task_create(sender_id, {
-        "context": round_name,
-        "name": next_step,
-        "role": next_role,
-    })
-
-    # Update pipeline state
-    _update_pipeline_step(round_name, next_step)
-
-    # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
-    # Notify PM in _admin channel
-    try:
-        admin_channel = p.ADMIN_CHANNEL
-        notify_msg = (
-            f"📋 {round_name} 进度：{step_name} ✅ → "
-            f"下一棒 {next_role}（{next_step}）产出: {output_ref or '(未提供)'}"
-        )
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent="系统", from_name="系统",
-            content=notify_msg, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=admin_channel,
-        )
-    except Exception:
-        pass
-
-    # Clear watchdog alert if active
-    if _clear_watchdog_alert(round_name, step_name):
-        await _send_clear_alert(round_name, step_name, output_ref)
-
-    return (
-        f"✅ **{step_name} 完成 → 交接给 {next_role} {next_step}**\n"
-        f"  产出: {output_ref}\n"
-        f"  R82: 任务已通过 inbox 发送\n"
-        f"  {rollcall_result}\n"
-        f"  {next_task_result}"
-    )
-
-
-async def _cmd_pipeline_status(sender_id: str, params: dict) -> str:
-    """查询当前所有活跃管线的 Step 进度表。"""
-    lines = []
-
-    # ── R62: Config-only mode (no state, but config exists) ──
-    if _PIPELINE_CONFIG and not _PIPELINE_STATE:
-        for round_name, pconfig in sorted(_PIPELINE_CONFIG.items()):
-            if round_name in _PIPELINE_STATE:
-                continue
-            lines.append(f"📊 **{round_name} 管线配置（state 不存在，config 仍在）**")
-            lines.append(f"  目标: {pconfig.get('goal', '')}")
-            step_config_c = pconfig.get("steps", {})
-            for step_key, step_info in sorted(
-                step_config_c.items(),
-                key=lambda item: _step_sort_key(item[0]),
-            ):
-                role = step_info.get("role", "?")
-                title = step_info.get("title", step_key)
-                lines.append(f"  ⏳ {step_key} — {role}（{title}）")
-            lines.append("")
-
-    if not _PIPELINE_STATE and not lines:
-        # ── R62: If verbose is requested but no state/config, show empty
-        if params.get("verbose") or params.get("dump"):
-            lines.append("📊 当前无活跃管线（无 _PIPELINE_CONFIG）")
-        else:
-            return "📊 当前无活跃管线"
-
-    for round_name, pstate in sorted(_PIPELINE_STATE.items()):
-        if not pstate.get("active"):
-            continue
-        lines.append(f"📊 **{round_name} 管线状态**")
-        # R48 A: 展示 work_plan_url（如有）
-        if pstate.get("work_plan_url"):
-            lines.append(f"  📎 WORK_PLAN: {pstate['work_plan_url']}")
-        # ── R55 D: Mode marker ──
-        mode = pstate.get("mode", "auto")
-        mode_icon = "🚀" if mode == "auto" else "📋"
-        lines.append(f"  模式: {mode_icon} {mode}")
-        # ── R57 C-2: Display member names with online status ──
-        ws_id = pstate.get("ws_id", "")
-        if ws_id:
-            ws_obj_from_state = ws_mod.get_workspace(ws_id)
-            if ws_obj_from_state:
-                users_for_status = auth.get_users()
-                member_info = []
-                for mid in ws_obj_from_state.members:
-                    name = users_for_status.get(mid, {}).get("name", "")
-                    role_label = users_for_status.get(mid, {}).get("role", "")
-                    label = name if name else (role_label if role_label else mid[:12])
-                    online = "🟢" if mid in _connections and _connections[mid] else "🔴"
-                    member_info.append(f"{online}{label}")
-                if member_info:
-                    lines.append(f"  成员: {' · '.join(member_info)}")
-        # ── R55 D: Rejected steps context ──
-        rejected_steps = pstate.get("rejected_steps", {})
-        if rejected_steps:
-            lines.append(f"  🔄 退回记录:")
-            for rstep, rinfo in rejected_steps.items():
-                lines.append(
-                    f"    {rstep}: 第{rinfo['reject_count']}轮 — {rinfo['last_reason'][:40]}"
-                )
-        step_config = _get_step_config(round_name)
-        tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-
-        for step_key, step_info in sorted(
-            step_config.items(),
-            key=lambda item: _step_sort_key(item[0]),
-        ):
-            role = step_info["role"]
-
-            matched = [t for t in tasks if t.get("name") == step_key]
-            task_state = "⏳"
-            if matched:
-                t = matched[0]
-                ts_state = t.get("state", "")
-                if ts_state == p.TaskState.COMPLETED.value:
-                    task_state = "✅"
-                elif ts_state == p.TaskState.WORKING.value:
-                    task_state = "🟢"
-                elif ts_state == p.TaskState.FAILED.value:
-                    task_state = "❌"
-                elif ts_state == p.TaskState.SUBMITTED.value:
-                    # ★ R53 B-4: Check for active ACK timer
-                    if t["id"] in _task_ack_timers:
-                        task_state = "⏳"  # waiting_ack
-                    else:
-                        task_state = "⬜"  # submitted, no pending ack
-                elif ts_state == p.TaskState.INPUT_REQUIRED.value:
-                    task_state = "🔄"  # R55 B: rejected, needs rework
-
-            current = " ◀ 当前" if step_key == pstate.get("current_step") else ""
-            # ── Countdown display on current step ──
-            if current:
-                remaining_str = timeout_tracker.format_remaining(round_name, step_key)
-                current += f" ({remaining_str})"
-            # ── ACK state display on current step ──
-            if current:
-                ack_status = _format_ack_status(f"{round_name}/{step_key}")
-                if ack_status:
-                    current += f" | {ack_status}"
-            # ── R63 Phase 4: End ──
-            # ── R58 C3: Notification status display ──
-            step_notifications = pstate.get("step_notifications", {})
-            notify_info = step_notifications.get(step_key, {})
-            notify_status = notify_info.get("status", "")
-            notify_mark = ""
-            if notify_status == "notified":
-                notify_mark = " 📨"
-            elif notify_status == "acknowledged":
-                notify_mark = " ✅ACK"
-            elif notify_status == "no_response":
-                notify_mark = " ❌静默"
-            # ── R58 C3: End notification status ──
-            # ── R57 A-6: Backup takeover marker ──
-            backup_suffix = ""
-            pipeline_backup = pstate.get("backup_active", {})
-            if step_key == pipeline_backup.get("step"):
-                backup_suffix = "（备用接替）"
-            lines.append(f"  {task_state} {step_key} — {role}{current}{backup_suffix}{notify_mark}")
-
-        # ── R65 A4: Git sync status line ──
-        if config.ENABLE_GIT_SYNC and _GIT_SYNC_TASK is not None:
-            last_sync_ts = pstate.get("_last_git_sync_ts", 0)
-            if last_sync_ts:
-                delta = int(time.time() - last_sync_ts)
-                sync_display = f"{delta}s 前" if delta < 120 else f"{delta // 60}m 前"
-            else:
-                sync_display = "—"
-            pconfig = _PIPELINE_CONFIG.get(round_name, {})
-            branch = pconfig.get("git_sync_branch", config.GIT_SYNC_BRANCH) if _PIPELINE_CONFIG.get(round_name, {}) else config.GIT_SYNC_BRANCH
-            lines.append(f"  🔄 Git 同步: 启用 ✅（最后检查: {sync_display}, {branch}）")
-        # ── R65 A4: End ──
-
-    if not lines:
-        return "📊 当前无活跃管线"
-    # ── R62: --verbose / --dump: show _PIPELINE_CONFIG summary ──
-    if params.get("verbose") or params.get("dump"):
-        lines.append("")
-        lines.append("📋 _PIPELINE_CONFIG:")
-        if _PIPELINE_CONFIG:
-            for _rname, _pconf in sorted(_PIPELINE_CONFIG.items()):
-                lines.append(f"  [{_rname}] round={_pconf.get('round','')} | goal={_pconf.get('goal','')} | work_plan_url={_pconf.get('work_plan_url','')} | requirements_url={_pconf.get('requirements_url','')}")
-                for _sk in sorted(_pconf.get('steps', {}).keys(), key=_step_sort_key):
-                    _sc = _pconf['steps'][_sk]
-                    lines.append(f"    {_sk}: role={_sc.get('role','')} | title={_sc.get('title','')}")
-        else:
-            lines.append("  无 _PIPELINE_CONFIG")
-    return "\n".join(lines)
-
-
-# ── R55 E: Pipeline mode switch ─────────────────────────────
-
-
-async def _cmd_pipeline_mode(sender_id: str, params: dict) -> str:
-    """切换管线模式。
-    用法：!pipeline_mode <auto|manual>
-    """
-    positional = params.get("_positional", [])
-    if not positional or positional[0] not in ("auto", "manual"):
-        return "❌ 用法：!pipeline_mode auto|manual"
-    target_mode = positional[0]
-
-    sender_ch = p.LOBBY
-    round_name = None
-    for rname, pstate in _PIPELINE_STATE.items():
-        if pstate.get("ws_id") == sender_ch:
-            round_name = rname
-            break
-    if not round_name:
-        return "❌ 当前工作区无活跃管线"
-
-    _PIPELINE_STATE[round_name]["mode"] = target_mode
-    icon = "🚀" if target_mode == "auto" else "📋"
-    return f"✅ 管线 {round_name} 已切换为 {icon} {target_mode} 模式"
-
-
-# ── R59 C: Pipeline role override ────────────────────────────
-
-
-async def _cmd_pipeline_role_override(sender_id: str, params: dict) -> str:
-    """覆盖指定 Step 的执行角色。
-    用法：!pipeline_role_override <step> --executor <role>
-
-    示例：
-      !pipeline_role_override step3 --executor arch
-      → Step 3（编码）由 arch 执行而非 dev
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!pipeline_role_override <step> --executor <role>"
-    step = positional[0].lower()
-    executor = params.get("executor", "")
-    if not executor:
-        return "❌ 请指定 --executor <role>"
-
-    # 验证 step 存在
-    step_config = _load_step_config()
-    if step not in step_config:
-        return f"❌ Step「{step}」不存在"
-
-    # 保存覆盖到配置
-    if not hasattr(config, "PIPELINE_ROLE_OVERRIDES"):
-        config.PIPELINE_ROLE_OVERRIDES = {}
-    config.PIPELINE_ROLE_OVERRIDES[step] = executor
-
-    original_role = step_config[step]["role"]
-    return (
-        f"✅ Step「{step}」执行角色覆盖为「{executor}」（原：{original_role}）\n"
-        f"📋 约束提醒：若覆盖导致写方案者=编码者，请在 WORK_PLAN 中显式豁免"
-    )
-
-
-# ── R49 B: Agent Card commands ──────────────────────────────────────
-
-
-
-async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
-    """Display all current agent cards.
-    Also serves as subcommand dispatcher for !agent_card <sub> ... syntax.
-    """
-    # R49 A: Subcommand dispatch — allow !agent_card get/set/unset/reload/watch
-    positional = params.get("_positional", [])
-    if positional and positional[0] in ("get", "set", "unset", "reload", "watch"):
-        sub_cmd = positional[0]
-        # ── R73 B: Write subcommands require workspace_admin ──
-        if sub_cmd in ("set", "unset") and not auth.is_global_admin(sender_id):
-            if not _is_any_workspace_admin(sender_id):
-                return "❌ 权限不足：仅工作区管理员可修改 Agent Card"
-        sub_params = dict(params)
-        sub_params["_positional"] = positional[1:]
-        handler_map = {
-            "get": _cmd_agent_card_get,
-            "set": _cmd_agent_card_set,
-            "unset": _cmd_agent_card_unset,
-            "reload": _cmd_agent_card_reload,
-            "watch": _cmd_agent_card_watch,
-        }
-        return await handler_map[sub_cmd](sender_id, sub_params)
-    # Otherwise list all cards
-    cards = ac_mod.get_all_cards()
-    if not cards:
-        return "No agent cards found."
-    lines = ["Agent Cards ({0}):".format(len(cards))]
-    for aid, card in sorted(cards.items()):
-        name = card.get("display_name", card.get("name", aid[:12]))
-        roles = ", ".join(card.get("pipeline_roles", []))
-        skills = ", ".join(card.get("skills", []))
-        status = card.get("status", "unknown")
-        line = "  {0} [{1}] status={2}".format(name, roles, status)
-        if skills:
-            line += " skills=[{0}]".format(skills)
-        lines.append(line)
-    return "\n".join(lines)
-
-
-async def _cmd_agent_card_get(sender_id: str, params: dict) -> str:
-    """Show a single agent card.
-    Usage: !agent_card get <agent_id>
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "Usage: !agent_card get <agent_id>"
-    agent_id = positional[0]
-    cards = ac_mod.get_all_cards()
-    card = cards.get(agent_id)
-    if not card:
-        return "No card for agent " + agent_id[:24]
-    name = card.get("display_name", card.get("name", agent_id[:12]))
-    roles = ", ".join(card.get("pipeline_roles", []))
-    skills = ", ".join(card.get("skills", []))
-    status = card.get("status", "unknown")
-    updated = card.get("updated_at", "")
-    return "\n".join([
-        "Card for " + agent_id[:24],
-        "  Name: " + name,
-        "  Roles: [" + roles + "]",
-        "  Skills: [" + skills + "]",
-        "  Status: " + status,
-        "  Updated: " + str(updated),
-    ])
-
-
-async def _cmd_agent_card_set(sender_id: str, params: dict) -> str:
-    """Set or update an agent card.
-    Usage: !agent_card set <agent_id> --role <r1,r2> [--name <display>] [--skills <s1,s2>]
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "Usage: !agent_card set <agent_id> --role <r1,r2> [--name <n>] [--skills <s1,s2>]"
-    agent_id = positional[0]
-    role_str = params.get("role", "")
-    if not role_str:
-        return "--role is required"
-    name = params.get("name", "")
-    skills_str = params.get("skills", "")
-
-    cards = ac_mod.get_all_cards()
-    card = cards.get(agent_id, {})
-    card["pipeline_roles"] = [r.strip() for r in role_str.split(",") if r.strip()]
-    if name:
-        card["display_name"] = name
-    if skills_str:
-        card["skills"] = [s.strip() for s in skills_str.split(",") if s.strip()]
-    card["status"] = card.get("status", "online")
-    card["updated_at"] = time.time()
-
-    ac_mod.update_card(agent_id, card)
-    _refresh_role_agent_map()
-    roles_display = ", ".join(card["pipeline_roles"])
-    name_display = card.get("display_name", agent_id[:12])
-    return "Card set: {0} -> {1} roles=[{2}]".format(agent_id[:24], name_display, roles_display)
-
-
-async def _cmd_agent_card_unset(sender_id: str, params: dict) -> str:
-    """Delete an agent card.
-    Usage: !agent_card unset <agent_id>
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "Usage: !agent_card unset <agent_id>"
-    agent_id = positional[0]
-    if ac_mod.remove_card(agent_id):
-        _refresh_role_agent_map()
-        return "Deleted card for " + agent_id[:24]
-    return "No card for agent " + agent_id[:24]
-
-
-async def _cmd_agent_card_reload(sender_id: str, params: dict) -> str:
-    """Reload agent cards from disk (no restart needed). R67: also refresh role map."""
-    ac_mod.reload_cards()
-    _refresh_role_agent_map()
-    cards = ac_mod.get_all_cards()
-    return "Reloaded agent cards: {0} records, role map refreshed".format(len(cards))
-
-
-async def _cmd_agent_card_watch(sender_id: str, params: dict) -> str:
-    """启动/停止文件变动监听。
-    用法：!agent_card watch [start|stop|status]
-    """
-    global _card_watcher
-    positional = params.get("_positional", ["status"])
-    if not positional:
-        return "用法：!agent_card watch [start|stop|status]"
-    sub = positional[0]
-
-    if sub == "start":
-        if _card_watcher and _card_watcher.is_running():
-            return "✅ 文件监听已在运行"
-        _card_watcher = ac_mod.CardFileWatcher(
-            ac_mod.get_cards_path(),
-            on_change=_refresh_role_agent_map,
-        )
-        _card_watcher.start()
-        return "✅ 文件监听已启动"
-    elif sub == "stop":
-        if _card_watcher and _card_watcher.is_running():
-            _card_watcher.stop()
-            return "✅ 文件监听已停止"
-        return "⚠️ 无运行中的文件监听"
-    else:
-        running = _card_watcher is not None and _card_watcher.is_running()
-        return "📋 文件监听状态：{}".format("🟢 运行中" if running else "🔴 已停止")
-
-
-# ── R63 Phase 3: Agent role map + card registration commands ─────
-
-
-async def _cmd_agent_role_map(sender_id: str, params: dict) -> str:
-    """展示当前角色↔Agent 映射表。
-    用法：!agent_role_map [--refresh]
-    """
-    if params.get("refresh"):
-        _refresh_role_agent_map()
-        cards = ac_mod.get_all_cards()
-        # Also rebuild from auth for roles not in cards
-        users = auth.get_users()
-        for aid, u in users.items():
-            role = u.get("role", "member")
-            if role and role != "member":
-                if role not in _ROLE_AGENT_MAP:
-                    _ROLE_AGENT_MAP[role] = []
-                if aid not in _ROLE_AGENT_MAP[role]:
-                    _ROLE_AGENT_MAP[role].append(aid)
-
-    lines = [f"📋 角色↔Agent 映射表 ({len(_ROLE_AGENT_MAP)} 个角色):"]
-    for role, agents in sorted(_ROLE_AGENT_MAP.items()):
-        names = []
-        for aid in agents:
-            display = _get_agent_display(aid)
-            online = "🟢" if aid in _connections and _connections[aid] else "🔴"
-            names.append(f"{online}{display}")
-        lines.append(f"  {role} → {' | '.join(names) if names else '(无)'}")
-
-    # Show unregistered roles
-    all_roles = {v.get("role") for v in auth.get_users().values()
-                 if v.get("role") and v.get("role") != "member"}
-    registered_roles = set(_ROLE_AGENT_MAP.keys())
-    unregistered = all_roles - registered_roles
-    if unregistered:
-        lines.append(f"  ⚠️ 未注册角色: {', '.join(sorted(unregistered))}")
-
-    return "\n".join(lines) if len(lines) > 1 else "📋 当前无角色映射"
-
-
-async def _cmd_agent_card_register(sender_id: str, params: dict) -> str:
-    """强制注册/更新 Agent Card。
-    用法：!agent_card register <agent_id> [--name <name>] [--role <role>]
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!agent_card register <agent_id> [--name <name>] [--role <role>]"
-    target_id = positional[0]
-    name = params.get("name", "")
-    role = params.get("role", "")
-
-    users = auth.get_users()
-    u = users.get(target_id, {})
-    if not name:
-        name = u.get("name", target_id[:12])
-    if not role:
-        role = u.get("role", "member")
-
-    from . import agent_card as ac_mod
-    card = ac_mod.register_agent(target_id, name, role, force=True)
-    _refresh_role_agent_map()
-    return (
-        f"✅ Agent Card 已注册：{target_id}\n"
-        f"  名称: {name}\n"
-        f"  角色: {role}\n"
-        f"  pipeline_roles: {card.get('pipeline_roles', [])}"
-    )
-
-
-async def _cmd_agent_card_auto_register(sender_id: str, params: dict) -> str:
-    """扫描所有在线 agent，自动补全缺失的 card。
-    用法：!agent_card auto-register
-    """
-    online_agents = list(_connections.keys())
-    users = auth.get_users()
-    name_map = {aid: users.get(aid, {}).get("name", aid[:12]) for aid in online_agents}
-    role_map = {aid: users.get(aid, {}).get("role", "member") for aid in online_agents}
-
-    from . import agent_card as ac_mod
-    count = ac_mod.auto_register_missing(online_agents, name_map, role_map)
-    _refresh_role_agent_map()
-
-    if count:
-        return f"✅ 自动注册了 {count} 个 Agent Card\n  !agent_role_map 查看最新映射表"
-    return "✅ 所有在线 Agent 已有 Card，无需注册"
-
-
-# ── R63 Phase 3: End ──
-
-
-# ── R35: Admin command registry ──────────────────────────────────
-
-_ADMIN_COMMANDS: dict[str, dict] = {
-    "create_workspace": {
-        "handler": _cmd_create_workspace, "min_role": 3, "workspace_scope": True,
-        "usage": "!create_workspace <name> --members <ids>",
-    },
-    "close_workspace": {
-        "handler": _cmd_close_workspace, "min_role": 3, "workspace_scope": True,
-        "usage": "!close_workspace <ws_id> [--reason <text>]",
-    },
-    "list_workspaces": {
-        "handler": _cmd_list_workspaces, "min_role": 3, "workspace_scope": True,
-        "usage": "!list_workspaces",
-    },
-    "list_agents": {
-        "handler": _cmd_list_agents, "min_role": 3, "workspace_scope": True,
-        "usage": "!list_agents [--role <role>]",
-    },
-    "agent_status": {
-        "handler": _cmd_agent_status, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_status <agent_id>",
-    },
-    "approve_ws_admin": {
-        "handler": _cmd_approve_ws_admin, "min_role": 4, "workspace_scope": False,
-        "usage": "!approve_ws_admin --workspace <ws_id> --agent <agent>",
-    },
-    "reject_ws_admin": {
-        "handler": _cmd_reject_ws_admin, "min_role": 4, "workspace_scope": False,
-        "usage": "!reject_ws_admin --workspace <ws_id> --agent <agent> --reason <text>",
-    },
-    "list_pending": {
-        "handler": _cmd_list_pending, "min_role": 4, "workspace_scope": False,
-        "usage": "!list_pending",
-    },
-    "audit_log": {
-        "handler": _cmd_audit_log, "min_role": 3, "workspace_scope": True,
-        "usage": "!audit_log [--limit <n>]",
-    },
-    "list_workspace_admins": {
-        "handler": _cmd_list_workspace_admins, "min_role": 3, "workspace_scope": True,
-        "usage": "!list_workspace_admins [--workspace <ws_id>]",
-    },
-    # ── R38: Task commands ──
-    "task_create": {
-        "handler": _cmd_task_create, "min_role": 3, "workspace_scope": True,
-        "usage": "!task_create --context <R{N}> --name <step> [--role <role>]",
-    },
-    "task_update": {
-        "handler": _cmd_task_update, "min_role": 3, "workspace_scope": True,
-        "usage": "!task_update <task_id> --state <new_state> [--output <path>]",
-    },
-    "task_query": {
-        "handler": _cmd_task_query, "min_role": 3, "workspace_scope": True,
-        "usage": "!task_query <task_id> | !task_query --context <R{N}>",
-    },
-    "task_list": {
-        "handler": _cmd_task_list, "min_role": 3, "workspace_scope": True,
-        "usage": "!task_list [--limit <n>]",
-    },
-    # ── R77: Pipeline context management ──
-    "pipeline": {
-        "handler": _handle_pipeline_command, "min_role": 2, "workspace_scope": False,
-        "usage": "!pipeline <create|status|list|advance|block|archive|cancel> [args]",
-    },
-    "pipeline_stop": {
-        "handler": _cmd_pipeline_stop, "min_role": 2, "workspace_scope": False,
-        "usage": "!pipeline_stop <R{N}>",
-    },
-        # ── R49 B: Agent Card commands ──
-    "agent_card": {
-        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
-        "usage": "!agent_card [list|get|set|unset|reload] ...",
-    },
-    "agent_card_list": {
-        "handler": _cmd_agent_card_list, "min_role": 2, "workspace_scope": True,
-        "usage": "!agent_card list",
-    },
-    "agent_card_get": {
-        "handler": _cmd_agent_card_get, "min_role": 2, "workspace_scope": True,
-        "usage": "!agent_card get <agent_id>",
-    },
-    "agent_card_set": {
-        "handler": _cmd_agent_card_set, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_card set <agent_id> --role <r1,r2> [--name <n>]",
-    },
-    "agent_card_unset": {
-        "handler": _cmd_agent_card_unset, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_card unset <agent_id>",
-    },
-    "agent_card_reload": {
-        "handler": _cmd_agent_card_reload, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_card reload",
-    },
-    # ── R63 Phase 3: Agent role map + card registration ──
-    "agent_role_map": {
-        "handler": _cmd_agent_role_map, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_role_map [--refresh]",
-    },
-    "agent_card_register": {
-        "handler": _cmd_agent_card_register, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_card register <agent_id> [--name <name>] [--role <role>]",
-    },
-    "agent_card_auto_register": {
-        "handler": _cmd_agent_card_auto_register, "min_role": 3, "workspace_scope": True,
-        "usage": "!agent_card auto-register",
-    },
-    # ── R63 Phase 3: End ──
-# ── R41 D: Roll-call commands ──
-    "rollcall_role": {
-        "handler": _cmd_rollcall_role, "min_role": 3, "workspace_scope": True,
-        "usage": "!rollcall_role <role> [--context <msg>]",
-    },
-    "rollcall_next": {
-        "handler": _cmd_rollcall_next, "min_role": 3, "workspace_scope": True,
-        "usage": "!rollcall_next <role> --context <摘要>",
-    },
-    # ── R42: Pipeline commands ──
-    "pipeline_start": {
-        "handler": _cmd_pipeline_start, "min_role": 3, "workspace_scope": False,
-        "usage": "!pipeline_start <R{N}> [--from <step>]",
-    },
-    "step_complete": {
-        "handler": _cmd_step_complete, "min_role": 1, "workspace_scope": True,
-        "usage": "!step_complete <step_name> [--output <commit/file>]",
-    },
-    "pipeline_status": {
-        "handler": _cmd_pipeline_status, "min_role": 3, "workspace_scope": False,
-        "usage": "!pipeline_status",
-    },
-    # ── R50: Pipeline activation & step handoff ──
-    "pipeline_activate": {
-        "handler": _cmd_pipeline_activate, "min_role": 3, "workspace_scope": False,
-        "usage": "!pipeline_activate <R{N}> [--ws <workspace_id>]",
-    },
-    "step_handoff": {
-        "handler": _cmd_step_handoff, "min_role": 3, "workspace_scope": True,
-        "usage": "!step_handoff <step_name> --output <commit/file>",
-    },
-    # ── R55 B: Step reject ──
-    "step_reject": {
-        "handler": _cmd_step_reject, "min_role": 1, "workspace_scope": True,
-        "usage": "!step_reject <step_name> --reason <原因>",
-    },
-    # ── R55 E: Pipeline mode switch ──
-    "pipeline_mode": {
-        "handler": _cmd_pipeline_mode, "min_role": 3, "workspace_scope": True,
-        "usage": "!pipeline_mode <auto|manual>",
-    },
-    # ── R59 C: Pipeline role override ──
-    "pipeline_role_override": {
-        "handler": _cmd_pipeline_role_override, "min_role": 3, "workspace_scope": True,
-        "usage": "!pipeline_role_override <step> --executor <role>",
-    },
-    # ── R69 B2: Workspace reset ──
-    "workspace_reset": {
-        "handler": _cmd_workspace_reset, "min_role": 3, "workspace_scope": True,
-        "usage": "!workspace_reset — 关闭当前工作室 + 清理管线状态 + 回大厅",
-    },
-    # ── R80: Validation hook commands ──
-    "step_force": {
-        "handler": _cmd_step_force, "min_role": 3,
-        "desc": "强制推进 Step（跳过验证）",
-        "usage": "!step_force <step_name> --output <sha> [--reason <text>]",
-    },
-    "step_verify": {
-        "handler": _cmd_step_verify, "min_role": 2,
-        "desc": "BLOCKED 状态下重新执行验证",
-        "usage": "!step_verify <step_name> [--output <sha>]",
-    },
-}
-
-# ── R81: Workspace member self-management commands ──────────────
-
-
-async def _cmd_workspace_join(sender_id: str, params: dict) -> str:
-    """加入工作区。
-
-    用法：!workspace_join [--workspace <ws_id>]
-    权限：L2 member（全员可用）
-    """
-    ws_id, err = _resolve_workspace(sender_id, params)
-    if err:
-        return err
-
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-
-    if sender_id in ws.members:
-        return f"⏳ 你已在工作区 {ws.name} 中"
-
-    if ws_mod.add_member(ws_id, sender_id):
-        # 切换活跃频道到工作区
-        # R82: removed set_agent_channel
-        # 广播加入通知
-        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-        await _broadcast_to_channel(ws_id, {
-            "type": "broadcast", "channel": ws_id,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-            "content": f"👋 {sender_name} 加入了工作区",
-            "ts": time.time(),
-        })
-        return f"✅ 已加入工作区 {ws.name}"
-
-    return f"❌ 加入工作区 {ws.name} 失败"
-
-
-async def _cmd_workspace_leave(sender_id: str, params: dict) -> str:
-    """退出工作区。
-
-    用法：!workspace_leave [--workspace <ws_id>]
-    权限：L2 member（全员可用）
-    限制：Owner 不能退出自己的工作区
-    """
-    ws_id, err = _resolve_workspace(sender_id, params)
-    if err:
-        return err
-
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-
-    if sender_id not in ws.members:
-        return f"⏳ 你不在工作区 {ws.name} 中"
-
-    # Owner 守卫
-    if sender_id == ws.owner_id:
-        return "❌ 你是该工作区的所有者，不能退出。如需关闭请使用 !close_workspace"
-
-    if ws_mod.remove_member(ws_id, sender_id):
-        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-        await _broadcast_to_channel(ws_id, {
-            "type": "broadcast", "channel": ws_id,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-            "content": f"👋 {sender_name} 退出了工作区",
-            "ts": time.time(),
-        })
-        return f"✅ 已退出工作区 {ws.name}"
-
-    return f"❌ 退出工作区 {ws.name} 失败"
-
-
-async def _cmd_workspace_add(sender_id: str, params: dict) -> str:
-    """邀请他人加入工作区。
-
-    用法：!workspace_add <agent_id> [--workspace <ws_id>]
-    权限：L2 member（sender 必须在目标工作区中）
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!workspace_add <agent_id> [--workspace <ws_id>]"
-
-    target_id = positional[0]
-    ws_id, err = _resolve_workspace(sender_id, params)
-    if err:
-        return err
-
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-
-    # sender 必须在目标工作区中
-    if sender_id not in ws.members:
-        return f"❌ 你不在工作区 {ws.name} 中，无法邀请他人"
-
-    if target_id in ws.members:
-        return f"⏳ {target_id[:12]}... 已在工作区中"
-
-    if ws_mod.add_member(ws_id, target_id):
-        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-        await _broadcast_to_channel(ws_id, {
-            "type": "broadcast", "channel": ws_id,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-            "content": f"📩 {sender_name} 邀请了 {target_id[:12]}... 加入工作区",
-            "ts": time.time(),
-        })
-        return f"✅ {target_id[:12]}... 已加入工作区 {ws.name}"
-
-    return f"❌ 邀请失败"
-
-
-async def _cmd_workspace_remove(sender_id: str, params: dict) -> str:
-    """从工作区移除成员（仅 owner）。
-
-    用法：!workspace_remove <agent_id> [--workspace <ws_id>]
-    权限：L2 member（但仅 ws.owner_id 可执行）
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!workspace_remove <agent_id> [--workspace <ws_id>]"
-
-    target_id = positional[0]
-    ws_id, err = _resolve_workspace(sender_id, params)
-    if err:
-        return err
-
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-
-    # Owner 检查（硬性守卫）
-    if sender_id != ws.owner_id:
-        return "❌ 权限不足：仅工作区所有者可移除成员"
-
-    if target_id == ws.owner_id:
-        return "❌ 不能移除工作区所有者"
-
-    if target_id not in ws.members:
-        return f"⏳ {target_id[:12]}... 不在工作区中"
-
-    if ws_mod.remove_member(ws_id, target_id):
-        sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-        target_name = auth.get_agent_name(target_id, target_id[:12])
-        await _broadcast_to_channel(ws_id, {
-            "type": "broadcast", "channel": ws_id,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
-            "content": f"🚫 {sender_name} 移除了 {target_name}",
-            "ts": time.time(),
-        })
-        return f"✅ 已从工作区移除 {target_id[:12]}..."
-
-    return f"❌ 移除失败"
-
-
-async def _cmd_workspace_list_members(sender_id: str, params: dict) -> str:
-    """列出工作区成员。
-
-    用法：!workspace_list_members [--workspace <ws_id>]
-    权限：L2 member
-    """
-    ws_id, err = _resolve_workspace(sender_id, params)
-    if err:
-        return err
-
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return f"❌ 工作区 {ws_id} 不存在"
-
-    lines = [f"📋 工作区: {ws.name} ({ws.id})"]
-    lines.append(f"  状态: {ws.state.value}")
-    lines.append(f"  成员: {len(ws.members)} 人")
-    lines.append("")
-
-    for member_id in sorted(ws.members):
-        name = auth.get_agent_name(member_id, member_id[:12])
-        # 角色标识
-        if member_id == ws.owner_id:
-            role_badge = "👑 owner"
-        elif member_id in ws.admin_ids:
-            role_badge = "🛡️ admin"
-        else:
-            role_badge = "👤 member"
-        # 在线状态
-        is_online = member_id in _connections and bool(_connections[member_id])
-        status_dot = "🟢" if is_online else "⚪"
-
-        lines.append(f"  {status_dot} {name} ({member_id[:12]}...) {role_badge}")
-
-    return "\n".join(lines)
-
-
-# ── R86 C1: revoke_api_key admin command ─────────────────────────
-
-
-async def _cmd_revoke_api_key(sender_id: str, params: dict) -> str:
-    """吊销指定的 agent 的 api_key 并断连。
-
-    用法：!revoke_api_key <agent_id>
-    权限：L4 global admin
-    """
-    positional = params.get("_positional", [])
-    if not positional:
-        return "❌ 用法：!revoke_api_key <agent_id>"
-
-    target_id = positional[0]
-
-    if not auth.revoke_api_key(target_id):
-        return f"❌ agent {target_id[:16]}... 没有 api_key 或已被吊销"
-
-    # 断连
-    _force_disconnect_revoked_agent(target_id)
-
-    return f"✅ 已吊销 {target_id[:16]}... 的 api_key 并强制断连"
-
-
-# Register R81 + R86 admin commands (after function definitions)
-_ADMIN_COMMANDS.update({
-    "workspace_join": {
-        "handler": _cmd_workspace_join, "min_role": 2,
-        "usage": "!workspace_join [--workspace <ws_id>]",
-    },
-    "workspace_leave": {
-        "handler": _cmd_workspace_leave, "min_role": 2,
-        "usage": "!workspace_leave [--workspace <ws_id>]",
-    },
-    "workspace_add": {
-        "handler": _cmd_workspace_add, "min_role": 2,
-        "usage": "!workspace_add <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_remove": {
-        "handler": _cmd_workspace_remove, "min_role": 2,
-        "usage": "!workspace_remove <agent_id> [--workspace <ws_id>]",
-    },
-    "workspace_list_members": {
-        "handler": _cmd_workspace_list_members, "min_role": 2,
-        "usage": "!workspace_list_members [--workspace <ws_id>]",
-    },
-    # ── R86 C1: Revoke api_key ──
-    "revoke_api_key": {
-        "handler": _cmd_revoke_api_key, "min_role": 4,
-        "usage": "!revoke_api_key <agent_id>",
-    },
-})
-
-
 async def _restore_pipeline_timers() -> None:
     """On server start, recover pipeline timeout timers from task store."""
     try:
@@ -4884,7 +1206,7 @@ async def _restore_pipeline_timers() -> None:
                     round_groups[ctx] = []
                 round_groups[ctx].append(t)
         for round_name, tasks in round_groups.items():
-            if round_name in _PIPELINE_STATE:
+            if round_name in state._PIPELINE_STATE:
                 continue
             tasks_sorted = sorted(tasks, key=lambda x: x.get("created_at", 0))
             current_step = tasks_sorted[0].get("name", "") if tasks_sorted else ""
@@ -5008,7 +1330,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     if not allowed:
         await _send(ws, {
             "type": p.MSG_RATE_LIMITED,
-            "reason": f"消息频率过高，{RATE_LIMIT_SECONDS}秒内最多发{RATE_LIMIT_WINDOW}条",
+            "reason": f"消息频率过高，{state.RATE_LIMIT_SECONDS}秒内最多发{state.RATE_LIMIT_WINDOW}条",
             p.FIELD_RETRY_AFTER: retry_after,
         })
         logger.info("Rate-limited %s in '%s' (retry after %ds)", sender_id[:12], channel, retry_after)
@@ -5024,20 +1346,20 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             return
 
     # Skip system/noise
-    if any(content.startswith(p) for p in _SILENT_PREFIXES) or content.strip("🤐") == "":
+    if any(content.startswith(p) for p in state._SILENT_PREFIXES) or content.strip("🤐") == "":
         logger.info("Silent msg filtered: %s", content[:60])
         return
 
     users = auth.get_users()
-    # R72: R72 agents live in _r72_users, not in users
+    # R72: R72 agents live in state._r72_users, not in users
     sender_name = users.get(sender_id, {}).get("name") or \
-                  _r72_users.get(sender_id, {}).get("name", sender_id)
+                  state._r72_users.get(sender_id, {}).get("name", sender_id)
     sender_role = users.get(sender_id, {}).get("role", "member")
     admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
 
     # ── R57 A: Rollcall ACK hook — any message from a waited-on agent fires event ──
-    if sender_id in _r57_rollcall_events:
-        event = _r57_rollcall_events.get(sender_id)
+    if sender_id in state._r57_rollcall_events:
+        event = state._r57_rollcall_events.get(sender_id)
         if event and not event.is_set():
             event.set()
             logger.info("R57 rollcall ACK from %s (%s)", sender_id[:12], sender_name)
@@ -5068,23 +1390,25 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
     # ── R49: Universal ! command routing (works in any channel) ──
     if content.startswith("!"):
-        cmd_name, params = _parse_command(content)
-        if not cmd_name or cmd_name not in _ADMIN_COMMANDS:
-            available = ", ".join(f"!{k}" for k in sorted(_ADMIN_COMMANDS))
-            await _send_cmd_response(ws, sender_id, "系统", f"❌ 未知命令。可用命令：{available}", channel)
+        # R100: 延迟导入避免循环依赖
+        from .commands import _ADMIN_COMMANDS as _cmds
+        cmd_name, params = command_utils._parse_command(content)
+        if not cmd_name or cmd_name not in _cmds:
+            available = ", ".join(f"!{k}" for k in sorted(_cmds))
+            await command_utils._send_cmd_response(ws, sender_id, "系统", f"❌ 未知命令.可用命令：{available}", channel)
             return
-        cmd = _ADMIN_COMMANDS[cmd_name]
-        allowed, reason = _check_command_permission(sender_id, cmd_name, cmd, params)
+        cmd = _cmds[cmd_name]
+        allowed, reason = command_utils._check_command_permission(sender_id, cmd_name, cmd, params)
         if not allowed:
-            await _send_cmd_response(ws, sender_id, "系统", f"❌ {reason}", channel)
+            await command_utils._send_cmd_response(ws, sender_id, "系统", f"❌ {reason}", channel)
             return
         try:
             result = await cmd["handler"](sender_id, params)
-            _log_audit(sender_id, cmd_name, params, "success", result)
-            await _send_cmd_response(ws, sender_id, "系统", result, channel)
+            command_utils._log_audit(sender_id, cmd_name, params, "success", result)
+            await command_utils._send_cmd_response(ws, sender_id, "系统", result, channel)
         except Exception as e:
             err_msg = f"❌ 执行失败: {e}"
-            _log_audit(sender_id, cmd_name, params, "error", err_msg)
+            command_utils._log_audit(sender_id, cmd_name, params, "error", err_msg)
             logger.error("Admin cmd !%s failed: %s", cmd_name, e)
             await _send_cmd_response(ws, sender_id, "系统", err_msg, channel)
         return
@@ -5190,7 +1514,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         return
 
         # ── R42 D: Lobby pause intercept ──
-    if _LOBBY_PAUSED and channel == p.LOBBY:
+    if state._LOBBY_PAUSED and channel == p.LOBBY:
         # If sender has an active workspace, auto-route there
         agent_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
         active = [w for w in agent_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
@@ -5201,7 +1525,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         else:
             await _send(ws, {
                 "type": "error",
-                "error": f"🔒 管线 {_LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息。请在工作区中发言。",
+                "error": f"🔒 管线 {state._LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息.请在工作区中发言.",
             })
             return
 
@@ -5260,7 +1584,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             sent = 0
             target_names = []
             # R11 P1.1: Track delivery
-            _delivery_status[msg_id] = {}
+            state._delivery_status[msg_id] = {}
             for agent_id, conns in targets:
                 target_names.append(users.get(agent_id, {}).get("name", agent_id[:12]))
                 for conn in list(conns):
@@ -5273,7 +1597,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                     except Exception:
                         pass
                 # R11 P1.1: Mark delivery
-                _delivery_status[msg_id][agent_id] = p.DELIVERY_SENT
+                state._delivery_status[msg_id][agent_id] = p.DELIVERY_SENT
 
             # R34 B: Send ACK with delivery stats (workspace path)
             if msg_id:
@@ -5328,7 +1652,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         if msg_type == 'plain':
             await _send(ws, {
                 "type": "error",
-                "error": "大厅消息需要明确类型。请使用 📢公告 / 📋点名 / 🆘求助 / @用户名。\n普通讨论请在工作室频道进行。",
+                "error": "大厅消息需要明确类型.请使用 📢公告 / 📋点名 / 🆘求助 / @用户名.\n普通讨论请在工作室频道进行.",
             })
             logger.info("Lobby plain msg blocked from %s: %s", sender_id[:12], content[:40])
             return
@@ -5350,7 +1674,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             if sender_role != "admin":
                 await _send(ws, {
                     "type": "error",
-                    "error": "📢 公告仅管理员可用。请使用 📋点名 / 🆘求助 / @用户名 发送大厅消息。",
+                    "error": "📢 公告仅管理员可用.请使用 📋点名 / 🆘求助 / @用户名 发送大厅消息.",
                 })
                 return
             targets = [(aid, conns) for aid, conns in _connections.items() if aid != sender_id]
@@ -5364,7 +1688,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             targets = []
             for name in target_names:
                 for aid, conns in _connections.items():
-                    u = users.get(aid, {}) or _r72_users.get(aid, {})
+                    u = users.get(aid, {}) or state._r72_users.get(aid, {})
                     if u.get("name") == name and aid != sender_id:
                         targets.append((aid, conns))
                         break
@@ -5377,7 +1701,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             targets = []
             for name in target_names:
                 for aid, conns in _connections.items():
-                    u = users.get(aid, {}) or _r72_users.get(aid, {})
+                    u = users.get(aid, {}) or state._r72_users.get(aid, {})
                     if u.get("name") == name and aid != sender_id:
                         targets.append((aid, conns))
                         break
@@ -5435,7 +1759,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     sent = 0
     target_names = []
     # R11 P1.1: Track delivery
-    _delivery_status[msg_id] = {}
+    state._delivery_status[msg_id] = {}
     for agent_id, conns in targets:
         target_names.append(users.get(agent_id, {}).get("name", agent_id[:12]))
         delivered = False
@@ -5450,7 +1774,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             except Exception:
                 pass
         # R11 P1.1: Mark delivery status
-        _delivery_status[msg_id][agent_id] = p.DELIVERY_SENT if delivered else p.DELIVERY_SENT
+        state._delivery_status[msg_id][agent_id] = p.DELIVERY_SENT if delivered else p.DELIVERY_SENT
     # R11 P1.2: Offline push — agents not in targets get queued (if admin message)
     if sender_role == "admin":
         all_agents = {aid for aid in users}
@@ -5468,7 +1792,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
             except Exception:
                 pass
         for offline_id in offline_agents:
-            _offline_push_queue.setdefault(offline_id, []).append({
+            state._offline_push_queue.setdefault(offline_id, []).append({
                 "type": "broadcast",
                 "id": msg_id,
                 "channel": channel,
@@ -5479,8 +1803,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
                 "content": content,
                 "ts": time.time(),
             })
-            if offline_id not in _offline_timers:
-                _offline_timers[offline_id] = asyncio.create_task(
+            if offline_id not in state._offline_timers:
+                state._offline_timers[offline_id] = asyncio.create_task(
                     _flush_offline_push(offline_id)
                 )
 
@@ -5526,8 +1850,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
     # P6: record latency
     _latency = time.time() - _t0
-    _send_stats["total"] += 1
-    _send_stats["total_latency"] += _latency
+    state._send_stats["total"] += 1
+    state._send_stats["total_latency"] += _latency
     if sender_role == "admin":
         logger.info("Admin-relay %s➔%s: %s", sender_name, ",".join(target_names), content[:60])
     else:
@@ -5645,7 +1969,7 @@ async def _handle_server_query(ws, sender_id: str, content: str) -> None:
         import time as _time
         await _broadcast_to_channel(reply_ch, {
             "type": "broadcast", "channel": reply_ch,
-            "from_name": "系统", "from_agent": SYSTEM_AGENT_ID,
+            "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
             "content": reply_text, "ts": _time.time(),
         })
         logger.info("R82: Replied to %s via %s for '%s'", sender_id[:12], reply_ch, content[:40])
@@ -5690,13 +2014,13 @@ def _check_lobby_rate_limit(agent_id: str, role: str) -> tuple[bool, float]:
     """Check lobby-specific rate limit. P4 unlimited, P3=5/60s, P1/P2=2/60s."""
     if role == "admin":
         return True, 0
-    window = LOBBY_RATE_WINDOW_P3 if role == "workspace_admin" else LOBBY_RATE_WINDOW_P1P2
+    window = state.LOBBY_RATE_WINDOW_P3 if role == "workspace_admin" else state.LOBBY_RATE_WINDOW_P1P2
     now = time.time()
-    window_start = now - LOBBY_RATE_SECONDS
-    timestamps = _lobby_rate_limits.setdefault(agent_id, [])
+    window_start = now - state.LOBBY_RATE_SECONDS
+    timestamps = state._lobby_rate_limits.setdefault(agent_id, [])
     timestamps[:] = [t for t in timestamps if t > window_start]
     if len(timestamps) >= window:
-        retry_after = int(timestamps[0] + LOBBY_RATE_SECONDS - now) + 1
+        retry_after = int(timestamps[0] + state.LOBBY_RATE_SECONDS - now) + 1
         return False, retry_after
     timestamps.append(now)
     return True, 0
@@ -5713,12 +2037,12 @@ def _classify_lobby_message(content: str) -> tuple[str, list[str]]:
     content = content.strip()
     # R45 B (F-4): Strip [R{N}测试] test tags before prefix check
     content = re.sub(r'^\[R\d+测试\]\s*', '', content).strip()
-    if content.startswith(PREFIX_ANNOUNCE):
+    if content.startswith(state.PREFIX_ANNOUNCE):
         return 'announce', []
-    if content.startswith(PREFIX_CHECKIN):
+    if content.startswith(state.PREFIX_CHECKIN):
         names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
         return 'checkin', names
-    if content.startswith(PREFIX_HELP):
+    if content.startswith(state.PREFIX_HELP):
         return 'help', []
     names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
     if names:
@@ -5734,12 +2058,12 @@ def _check_rate_limit(agent_id: str, channel: str, role: str) -> tuple[bool, flo
     if role == "admin":
         return True, 0
     now = time.time()
-    window_start = now - RATE_LIMIT_SECONDS
-    agent_limits = _rate_limits.setdefault(agent_id, {})
+    window_start = now - state.RATE_LIMIT_SECONDS
+    agent_limits = state._rate_limits.setdefault(agent_id, {})
     timestamps = agent_limits.setdefault(channel, [])
     timestamps[:] = [t for t in timestamps if t > window_start]
-    if len(timestamps) >= RATE_LIMIT_WINDOW:
-        retry_after = int(timestamps[0] + RATE_LIMIT_SECONDS - now) + 1
+    if len(timestamps) >= state.RATE_LIMIT_WINDOW:
+        retry_after = int(timestamps[0] + state.RATE_LIMIT_SECONDS - now) + 1
         return False, retry_after
     timestamps.append(now)
     return True, 0
@@ -5748,7 +2072,7 @@ def _check_rate_limit(agent_id: str, channel: str, role: str) -> tuple[bool, flo
 # ── R12 P1.2: Nonsense message patterns ────────────────────────────
 
 
-_NONSENSE_PATTERNS = [
+state._NONSENSE_PATTERNS = [
     re.compile(r'^[\U0001F300-\U0001FAFF\U0001F600-\U0001F64F'
                r'\U0001F680-\U0001F6FF\u2600-\u27BF\u2B50\u2702-\u27B0'
                r'\uFE0F✅❌⚠️🟢🟡🔴⬜⬛➕➖🔄🤐👂🤫🦐🧐🦾📋'
@@ -5764,7 +2088,7 @@ def _is_nonsense(content: str, agent_id: str, channel: str) -> bool:
     stripped = content.strip()
     if not stripped:
         return True
-    for pattern in _NONSENSE_PATTERNS:
+    for pattern in state._NONSENSE_PATTERNS:
         if pattern.match(stripped):
             return True
     if '@' in stripped or 'http' in stripped.lower():
@@ -5782,11 +2106,11 @@ def _is_nonsense(content: str, agent_id: str, channel: str) -> bool:
 
 def _is_duplicate(content: str, agent_id: str) -> bool:
     """Check if agent is sending the same content within 30 seconds."""
-    entry = _last_message.get(agent_id)
+    entry = state._last_message.get(agent_id)
     now = time.time()
     if entry and entry["content"] == content and (now - entry["ts"]) < 30:
         return True
-    _last_message[agent_id] = {"content": content, "ts": now}
+    state._last_message[agent_id] = {"content": content, "ts": now}
     return False
 
 
@@ -5796,7 +2120,7 @@ def _is_duplicate(content: str, agent_id: str) -> bool:
 async def _task_ack_timeout(admin_ws, task_id: str, target_name: str) -> None:
     """30s timeout for task ack. Notify admin if no response."""
     await asyncio.sleep(30)
-    _task_ack_timers.pop(task_id, None)
+    state._task_ack_timers.pop(task_id, None)
     try:
         await _send(admin_ws, {
             "type": "delivery_status",
@@ -5834,7 +2158,7 @@ async def _notify_rollcall_complete(ws_id: str) -> None:
         "ts": time.time(),
     })
     if not unconfirmed:
-        content = "✅ 点名完成：全员活跃频道已锁定。"
+        content = "✅ 点名完成：全员活跃频道已锁定."
         logger.info("R53: Roll-call complete for '%s' — all members confirmed", ws_id)
     else:
         names = [users.get(uid, {}).get("name", uid[:12]) for uid in unconfirmed]
@@ -5852,7 +2176,7 @@ async def _notify_rollcall_complete(ws_id: str) -> None:
             except Exception:
                 pass
     # R53: Cleanup ACK state
-    _channel_ack_state.pop(ws_id, None)
+    state._channel_ack_state.pop(ws_id, None)
 
 
 # ── R53: Channel switch ACK timeout (30s, replaces R37 3min) ───
@@ -5862,7 +2186,7 @@ async def _channel_ack_timeout(ws_id: str) -> None:
     On timeout: marks unresponsive members, calls _notify_rollcall_complete().
     """
     await asyncio.sleep(30)
-    state = _channel_ack_state.get(ws_id)
+    state = state._channel_ack_state.get(ws_id)
     if not state:
         return
     timedout = state["online_members"] - set(state["acked_members"].keys())
@@ -5894,12 +2218,12 @@ async def _channel_ack_timeout(ws_id: str) -> None:
     # Call rollcall complete with partial results
     asyncio.create_task(_notify_rollcall_complete(ws_id))
     # Cleanup
-    _channel_ack_state.pop(ws_id, None)
+    state._channel_ack_state.pop(ws_id, None)
 
 
 def _resolve_ws_by_ack_task_id(ack_task_id: str) -> str | None:
     """Find workspace ID by its active ack_task_id."""
-    for ws_id, state in _channel_ack_state.items():
+    for ws_id, state in state._channel_ack_state.items():
         if state.get("ack_task_id") == ack_task_id:
             return ws_id
     return None
@@ -6016,7 +2340,7 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
 
 
 async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
-    """R87: 处理发往 _inbox:server 的 bot 回复中继。
+    """R87: 处理发往 _inbox:server 的 bot 回复中继.
 
     Args:
         ws: WebSocket 连接
@@ -6041,7 +2365,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
-                "from_agent": SYSTEM_AGENT_ID,
+                "from_agent": state.SYSTEM_AGENT_ID,
                 "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
                 "ts": time.time(),
             })
@@ -6055,14 +2379,14 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         return False
 
     # ── 获取发送者信息 ──
-    sender_name = _r72_users.get(agent_id, {}).get("name", agent_id[:12])
+    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
     pm_agent_id = config.PIPELINE_PM_AGENT_ID
 
     # ═══ 安全守卫: PM 误发 _inbox:server ═══
     if pm_agent_id and agent_id == pm_agent_id:
         await _send(ws, {
             "type": "error",
-            "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱。",
+            "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱.",
         })
         logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
         return True
@@ -6076,7 +2400,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
-                    "from_agent": SYSTEM_AGENT_ID,
+                    "from_agent": state.SYSTEM_AGENT_ID,
                     "content": f"📬 {sender_name} 已接活:\n{content}",
                     "ts": time.time(),
                 },
@@ -6094,7 +2418,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
-                    "from_agent": SYSTEM_AGENT_ID,
+                    "from_agent": state.SYSTEM_AGENT_ID,
                     "content": f"✅ {sender_name} 任务完成:\n{content}",
                     "ts": time.time(),
                 },
@@ -6106,8 +2430,117 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
-                "from_agent": SYSTEM_AGENT_ID,
-                "content": "✅ 确认，已收到你的完成通知。本轮任务完成。",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "✅ 确认，已收到你的完成通知.本轮任务完成.",
+                "ts": time.time(),
+            },
+        )
+        logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
+        return True
+
+    # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
+    if content.startswith("!"):
+        logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
+        return False
+
+    # ═══ 规则 3: 其他内容 → 沉默 ═══
+    logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
+    return True
+
+
+async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
+    """R87: 处理发往 _inbox:server 的 bot 回复中继.
+
+    Args:
+        ws: WebSocket 连接
+        agent_id: 发送消息的 bot 的 agent_id（已认证）
+        msg: 消息 dict（必须含 channel/content 字段）
+
+    Returns:
+        True  — 消息已由中继处理（调用方应 continue，不继续路由）
+        False — 不是 _inbox:server 消息（调用方继续正常路由）
+    """
+    channel = msg.get("channel", "")
+    content = (msg.get("content") or "").strip()
+
+    # ── R96: 回路测试拦截 ──
+    if content.startswith("test ✅"):
+        from_name = msg.get("from_name", "?")
+        logger.info(
+            "🔄 Loopback test from %s (%s)", from_name, agent_id[:16]
+        )
+        try:
+            await _send(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
+                "ts": time.time(),
+            })
+        except Exception as e:
+            logger.warning("R96: 回路测试回复失败: %s", e)
+        return True
+    # ═══════════════════════════════════════════
+
+    # 非中继消息 → 走正常路由
+    if not is_server_inbox(channel):
+        return False
+
+    # ── 获取发送者信息 ──
+    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
+    pm_agent_id = config.PIPELINE_PM_AGENT_ID
+
+    # ═══ 安全守卫: PM 误发 _inbox:server ═══
+    if pm_agent_id and agent_id == pm_agent_id:
+        await _send(ws, {
+            "type": "error",
+            "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱.",
+        })
+        logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
+        return True
+
+    # ═══ 规则 1: ACK ✅ → 转发 PM（进度通知）═══
+    if content.startswith("ACK ✅"):
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"📬 {sender_name} 已接活:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        logger.info("[Relay] ACK: %s → PM", sender_name)
+        return True
+
+    # ═══ 规则 2: ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
+    if content.startswith("✅ 完成"):
+        # ⑤ 转发给 PM
+        if pm_agent_id:
+            await _broadcast_to_channel(
+                f"_inbox:{pm_agent_id}",
+                {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{pm_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": f"✅ {sender_name} 任务完成:\n{content}",
+                    "ts": time.time(),
+                },
+            )
+        # ⑥ 自动确认给 bot（发到 bot 的 inbox，不走 _inbox:server）
+        await _broadcast_to_channel(
+            f"_inbox:{agent_id}",
+            {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "✅ 确认，已收到你的完成通知.本轮任务完成.",
                 "ts": time.time(),
             },
         )
@@ -6156,7 +2589,7 @@ async def handler(ws):
                 if not agent_key_record or agent_key_record.get("status") == "revoked":
                     await _send(ws, {
                         "type": "error",
-                        "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
+                        "error": "认证已失效：你的 api_key 已被吊销.请重新 register.",
                     })
                     continue  # skip this message, keep connection alive
                 # ═══ R87: _inbox:server 中继拦截 ═══
@@ -6165,12 +2598,12 @@ async def handler(ws):
                 # ════════════════════════════════════════
                 # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
                 _channel = msg.get("channel", "")
-                if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != SERVER_INBOX_CHANNEL:
+                if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != state.SERVER_INBOX_CHANNEL:
                     _sender_level = auth.get_level(agent_id)
                     if _sender_level < 4:
                         await _send(ws, {
                             "type": "error",
-                            "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息。请提交 Agent Card 或联系管理员提升等级。",
+                            "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息.请提交 Agent Card 或联系管理员提升等级.",
                         })
                         logger.info(
                             "[R99] 拒绝: %s (L%d) 试图发消息到 %s",
@@ -6196,7 +2629,7 @@ async def handler(ws):
                 ws_id = f"{p.WORKSPACE_ID_PREFIX}{agent_id[:8]}-{ws_name[:20]}"
                 _users = auth.get_users()
                 _sender_name = _users.get(agent_id, {}).get("name") or \
-                               _r72_users.get(agent_id, {}).get("name", agent_id)
+                               state._r72_users.get(agent_id, {}).get("name", agent_id)
                 _admin_ids = {aid for aid, u in _users.items() if u.get("role") == "admin"}
                 create_payload = json.dumps({
                     "type": "broadcast",
@@ -6370,14 +2803,14 @@ async def handler(ws):
                         "status": "delivered",
                         "message": f"✅ 已送达目标 {target_name or target_id[:12]}，等待响应",
                     })
-                    _task_ack_timers[task_id] = asyncio.create_task(
+                    state._task_ack_timers[task_id] = asyncio.create_task(
                         _task_ack_timeout(ws, task_id, target_name or target_id[:12])
                     )
                     logger.info("Task assigned to %s (task_id=%s): %s", target_id[:12], task_id, description[:60])
                 else:
-                    _offline_push_queue.setdefault(target_id, []).append(assign_payload)
-                    if target_id not in _offline_timers:
-                        _offline_timers[target_id] = asyncio.create_task(
+                    state._offline_push_queue.setdefault(target_id, []).append(assign_payload)
+                    if target_id not in state._offline_timers:
+                        state._offline_timers[target_id] = asyncio.create_task(
                             _flush_offline_push(target_id)
                         )
                     await _send(ws, {
@@ -6441,7 +2874,7 @@ async def handler(ws):
                         continue
 
                     sender_name = _users.get(agent_id, {}).get("name") or \
-                                   _r72_users.get(agent_id, {}).get("name", agent_id[:12])
+                                   state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
                     member_ids = ws_info.members
 
                     reset_content = f"⚠️ 工作室 {workspace_id} 已重置，请各成员确认就位 🫡"
@@ -6467,7 +2900,7 @@ async def handler(ws):
 
                     for mid in member_ids:
                         name = _users.get(mid, {}).get("name") or \
-                               _r72_users.get(mid, {}).get("name", mid[:12])
+                               state._r72_users.get(mid, {}).get("name", mid[:12])
                         if mid in _online:
                             for conn in list(_connections.get(mid, set())):
                                 try:
@@ -6482,7 +2915,7 @@ async def handler(ws):
                         else:
                             offline += 1
                             offline_names.append(name)
-                            _offline_push_queue.setdefault(mid, []).append({
+                            state._offline_push_queue.setdefault(mid, []).append({
                                 "type": "broadcast",
                                 "channel": workspace_id,
                                 "subtype": "workspace_reset",
@@ -6492,8 +2925,8 @@ async def handler(ws):
                                 "content": reset_content,
                                 "ts": time.time(),
                             })
-                            if mid not in _offline_timers:
-                                _offline_timers[mid] = asyncio.create_task(
+                            if mid not in state._offline_timers:
+                                state._offline_timers[mid] = asyncio.create_task(
                                     _flush_offline_push(mid)
                                 )
 
@@ -6560,10 +2993,10 @@ async def handler(ws):
 
                 # Find matching channel_ack_state by ack_task_id
                 ws_id = _resolve_ws_by_ack_task_id(ack_task_id)
-                if not ws_id or ws_id not in _channel_ack_state:
+                if not ws_id or ws_id not in state._channel_ack_state:
                     continue  # stale ACK or not waiting
 
-                state = _channel_ack_state[ws_id]
+                state = state._channel_ack_state[ws_id]
                 if status == "switched":
                     state["acked_members"][agent_id] = time.time()
 
@@ -6596,14 +3029,14 @@ async def handler(ws):
                 status = msg.get(p.FIELD_TASK_STATUS, "accepted")
                 reason = msg.get(p.FIELD_TASK_REASON, "")
 
-                timer = _task_ack_timers.pop(task_id, None)
+                timer = state._task_ack_timers.pop(task_id, None)
                 if timer:
                     timer.cancel()
 
                 users = auth.get_users()
                 admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
                 sender_name = users.get(agent_id, {}).get("name") or \
-                              _r72_users.get(agent_id, {}).get("name", agent_id[:12])
+                              state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
 
                 if status == "accepted":
                     # ★ R53 B-2: Advance task from submitted → working
