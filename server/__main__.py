@@ -83,7 +83,16 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 # ═══ R87: _inbox:server 中继拦截 ═══
                 if await _handle_server_relay(ws, agent_id, data):
                     continue
-                # ════════════════════════════════════════
+                # ═══ R102: 非 _inbox:server 通道的消息，内容匹配前缀则强制走中继 ═══
+                _r102_channel = data.get("channel", "")
+                _r102_content = (data.get("content") or "").strip()
+                if _r102_channel != f"{p.INBOX_CHANNEL_PREFIX}server":
+                    _r102_prefixes = ("收到 ✅", "已完成 ✅", "退回 🔄", "失败 ❌", "ACK ✅", "✅ 完成")
+                    if _r102_content.startswith(_r102_prefixes):
+                        data["channel"] = f"{p.INBOX_CHANNEL_PREFIX}server"
+                        if await _handle_server_relay(ws, agent_id, data):
+                            continue
+                # ════════════════════════════════════════════════════════════════════
                 # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
                 _channel = data.get("channel", "")
                 if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != f"{p.INBOX_CHANNEL_PREFIX}server":
