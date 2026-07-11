@@ -574,7 +574,9 @@ async function init() {
 
       if (activeTabId === 'tab1') {
         // Inbox tab: display with createInboxMessageEl
-        for (const m of msgs) {
+        // ★ 反序遍历，避免 insertBefore(firstChild) 把顺序弄反
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i];
           if (m.ts && m.ts > (lastTsByChannel['__inbox__'] || 0)) {
             lastTsByChannel['__inbox__'] = m.ts;
           }
@@ -584,7 +586,9 @@ async function init() {
           list.insertBefore(createInboxMessageEl(m), list.firstChild);
         }
       } else if (channel) {
-        for (const m of msgs) {
+        // ★ 反序遍历，避免 appendMessage 的 insertBefore(firstChild) 把顺序弄反
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i];
           if (m.ts && m.ts > (lastTsByChannel[channel] || 0)) {
             lastTsByChannel[channel] = m.ts;
           }
