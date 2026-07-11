@@ -126,3 +126,10 @@ def set_api_keys(keys: dict) -> None:
     global _api_keys
     with _lock:
         _api_keys = dict(keys)
+
+
+# ── R99: 获取单个 api_key 记录 ──
+def get_api_key_record(agent_id: str) -> dict | None:
+    """返回指定 agent 的 api_key 完整记录，不存在返回 None。"""
+    with _lock:
+        return _api_keys.get(agent_id)

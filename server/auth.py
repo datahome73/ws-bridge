@@ -97,6 +97,45 @@ def revoke_api_key(agent_id: str) -> bool:
 # ── R76: Agent ID → display name resolver ──────────────────────────
 
 
+# ── R99: Level 权限等级 ──────────────────────────────────────────
+
+
+def get_level(agent_id: str) -> int:
+    """返回 agent 的权限等级 (1-4)。
+
+    查询链路: agent_id → persistence.get_api_key_record() → .level
+    规则：
+      - 未在 _api_key 记录中 → L1（未注册）
+      - 记录中无 level 字段 → L4（向后兼容存量 bot）
+      - 有 level 字段 → 返回实际值
+    """
+    record = persistence.get_api_key_record(agent_id)
+    if record is None:
+        return 1  # L1 — 未注册
+    return record.get("level", 4)  # 默认 L4 向后兼容
+
+
+def set_level(agent_id: str, new_level: int) -> bool:
+    """设置 agent 的 level 字段并持久化。
+
+    Args:
+        agent_id: 目标 agent
+        new_level: 1-4 的新等级
+
+    Returns:
+        True  — 更新成功
+        False — 该 agent 无 api_key 记录
+    """
+    keys = persistence.get_api_keys()
+    if agent_id not in keys:
+        return False
+    keys[agent_id]["level"] = new_level
+    persistence.set_api_keys(keys)
+    from . import config
+    persistence.save_api_keys(config.DATA_DIR)
+    return True
+
+
 def get_agent_name(agent_id: str, default: str | None = None) -> str:
     """Return display name for an agent_id.
 
