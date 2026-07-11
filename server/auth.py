@@ -149,8 +149,8 @@ def get_agent_name(agent_id: str, default: str | None = None) -> str:
     if name:
         return name
     try:
-        from . import main as _handler
-        r72 = getattr(_handler, "_r72_users", {})
+        from . import state as _state
+        r72 = _state._r72_users
         return r72.get(agent_id, {}).get("name", default or agent_id[:12])
     except ImportError:
         return default or agent_id[:12]

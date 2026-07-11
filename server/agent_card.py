@@ -398,8 +398,8 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
     if pipeline_roles:
         try:
             # R78 A3: 先走 PipelineContextManager（新路径）
-            from . import main as _handler_mod
-            mgr = _handler_mod._pipeline_manager
+            from . import state as _state
+            mgr = _state._pipeline_manager
             if mgr is not None:
                 current_map = mgr.get_global_role_map()
                 for r in pipeline_roles:
@@ -408,10 +408,10 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
                 mgr.set_global_role_map(current_map)
             # 双写旧变量（过渡期后删除）
             for r in pipeline_roles:
-                if r not in _handler_mod._ROLE_AGENT_MAP:
-                    _handler_mod._ROLE_AGENT_MAP[r] = []
-                if agent_id not in _handler_mod._ROLE_AGENT_MAP[r]:
-                    _handler_mod._ROLE_AGENT_MAP[r].append(agent_id)
+                if r not in _state._ROLE_AGENT_MAP:
+                    _state._ROLE_AGENT_MAP[r] = []
+                if agent_id not in _state._ROLE_AGENT_MAP[r]:
+                    _state._ROLE_AGENT_MAP[r].append(agent_id)
         except Exception:
             pass
 

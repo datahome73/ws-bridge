@@ -2375,7 +2375,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══════════════════════════════════════════
 
     # 非中继消息 → 走正常路由
-    if not is_server_inbox(channel):
+    if channel != state.SERVER_INBOX_CHANNEL:
         return False
 
     # ── 获取发送者信息 ──
@@ -2484,7 +2484,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══════════════════════════════════════════
 
     # 非中继消息 → 走正常路由
-    if not is_server_inbox(channel):
+    if channel != state.SERVER_INBOX_CHANNEL:
         return False
 
     # ── 获取发送者信息 ──

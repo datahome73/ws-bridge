@@ -85,6 +85,18 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if await _handle_server_relay(ws, agent_id, data):
                     continue
                 # ════════════════════════════════════════
+                # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
+                _channel = data.get("channel", "")
+                if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != f"{p.INBOX_CHANNEL_PREFIX}server":
+                    from . import auth as _auth
+                    _sender_level = _auth.get_level(agent_id)
+                    if _sender_level < 4:
+                        await ws.send_json({
+                            "type": "error",
+                            "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息。请提交 Agent Card 或联系管理员提升等级。",
+                        })
+                        continue
+                # ════════════════════════════════════════════════════
                 await handle_broadcast(ws, agent_id, data)
 
             elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增

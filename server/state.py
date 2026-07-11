@@ -42,28 +42,20 @@ REGISTRATION_BROADCAST_ENABLED: bool = (
 SERVER_INBOX_CHANNEL = "_inbox:server"
 
 
-def is_server_inbox(channel: str) -> bool:
-    """判断 channel 是否为 server 中继通道。"""
-    return channel == SERVER_INBOX_CHANNEL
-
-
 # ── R42: Pipeline state ──────────────────────────────────────────
 _PIPELINE_STATE: dict[str, dict] = {}  # round_name -> {active, current_step, ws_id, ...}
 
 # ── R62: Pipeline config (read-only, separate from runtime state) ──
 _PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
 
-# R78 A: DEPRECATED — 迁移到 PipelineContextManager._global_role_map
-_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...] (Phase 3)
-
-# R78 B: DEPRECATED — 迁移到 PipelineContext.ack_states
-_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info (Phase 4)
-
 # ── R77: PipelineContextManager — 统一管线上下文管理 ──────────────
 _pipeline_manager: PipelineContextManager | None = None
 
-_ROLE_AGENT_MAP: dict[str, list[str]] = {}    # role -> [agent_id, ...]
-_step_ack_states: dict[str, dict] = {}          # "{round}/{step}" -> state info
+# R78: DEPRECATED — 迁移到 PipelineContextManager._global_role_map
+_ROLE_AGENT_MAP: dict[str, list[str]] = {}  # role -> [agent_id, ...]
+
+# R78 B: DEPRECATED — 迁移到 PipelineContext.ack_states
+_step_ack_states: dict[str, dict] = {}  # "{round}/{step}" -> state info
 
 # ── R65: Git pipeline sync state ───────────────────────────────
 _GIT_SYNC_TASK: asyncio.Task | None = None
@@ -121,7 +113,7 @@ _channel_ack_state: dict[str, dict] = {}
 
 # ── R32: Agent Card subsystem guards ──────────────────────────
 _cards_loaded_guard: bool = False
-_card_watcher: "ac_mod.CardFileWatcher | None" = None
+_card_watcher: None = None  # initialized in main._ensure_card_watcher()
 
 # ── R43: Watchdog constants ──────────────────────────────────
 WATCHDOG_SCAN_INTERVAL: int = 600

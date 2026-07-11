@@ -10,6 +10,7 @@ from .pipeline import (
     _cmd_pipeline_status, _cmd_pipeline_mode, _cmd_pipeline_role_override,
     _cmd_step_complete, _cmd_step_force, _cmd_step_handoff,
     _cmd_step_verify, _cmd_step_reject,
+    _handle_pipeline_command,
 )
 from .agent_card import (
     _cmd_agent_card_list, _cmd_agent_card_get, _cmd_agent_card_set,
