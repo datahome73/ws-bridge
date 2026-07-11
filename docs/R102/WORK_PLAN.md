@@ -119,7 +119,7 @@ pipeline:
 |:----:|:-----|:---------|:-----|
 | **Step 1** ✅ 完成 | 🧐 PM | 需求文档 + 工作计划 | R102-product-requirements.md + WORK_PLAN.md |
 | **Step 2** ✅ 完成 | 👷 小开 | 架构设计方案 | R102-tech-plan.md (7365925) |
-| **Step 3** ⏳ | 👨‍💻 爱泰 | 编码实现（6 子步） | commit 推 dev |
+| **Step 3** ✅ 完成 | 👨‍💻 爱泰 | 编码实现（6 子步） | commit `b0d2d2a` |
 | **Step 4** ⏳ | 👀 小周 | 代码审查 | R102-code-review.md |
 | **Step 5** ⏳ | 🦐 泰虾 | 测试验证 | R102-test-report.md |
 | **Step 6** ⏳ | 🛠️ 小爱 | 合并 dev→main + 部署 | Docker 新镜像 + TODO.md 更新 |
