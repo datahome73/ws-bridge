@@ -1683,36 +1683,8 @@ def _find_agents_by_role(role: str, member_ids: list[str], cards: dict) -> list[
 
 
 
-def _refresh_role_agent_map() -> None:
-    """Rebuild state._ROLE_AGENT_MAP from Agent Card pipeline_roles.
-
-    Called on:
-    - Agent card registration / update
-    - !agent_role_map --refresh command
-    - Handler initialization (load_cards)
-    """
-    cards = ac_mod.get_all_cards()
-    state._ROLE_AGENT_MAP = {}
-    for aid, card in cards.items():
-        roles = card.get("pipeline_roles", [])
-        for role in roles:
-            if role not in state._ROLE_AGENT_MAP:
-                state._ROLE_AGENT_MAP[role] = []
-            if aid not in state._ROLE_AGENT_MAP[role]:
-                state._ROLE_AGENT_MAP[role].append(aid)
-    logger.info("R63 role-agent map refreshed: %d roles, %d entries",
-                len(state._ROLE_AGENT_MAP),
-                sum(len(v) for v in state._ROLE_AGENT_MAP.values()))
-    # R78 A2: 同步写到 Manager 全局快照
-    try:
-        mgr = _ensure_pipeline_manager()
-        mgr.set_global_role_map(dict(state._ROLE_AGENT_MAP))
-    except Exception:
-        pass
-
-
 # ---- R67 B1: Startup card load + watcher ------------------------------
-# These run at module import time (after _refresh_role_agent_map is defined).
+# These run at module import time (R100: _refresh_role_agent_map moved to command_utils.py).
 _cards_loaded_guard: bool = False
 _card_watcher: "ac_mod.CardFileWatcher | None" = None  # type: ignore[name-defined]
 

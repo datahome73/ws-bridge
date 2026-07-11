@@ -179,3 +179,29 @@ def _resolve_workspace(sender_id: str, params: dict) -> tuple[str | None, str]:
     if not ws:
         return (None, f"❌ 工作区 {ws_id} 不存在")
     return (ws_id, "")
+
+# ── R99/100: Role-Agent Map Refresh ─────────────────────────────────
+logger = __import__('logging').getLogger(__name__)
+
+def _refresh_role_agent_map() -> None:
+    """Rebuild state._ROLE_AGENT_MAP from Agent Card pipeline_roles."""
+    from . import agent_card as ac_mod
+    cards = ac_mod.get_all_cards()
+    state._ROLE_AGENT_MAP = {}
+    for aid, card in cards.items():
+        roles = card.get("pipeline_roles", [])
+        for role in roles:
+            if role not in state._ROLE_AGENT_MAP:
+                state._ROLE_AGENT_MAP[role] = []
+            if aid not in state._ROLE_AGENT_MAP[role]:
+                state._ROLE_AGENT_MAP[role].append(aid)
+    logger.info("R63 role-agent map refreshed: %d roles, %d entries",
+                len(state._ROLE_AGENT_MAP),
+                sum(len(v) for v in state._ROLE_AGENT_MAP.values()))
+    # R78 A2: 同步写到 Manager 全局快照
+    try:
+        from .pipeline_context import PipelineContextManager
+        mgr = PipelineContextManager.get_instance()
+        mgr.set_global_role_map(dict(state._ROLE_AGENT_MAP))
+    except Exception:
+        pass
