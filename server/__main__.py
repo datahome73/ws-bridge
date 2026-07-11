@@ -27,39 +27,13 @@ import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
 
-# ── Periodic cleanup task ────────────────────────────────────
-
-
-async def _auto_archive_loop():
-    """Auto-archive inactive workspaces every 30 minutes."""
-    while True:
-        await asyncio.sleep(1800)
-        try:
-            from . import workspace as _ws_mod
-            for w in _ws_mod.get_active_workspaces():
-                _ws_mod.check_idle(w.id)
-        except Exception:
-            pass
-
-
-async def _periodic_cleanup():
-    """Remove expired pairing codes and old messages every 60 seconds."""
-    global _start_time
-    while True:
-        await asyncio.sleep(60)
-        # Message store cleanup (every ~10 min)
-        if int(asyncio.get_event_loop().time()) % 600 < 60:
-            from . import message_store as _ms
-            _ms.clean_old_messages(DATA_DIR)
-        # P4: Chat log auto-cleanup — files older than 30 days
-        from .config import CHAT_LOG_DIR
-        _cutoff = time.time() - 30 * 86400
-        try:
-            for f in CHAT_LOG_DIR.iterdir():
-                if f.suffix == ".log" and f.stat().st_mtime < _cutoff:
-                    f.unlink()
-        except Exception:
-            pass
+# ── [REMOVED] Periodic cleanup task — ALL auto stopped per user request (2026-07-13) ──
+#
+# async def _auto_archive_loop():
+#     ...removed...
+#
+# async def _periodic_cleanup():
+#     ...removed...
 
 # ── WS handler for aiohttp ──────────────────────────────────────────
 
@@ -814,9 +788,10 @@ def main():
 
     app = web.Application()
 
-    # Start periodic cleanup + auto-archive via on_startup
-    app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))
-    app.on_startup.append(lambda _: asyncio.create_task(_auto_archive_loop()))
+    # [REMOVED] Start periodic cleanup + auto-archive via on_startup
+    # User requested to stop ALL auto features (2026-07-13)
+    # app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))
+    # app.on_startup.append(lambda _: asyncio.create_task(_auto_archive_loop()))
 
     # Register WebSocket route
     app.router.add_get("/ws", ws_handler)

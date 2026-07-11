@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Pipeline AutoRouter — 管线自动路由服务 🚂
+"""Pipeline AutoRouter 🚂 — [DISABLED] per user request (2026-07-13)
 
-独立外挂服务，零 handler.py 侵入。通过 WebSocket 以 bot 身份连接 ws-bridge，
-监听 PM 收件箱的转发通知，自动按 WORK_PLAN.md 定义的 topology.chain 派活下一棒。
-
-用法:
+This service was disabled because of false-positive timeout alarms.
+If re-enabled in the future:
     python3 -m server.auto_router --api-key sk_ws_xxx --pm-agent-id ws_xxx
 """
 
