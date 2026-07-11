@@ -5,6 +5,7 @@ import time
 import uuid
 import os
 
+from ..state import SYSTEM_AGENT_ID
 from .. import state, auth, command_utils, config
 from .. import task_store as ts
 from .. import message_store as ms
