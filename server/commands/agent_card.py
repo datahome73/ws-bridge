@@ -3,6 +3,7 @@
 from .. import state, auth, command_utils
 from .. import agent_card as ac_mod
 from .. import config
+from .pipeline import _refresh_role_agent_map
 
 async def _cmd_agent_card_list(sender_id: str, params: dict) -> str:
     """Display all current agent cards.
