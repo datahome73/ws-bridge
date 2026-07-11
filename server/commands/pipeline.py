@@ -14,7 +14,6 @@ from .. import timeout_tracker
 from .. import pipeline_sync as pps
 from .. import agent_card as ac_mod
 from ..pipeline_context import PipelineContext, PipelineStatus, PipelineTaskKind, PipelineContextManager
-from ..web_viewer import write_chat_log
 
 async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
     """处理 !pipeline 子命令。
@@ -412,7 +411,6 @@ async def _send_inbox_task(
     )
 
     # Persist inbox message
-    write_chat_log(pm_name, inbox_msg, channel=inbox_ch)
     ms.save_message(
         msg_id=str(uuid.uuid4()), msg_type="broadcast",
         from_agent=SYSTEM_AGENT_ID, from_name=pm_name,
@@ -720,7 +718,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 content=cleanup_msg, ts=time.time(),
                 data_dir=config.DATA_DIR, channel=admin_channel,
             )
-            write_chat_log("系统", cleanup_msg, channel=admin_channel)
         except Exception:
             pass
         # ── R48 B: End ──
@@ -930,7 +927,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
                 f"下一棒 {next_role_display}（{next_step}）\n"
                 f"  🎯 产出: {_out_short}"
             )
-            write_chat_log("系统", pm_notify, channel=pm_inbox_ch)
             ms.save_message(
                 msg_id=str(uuid.uuid4()), msg_type="broadcast",
                 from_agent="系统", from_name="系统",
@@ -1154,7 +1150,6 @@ async def _cmd_step_handoff(sender_id: str, params: dict) -> str:
                 content=cleanup_msg, ts=time.time(),
                 data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
             )
-            write_chat_log("系统", cleanup_msg, channel=p.ADMIN_CHANNEL)
         except Exception:
             pass
 

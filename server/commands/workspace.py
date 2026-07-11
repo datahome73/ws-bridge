@@ -3,6 +3,10 @@
 from .. import state, auth, command_utils
 from .. import workspace as ws_mod
 from .. import config
+import time
+import uuid
+from .. import message_store as ms
+import shared.protocol as p
 
 async def _cmd_create_workspace(sender_id: str, params: dict) -> str:
     """Create a new workspace. P3+ (workspace admin / global admin).
@@ -165,7 +169,6 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
 
         for _member_id in list(_notify_ids):
             _inbox_ch = f"_inbox:{_member_id}"
-            write_chat_log("系统", _end_msg, channel=_inbox_ch)
             ms.save_message(
                 msg_id=str(uuid.uuid4()), msg_type="broadcast",
                 from_agent=state.SYSTEM_AGENT_ID, from_name="系统",
