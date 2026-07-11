@@ -164,3 +164,13 @@ PIPELINE_PM_AGENT_ID: str = os.environ.get("WS_PM_AGENT_ID", "")
 # ── R87: _inbox:server 中继通道 ────────────────────────────
 SERVER_INBOX_CHANNEL: str = "_inbox:server"
 """Bot 回复中继通道。bot 将 ACK/完成回复发至此通道，由 server 筛选转发。"""
+
+
+# ── R102: Dispatch notification target ──────────────────────────
+# PM 的 inbox agent_id，Server 将 ACK/完成/退回/失败通知转发至此收件箱。
+# 环境变量: DISPATCH_SENDER_ID
+# 未设置时回退到已有配置 WS_PM_AGENT_ID（用于 R87 原有通知）
+DISPATCH_SENDER_ID: str = os.environ.get(
+    "DISPATCH_SENDER_ID",
+    os.environ.get("WS_PM_AGENT_ID", ""),
+)
