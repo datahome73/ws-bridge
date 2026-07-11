@@ -169,7 +169,6 @@ async def _cmd_close_workspace(sender_id: str, params: dict) -> str:
 
         for _member_id in list(_notify_ids):
             _inbox_ch = f"_inbox:{_member_id}"
-            write_chat_log("系统", _end_msg, channel=_inbox_ch)
             ms.save_message(
                 msg_id=str(uuid.uuid4()), msg_type="broadcast",
                 from_agent=state.SYSTEM_AGENT_ID, from_name="系统",
