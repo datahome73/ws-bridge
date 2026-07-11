@@ -1,6 +1,9 @@
 # Server — WS Bridge 服务端
 
 > 本目录是 ws-bridge 服务端的全部核心代码。**共 17 个 .py 文件，12,858 行。**
+>
+> 📋 **R100 重构中** — 正在将 `handler.py` 拆分为 `main.py`（核心）+ `state.py` + `command_utils.py` + `commands/` 包。
+> 执行中请参考 `docs/R100/R100-product-requirements.md`。
 
 ---
 
@@ -22,46 +25,51 @@
                          │ 路由到
                          ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  handler.py  ← ← ←  7,007 行 — 请勿再往此文件加逻辑          │
+│  main.py（原名 handler.py — 核心消息路由）                     │
 │                                                               │
-│  WebSocket 消息处理（消息入口）                                │
-│  ├── handle_auth()          认证                               │
-│  ├── handle_register()      bot 注册                           │
-│  ├── handle_broadcast()     消息广播（核心）                    │
-│  ├── _handle_server_relay() inbox 中继                         │
-│  ├── _handle_server_query() _inbox:server 查询路由             │
-│  └── handler()              WS 会话主循环                      │
+│  WebSocket 消息处理（[[核心]] — 只做消息流转）                  │
+│  ├── handler()              WS 会话主循环                     │
+│  ├── handle_broadcast()     消息路由 + 广播（含 !命令分发）   │
+│  ├── _handle_server_relay() inbox 中继                        │
+│  ├── _handle_server_query() _inbox:server 查询路由            │
+│  ├── handle_auth()          认证入口                          │
+│  ├── handle_register()      bot 注册入口                      │
+│  └── _send()                WebSocket 写入                    │
 │                                                               │
-│  !命令路由 & 处理                                             │
-│  ├── 工作区命令  workspace: create/close/list/join/leave       │
-│  ├── 管线命令    pipeline: start/stop/status/activate/handoff  │
-│  ├── 任务命令    task: create/update/query/list                │
-│  ├── Agent Card  card: list/get/set/reload/register            │
-│  └── 管理命令    admin: approve/reject/audit/revoke            │
-│                                                               │
-│  ⚠️ 还塞了: 管线状态机 / 看门狗 / Git 同步 / ACK / 超时       │
-│            角色映射 / Step 验证 / 备用接管/...                 │
+│  [[插件]] — 通过 commands/ 注册表路由                         │
+│  ├── !命令 → _parse_command → _ADMIN_COMMANDS → _cmd_*()     │
+│  └── msg_type 分支 → 各 handler 函数                          │
 └──────────┬────────────────────────────────────────────────────┘
            │ 调用
            ▼
 ┌──────────┴────────────────────────────────────────────────────┐
 │  领域模块层                                                    │
 │                                                                │
-│  workspace.py       工作区 CRUD + 状态机 + 自动归档            │
-│  auth.py            认证 & 权限检查                            │
-│  agent_card.py      Agent Card 加载/注册/热更新                │
-│  audit.py           审计日志 (JSONL)                           │
-│  persistence.py     JSON 持久化（用户/会话/API Keys）          │
-│  message_store.py   SQLite 消息存储（7天滚动）                 │
-│  task_store.py      SQLite 任务存储（R38 任务状态机）          │
+│  state.py          共享状态（管线、连接、全局变量）             │
+│  command_utils.py  命令路由工具（解析/权限/审计/广播）         │
+│  commands/         全部 !命令处理（按领域分文件）               │
+│  ├── __init__.py   构建 _ADMIN_COMMANDS 注册表                 │
+│  ├── workspace.py  工作区命令                                  │
+│  ├── pipeline.py   管线命令                                    │
+│  ├── agent_card.py Agent Card 命令                             │
+│  ├── task.py       任务命令                                    │
+│  └── admin.py      管理命令                                    │
+│                                                                │
+│  workspace.py      工作区 CRUD + 状态机 + 自动归档             │
+│  auth.py           认证 & 权限检查                             │
+│  agent_card.py     Agent Card 加载/注册/热更新                 │
+│  audit.py          审计日志 (JSONL)                            │
+│  persistence.py    JSON 持久化（用户/会话/API Keys）           │
+│  message_store.py  SQLite 消息存储（7天滚动）                  │
+│  task_store.py     SQLite 任务存储（R38 任务状态机）            │
 │  pipeline_context.py PipelineContext 数据类 + 管理器 + 持久化  │
-│  pipeline_sync.py   管线 Git 同步检测                          │
+│  pipeline_sync.py  管线 Git 同步检测                           │
 │  timeout_tracker.py Step 超时计时器（纯内存）                  │
-│  config.py          配置（环境变量）                            │
-│  templates.py       Web 界面 HTML/CSS/JS 模板                  │
-│  web_viewer.py      Web 聊天界面后端（HTTP + WS 端点）         │
-│  workspace_api.py   Workspace HTTP API                         │
-│  auto_router.py     🚂 管线自动路由（已停用）                  │
+│  config.py         配置（环境变量）                             │
+│  templates.py      Web 界面 HTML/CSS/JS 模板                   │
+│  web_viewer.py     Web 聊天界面后端（HTTP + WS 端点）          │
+│  workspace_api.py  Workspace HTTP API                          │
+│  auto_router.py    🚂 管线自动路由（已停用）                   │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -84,10 +92,28 @@
 | 文件 | 行数 | 职责 |
 |---|---|---|
 | **`__main__.py`** | 844 | **服务入口**。aiohttp app 启动/停止，端点注册，后台循环 |
-| **`handler.py`** | 7007 | ⚠️ **WebSocket 消息处理 + 全部 !命令 — 当前过载，需要拆分** |
+| **`main.py`** | ~800 | **核心消息路由** — WS 会话主循环 + 消息广播 + inbox 中继/查询 + 认证入口。**不要在此文件加业务逻辑** |
 | **`message_store.py`** | 245 | 消息持久化 (SQLite, 7天TTL) |
 | **`templates.py`** | 762 | Web 聊天界面 HTML/CSS/JS 内联模板 |
 | **`web_viewer.py`** | 725 | Web 界面后端（路由、聊天缓冲、ChatLog 写入） |
+
+### 🟡 共享层（R100 新增）
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| **`state.py`** | ~200 | 共享模块级状态：`_PIPELINE_STATE`、`_PIPELINE_CONFIG`、`_step_ack_states`、`_LOBBY_PAUSED`、`_r72_users`、常量等 |
+| **`command_utils.py`** | ~200 | 命令路由工具：`_parse_command()`、`_check_command_permission()`、`_send_cmd_response()`、`_log_audit()`、`_broadcast_to_channel()` |
+
+### 🟠 !命令处理（R100 新增）
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| **`commands/__init__.py`** | ~100 | 构建 `_ADMIN_COMMANDS` 注册表，导入各子模块的命令函数 |
+| **`commands/workspace.py`** | ~500 | workspace: create/close/list/join/leave/add/remove/list_members |
+| **`commands/pipeline.py`** | ~1200 | pipeline: start/stop/status/activate/handoff/reject/force/verify/... |
+| **`commands/agent_card.py`** | ~300 | agent_card: list/get/set/unset/reload/register/auto_register/role_map |
+| **`commands/task.py`** | ~400 | task: create/update/query/list + rollcall_role/rollcall_next |
+| **`commands/admin.py`** | ~200 | admin: approve_ws_admin/reject_ws_admin/list_pending/audit_log/revoke_api_key |
 
 ### 🟡 工作区
 
@@ -122,16 +148,18 @@
   Bot ──WS──→ __main__.py (aiohttp /ws 端点)
                       │
                       ▼
-              handler(ws)       ← 最顶层协程，管理整个 WS 会话
+              main.handler(ws)       ← 最顶层协程，管理整个 WS 会话
                       │
               解析 MSG type
-              ├── "auth"       →  handle_auth()
-              ├── "register"   →  handle_register()
-              ├── "message"    →  handle_broadcast()
-              │                    ├─ 解析 !command → 路由到 _cmd_*()
-              │                    └─ 广播到频道成员
+              ├── "auth"             → handle_auth()
+              ├── "register"         → handle_register()
+              ├── "message"          → handle_broadcast()
+              │                        ├─ 解析 !command → commands/注册表
+              │                        ├─ _inbox:server → _handle_server_query()
+              │                        ├─ inbox 单播  → 路由到目标 bot
+              │                        └─ 频道广播   → 路由到频道成员
               ├── "agent_card_register" → handle_agent_card_register()
-              └── 其他
+              └── 其他 msg_type      → 各自 handler（未来拆入 commands/）
 ```
 
 ### 3.2 数据持久化层次
@@ -139,16 +167,16 @@
 ```
 ┌───────────────────────┐
 │ 内存 (不落盘)          │
-│  _PIPELINE_STATE      │  ← R42 旧系统，仅存活跃管线运行时状态
-│  _PIPELINE_CONFIG     │  ← R62 只读配置，从 WORK_PLAN 解析
-│  _connections         │  ← 在线连接集合
-│  _step_ack_states     │  ← R53 频道切换 ACK（逐步迁移中）
-│  timeout_tracker      │  ← 超时计时器
-│  watchdog 状态         │
+│  state._PIPELINE_STATE │  ← R42 旧系统，仅存活跃管线运行时状态
+│  state._PIPELINE_CONFIG│  ← R62 只读配置，从 WORK_PLAN 解析
+│  state._connections    │  ← 在线连接集合
+│  state._step_ack_states│  ← R53 频道切换 ACK
+│  timeout_tracker       │  ← 超时计时器
+│  watchdog 状态          │
 ├───────────────────────┤
 │ JSON 文件              │
 │  data/workspaces.json           ← workspace.py
-│  data/pipeline_contexts.json    ← pipeline_context.py + auto_router.py
+│  data/pipeline_contexts.json    ← pipeline_context.py
 │  data/pipeline_contexts_history.jsonl ← pipeline_context.py (归档)
 │  data/approved_users.json       ← persistence.py
 │  data/web_sessions.json         ← persistence.py
@@ -160,7 +188,6 @@
 │ SQLite                 │
 │  data/messages.db      ← message_store.py (原始消息)
 │  data/tasks.db         ← task_store.py (任务状态)
-│  data/im.db            ← ? (可能存在)
 └───────────────────────┘
 ```
 
@@ -170,39 +197,23 @@
 
 ### 4.1 历史 & 现状
 
-管线系统经历了三个阶段的演进，但遗留了大量中间状态：
+管线系统经历了三个阶段的演进：
 
 | 阶段 | 引入 | 机制 | 当前状态 |
 |---|---|---|---|
-| **R42-R74** | 旧管线 | `_PIPELINE_STATE` (内存 dict) + `_PIPELINE_CONFIG` (WORK_PLAN frontmatter) | **仍在使用**，!pipeline_status 等大量命令依赖 |
+| **R42-R74** | 旧管线 | `_PIPELINE_STATE` (内存 dict) + `_PIPELINE_CONFIG` (WORK_PLAN frontmatter) | **仍在使用**，!pipeline_status 等依赖 |
 | **R77-R97** | PipelineContext | `PipelineContextManager` (dataclass + JSON 持久化 + 状态机) | **部分使用**，!pipeline_start 写入，!pipeline_stop 读取 |
 | **R97** | AutoRouter | 独立外挂进程，dict 格式 PipelineContext，文件共享 | **已停用**（`531c601`） |
 
-### 4.2 当前管线流转
-
-```
-!pipeline_start R97
-  → 写入 pipeline_contexts.json（dict 格式）
-  → 更新 _PIPELINE_STATE（内存）
-  → 广播 _admin 「R97 管线已启动」
-
-之后全靠手动:
-!step_handoff R97 step2 → 构建任务消息 → 发送到 bot inbox
-Bot 完成任务 → 回复 _inbox:server 「✅ 完成...」
-  → handler.py 解析完成通知
-  → PM 手动触发下一棒
-```
-
-### 4.3 已知问题
+### 4.2 已知问题
 
 | 问题 | 说明 |
 |---|---|
 | **handler.py 7007行** | 包揽了 WebSocket 处理、命令路由、管线状态机、看门狗、Git 同步、ACK、超时、角色映射等数十项职责 |
 | **三套管线状态并存** | `_PIPELINE_STATE`(内存) + `PipelineContextManager`(dataclass+JSON) + AutoRouter 自维护(dict+JSON)，数据流向混乱 |
-| **pipeline_contexts.json 双格式混写** | PipelineContextManager(dataclass→dict A) 和 AutoRouter(dict B) 写同一个文件，结构不同 |
+| **pipeline_contexts.json 双格式混写** | dataclass 和 dict 格式写同一个文件，结构不同 |
 | **AutoRouter 停用=管线断链** | `!pipeline_start` 仍说"AutoRouter 将自动派活"，但无人接管 |
 | **状态依赖交叉** | handler.py 里 20+ 个 `_cmd_*` 函数直接读写全局变量，难以单体测试 |
-| **配置散落** | 部分配置在 `config.py`，部分在 `handler.py` 顶层，部分在 `_PIPELINE_CONFIG` 动态构造 |
 
 ---
 
@@ -210,31 +221,30 @@ Bot 完成任务 → 回复 _inbox:server 「✅ 完成...」
 
 ```
 __main__.py
-  ├── handler.py    (直接导入 _connections, handle_auth, handle_broadcast...)
+  ├── main.py    (原 handler.py — 核心消息路由)
+  │     ├── state.py         （无反向依赖）
+  │     ├── command_utils.py （调用 state，无反向依赖）
+  │     ├── commands/
+  │     │     ├───→ state.py
+  │     │     ├───→ command_utils.py
+  │     │     └───→ workspace / auth / agent_card / pipeline_context / ...
   │     ├── auth.py
-  │     ├── audit.py
-  │     ├── agent_card.py (load_cards, get_all_cards)
-  │     ├── workspace.py  (get_workspace, get_active_workspaces...)
-  │     ├── pipeline_context.py  (PipelineContextManager...)
-  │     ├── pipeline_sync.py (pipeline_git_sync_scan)
+  │     ├── workspace.py
+  │     ├── agent_card.py
+  │     ├── pipeline_context.py
+  │     ├── pipeline_sync.py
   │     ├── timeout_tracker.py
   │     ├── task_store.py
   │     ├── persistence.py
   │     ├── message_store.py
-  │     ├── web_viewer.py  (write_chat_log)
+  │     ├── web_viewer.py
   │     └── shared.protocol
-  ├── message_store.py
-  ├── persistence.py
-  ├── workspace.py
-  ├── web_viewer.py
-  │     ├── auth.py
-  │     ├── templates.py
-  │     └── message_store.py
-  └── workspace_api.py
-        └── workspace.py
+  └── ... (其他启动模块)
 ```
 
-> **`handler.py` 的扇入和扇出都是最高的** —— 所有模块都直接或间接依赖它，而它又几乎依赖所有其他模块。这是重构需要解决的核心耦合点。
+> **无循环导入** — 单向依赖链：`__main__ → main → commands → state/command_utils`
+>
+> `state.py` 和 `command_utils.py` 是纯工具层，不依赖 main.py 或 commands/。
 
 ---
 
@@ -243,40 +253,48 @@ __main__.py
 ### 6.1 文件职责边界
 
 ```
-handler.py     → 只做 WebSocket 消息路由、消息广播、命令路由分发。
-                 所有 !命令处理逻辑 → 拆到独立的 *_cmd.py 模块。
-                 管线状态机 → 拆到 pipeline_state.py。
-                 看门狗 → 拆到 watchdog.py。
-                 验证钩子 → 拆到 validation.py。
+main.py          → 只做 WebSocket 消息路由、消息广播、命令路由分发。
+                   所有 !命令处理逻辑 → 拆到 commands/*.py。
+                   管线状态机 → 拆到 pipeline_state.py（Phase 2）。
+                   看门狗 → 拆到 watchdog.py（Phase 2）。
+                   验证钩子 → 拆到 validation.py（Phase 2）。
 
-pipeline_*.py → 只关心管线数据模型、状态机、持久化。
-                 不涉及 WS 通信、消息解析、!命令处理。
+commands/*.py   → 只处理 !命令的业务逻辑。
+                   每个文件对应一个领域（workspace/pipeline/agent_card/task/admin）。
+                   不能直接操作 WebSocket 连接，只能返回字符串响应。
 
-workspace.py  → 已较好解耦，保持即可。
+state.py        → 持有共享状态，不包含业务逻辑。
+command_utils.py→ 命令路由的纯工具函数，不包含业务逻辑。
 
-agent_card.py  → 已较好解耦，保持即可。
+pipeline_*.py   → 只关心管线数据模型、状态机、持久化。
+                   不涉及 WS 通信、消息解析、!命令处理。
+
+workspace.py    → 已较好解耦，保持即可。
+agent_card.py   → 已较好解耦，保持即可。
 ```
 
 ### 6.2 新增功能的约定
 
-1. **新增 !命令** → 不要在 handler.py 里加 `_cmd_*`，新建 `commands/xxx.py`，在 `__main__.py` 注册路由
-2. **新增状态** → 不要加新的全局 dict，用 `PipelineContextManager` 或专门的 Manager 类
-3. **新增后台循环** → 在 `__main__.py` 的 `on_startup` 中启动，不要在 handler.py 里起 task
-4. **WS 连接状态** → 留在 `handler.py` 的 `_connections` 里（这是它该管的）
-5. **管线逻辑** → 永远不要写进 handler.py，去 `pipeline_*.py`
+1. **新增 !命令** → 在 `commands/` 下对应领域文件加函数，`commands/__init__.py` 注册，**不要碰 main.py**
+2. **新增状态** → 不要加新的全局 dict，用 `state.py` 或专门的 Manager 类
+3. **新增后台循环** → 在 `__main__.py` 的 `on_startup` 中启动，不要在 main.py 里起 task
+4. **WS 连接状态** → 留在 `main.py` 的 `_connections` 里（这是它该管的）
+5. **管线逻辑** → 永远不要写进 main.py，去 `commands/pipeline.py` 或 `pipeline_*.py`
 
-### 6.3 重构路线图（建议）
+### 6.3 重构路线图
 
 ```
-Phase 1  📋 拆 handler.py（7007 行 → 可管理的模块）
-  → commands/           !命令处理（~30 个 _cmd_*）
-  → pipeline_state.py   管线状态管理（从 handler 剥离）
-  → watchdog.py         看门狗逻辑
-  → validation.py       Step 验证钩子
+Phase 1 (R100)  📋 拆 handler.py — 结构拆分
+  → main.py            改名，保留核心 WS 路由
+  → state.py           共享状态提取
+  → command_utils.py   命令路由工具提取
+  → commands/          全部 !命令处理（5 个领域文件）
+  → 验证：手工 inbox 双向通信正常
 
 Phase 2  📋 统一管线状态
   → 砍掉 _PIPELINE_STATE（内存），全部走 PipelineContextManager
   → 统一 pipeline_contexts.json 写入格式
+  → 管线相关辅助函数从 commands/pipeline.py 进一步拆分
 
 Phase 3  📋 重新设计 auto 机制
   → 选择方向：handler 内嵌 vs 独立 Gateway 层 vs 混合
