@@ -1883,12 +1883,12 @@ def _infer_artifact_url(step_name: str, round_name: str, step_config: dict | Non
     return step_urls.get(step_name, "")
 
 
-from . import config as _r42cfg
-
+# lazy import moved inside _load_step_config to break circular import
 
 
 def _load_step_config() -> dict[str, dict]:
     """Load step map from config."""
+    from . import config as _r42cfg
     return _r42cfg.PIPELINE_STEP_MAP
 
 
