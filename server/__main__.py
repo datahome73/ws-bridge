@@ -22,7 +22,6 @@ from .persistence import (
     save_web_sessions,
     get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
-from .web_viewer import setup_routes, _ws_clients, write_chat_log
 import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
@@ -537,8 +536,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                         # R82: removed set_agent_channel
 
-                    write_chat_log(sender_name, reset_content, channel=workspace_id)
-
                     reset_id = str(uuid.uuid4())
                     await ws.send_json({
                         "type": "ack",
@@ -579,22 +576,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 else:
                     await ws.send_json({"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
 
-            # ── R38: MSG_TASK_NOTIFY relay ──────────────────────────
-            elif msg_type == p.MSG_TASK_NOTIFY and agent_id:
-                # Server-side push — relay to Web clients via write_chat_log
-                # (agent-side handling is done in handler.py's _broadcast_task_notify)
-                task_info = data.get("task", {})
-                transition = data.get("transition", "")
-                name = task_info.get("name", "?")
-                ctx = task_info.get("context_id", "?")
-                state = task_info.get("state", "?")
-                notify_text = f"📊 {ctx} {name}: {transition}"
-                write_chat_log("系统", notify_text, channel=p.ADMIN_CHANNEL)
-                logger.info(
-                    "R38 task_notify relayed to web: %s/%s → %s",
-                    ctx, name, state,
-                )
-
             else:
                 await ws.send_json({"type": "error", "error": "Unknown msg or not authenticated"})
 
@@ -606,8 +587,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             if not _connections[agent_id]:
                 del _connections[agent_id]
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
-        if ws in _ws_clients:
-            _ws_clients.discard(ws)
 
     return ws
 
@@ -793,8 +772,6 @@ def main():
     # Initialise workspace module
     ws_mod.init()
     # R82: removed load_agent_channels
-    # Register workspace API
-    from .web_viewer import setup_routes as _setup_routes
 
     logger.info("WS Bridge starting on %s:%d", HOST, PORT)
     logger.info("Admin agents: %s", ADMIN_AGENTS or "none")
@@ -808,9 +785,6 @@ def main():
 
     # Register WebSocket route
     app.router.add_get("/ws", ws_handler)
-
-    # Register web viewer routes
-    setup_routes(app)
 
     # P1: /api/status
     app.router.add_get("/api/status", _api_status)
