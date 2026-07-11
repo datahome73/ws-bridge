@@ -38,7 +38,7 @@ pipeline:
 
 # R98 WORK_PLAN — !close_workspace 归档通知增强 🔧
 
-> **状态：** 📋 需求已审核通过 ✅ | WORK_PLAN 已审核通过 ✅
+> **状态：** 🏁 已归档 ✅ | WORK_PLAN 审核 ✅ | 47/47 🟢 全部通过 | `4a088dd`
 > **需求文档:** https://raw.githubusercontent.com/datahome73/ws-bridge/refs/heads/main/docs/R98/R98-product-requirements.md
 > **基线:** R97 后 `main` latest (`e375714`)
 
@@ -139,7 +139,7 @@ R98 是个小功能点，修复 `!close_workspace` 归档通知只发 `ws.member
 
 ---
 
-## Step 5 — 测试验证（泰虾）
+## Step 5 — 测试验证（泰虾）— ✅ 已完成 (`4a088dd`)
 
 验收 8 项（详见需求文档 §3）：
 
@@ -158,13 +158,8 @@ R97 回归测试：`python3 -m unittest tests.test_r97_auto_router -v` → 19/19
 
 ---
 
-## Step 6 — 合并部署（小爱）
+## Step 6 — 合并部署（小爱）— ✅ 已完成 (`4a088dd`)
 
-1. 合并到 main：
-   ```
-   git checkout main
-   git merge dev
-   git push origin main
-   ```
-2. 构建部署 ws-bridge:r98 镜像
-3. 验证线上 `!close_workspace` 通知覆盖面
+1. ✅ 合并到 main：`4a088dd` fast-forward
+2. ✅ 构建部署 ws-bridge:r98 镜像 — VPS 已运行
+3. ✅ 验证线上 `!close_workspace` 通知覆盖面

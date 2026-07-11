@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.66
+> **版本：** v2.67
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -15,7 +15,7 @@
 | F-4 | **测试标签与前缀匹配冲突** — `[R{N}测试]` 在 `📢` 之前破坏 startswith | 🟢 P3 | R45 | 🟢 已完成 ✅ |
 | F-5 | **P3 工作室管理能力增强** — 增加管理工作室的权限/功能（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
 || F-6 | **P4 全平台管理面板** — 给管理员的面板工具（R24 延后） | 🟡 P2 | 待分配 | ⬜ 待启动 |
-|| F-24 | **`!close_workspace` 关闭通知未覆盖全部管线参与 bot** — 当前通知仅发往 `ws.members`，但 R97 后 workspace 成员≠管线参与 bot。`_cmd_close_workspace` 应额外从 PipelineContext 读取 step→agent_id 列表，给每位管线参与者发归档通知，不论是否在 workspace 成员中 | 🟡 P2 | **R98** | ⬜ 待启动 |
+|| F-24 | **`!close_workspace` 关闭通知未覆盖全部管线参与 bot** — 当前通知仅发往 `ws.members`，但 R97 后 workspace 成员≠管线参与 bot。`_cmd_close_workspace` 应额外从 PipelineContext 读取 step→agent_id 列表，给每位管线参与者发归档通知，不论是否在 workspace 成员中 | 🟡 P2 | R98 | 🟢 已完成 ✅ |
 | F-7 | **Web 端下拉刷新跳到大厅** — 已取消，不再处理 | ❌ 已取消 | — | — |
 | F-9 | **Web 端 Tab 页加载空白（服务器挂了）** — Web 端 Tab 页显示「加载中」，服务器服务异常 | 🔴 P0 | R71 | 🟢 已完成 ✅ |
 | F-22 | **`!step_complete` 变量作用域 bug** — `_cmd_step_complete` 中 `step_config` 未定义，`cannot access local variable`。R70 管线中 `!step_complete` 完全不可用。需增加 `step_config = _PIPELINE_CONFIG.get(round_name, {})` 后备逻辑 | 🔴 P0 | R71 | 🟢 已完成 ✅ |
