@@ -87,7 +87,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 _r102_channel = data.get("channel", "")
                 _r102_content = (data.get("content") or "").strip()
                 if _r102_channel != f"{p.INBOX_CHANNEL_PREFIX}server":
-                    _r102_prefixes = ("收到 ✅", "已完成 ✅", "退回 🔄", "失败 ❌", "ACK ✅", "✅ 完成")
+                    _r102_prefixes = ("收到 ✅", "已完成 ✅", "退回 🔄", "失败 ❌", "ACK ✅", "✅ 完成", "✅ ")
                     if _r102_content.startswith(_r102_prefixes):
                         # PM 自己的消息不走中继（PM 应直接发 bot 收件箱）
                         if not (DISPATCH_SENDER_ID and agent_id == DISPATCH_SENDER_ID):

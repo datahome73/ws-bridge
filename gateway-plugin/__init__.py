@@ -547,7 +547,8 @@ class WSBridgeAdapter(BasePlatformAdapter):
                 or started_content.startswith("收到 ✅")
                 or started_content.startswith("已完成 ✅")
                 or started_content.startswith("退回 🔄")
-                or started_content.startswith("失败 ❌")):
+                or started_content.startswith("失败 ❌")
+                or started_content.startswith("✅ ")):
             logger.warning(
                 "[WSBridge] R102 relay: %s → _inbox:server",
                 content[:60],
