@@ -241,6 +241,6 @@ pipeline:
 | 风险 | 缓解 |
 |:-----|:------|
 | `to_agent` 字段为空时误触派活分支 | 代码中检查 `to_agent` 有效性（非空 + 合法 agent_id） |
-| Bot 回复无前缀消息以为 server 没收到 | 消息已入库，可查 `messages.db` 确认 |
-| 隐藏发件人后 bot 不知上下文 | 任务内容在 `content` 中完整传递；如需追问，bot 回复到 `_inbox:server`，Server 中继给 PM |
+| Bot 回复无前缀消息以为 server 没收到 | 消息已入库，可查 `messages.db` 确认，也可继续用直达透传沟通 |
+| 隐藏发件人后 bot 不知上下文 | 任务内容在 `content` 中完整传递；如需追问，bot 回复到 `_inbox:server`，Server 中继给 PM，或直达透传 |
 | 前缀匹配过于严格导致误判 | 前缀含特殊符号（✅、🔄、❌），减少自然语言误触发 |
