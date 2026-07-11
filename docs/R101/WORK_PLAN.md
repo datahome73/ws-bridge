@@ -147,8 +147,8 @@ __main__.py                          WSS 核心 (port 8765)
 | Step | 角色 | 工作内容 | 产出 | 验收 |
 |:----:|:-----|:---------|:-----|:-----|
 | **Step 1** ✅ 完成 | 🧐 PM | 需求文档 + 工作计划 | R101-product-requirements.md + WORK_PLAN.md | 推 dev |
-| **Step 2** 🟡 待执行 | 👷 小开 | 架构设计方案 | R101-tech-plan.md | 推 dev → 回复 inbox 通知完成 |
-| **Step 3** ⏳ | 👨‍💻 Dev | 编码 — 6 步执行（清理依赖→创建 web 服务→精简核心→前端轮询→清理 web_viewer→验证） | 全部代码文件修改 | 见下 |
+| **Step 2** ✅ 完成 | 👷 小开 | 架构设计方案 | R101-tech-plan.md | 推 dev ✅ |
+| **Step 3** ✅ 完成 | 👨‍💻 爱泰 | 编码 — 6 步执行（清理依赖→创建 web 服务→精简核心→前端轮询→清理 web_viewer→验证） | commit `0baddc8` | 推 dev ✅ |
 | **Step 4** ⏳ | 👀 Review | 代码审查 | R101-code-review.md | 推 dev |
 | **Step 5** ⏳ | 🦐 QA | 测试验证 | R101-test-report.md（10 项验收） | 推 dev |
 | **Step 6** ⏳ | 🛠️ Ops | 合并 dev→main + 部署 | Docker 新镜像 + 生产验证 | TODO.md 更新 |
