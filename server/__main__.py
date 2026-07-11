@@ -9,7 +9,7 @@ import uuid
 
 from aiohttp import web
 
-from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS
+from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SENDER_ID  # R102: PM guard
 from .main import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
 from .message_store import init_db, search_messages as _search_messages
 from .persistence import get_approved_users as _get_approved_users
@@ -89,9 +89,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if _r102_channel != f"{p.INBOX_CHANNEL_PREFIX}server":
                     _r102_prefixes = ("收到 ✅", "已完成 ✅", "退回 🔄", "失败 ❌", "ACK ✅", "✅ 完成")
                     if _r102_content.startswith(_r102_prefixes):
-                        data["channel"] = f"{p.INBOX_CHANNEL_PREFIX}server"
-                        if await _handle_server_relay(ws, agent_id, data):
-                            continue
+                        # PM 自己的消息不走中继（PM 应直接发 bot 收件箱）
+                        if not (DISPATCH_SENDER_ID and agent_id == DISPATCH_SENDER_ID):
+                            data["channel"] = f"{p.INBOX_CHANNEL_PREFIX}server"
+                            if await _handle_server_relay(ws, agent_id, data):
+                                continue
                 # ════════════════════════════════════════════════════════════════════
                 # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
                 _channel = data.get("channel", "")
