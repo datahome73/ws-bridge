@@ -78,7 +78,16 @@ async def _run_app(app: web.Application) -> None:
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     persistence.load_web_sessions(DATA_DIR)
+    persistence.load_api_keys(DATA_DIR)
+    persistence.load_approved_users(DATA_DIR)
     ms.init_db(DATA_DIR)
+
+    # Seed state._r72_users from api_keys so auth.get_agent_name() works
+    from . import state as _state
+    for aid, info in persistence.get_api_keys().items():
+        name = info.get("display_name") if isinstance(info, dict) else None
+        if name:
+            _state._r72_users[aid] = {"name": name}
 
     app = web.Application()
     web_viewer.setup_routes(app)
