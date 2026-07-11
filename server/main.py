@@ -2381,7 +2381,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══════════════════════════════════════════
 
     # 非中继消息 → 走正常路由
-    if channel not in (state.SERVER_INBOX_CHANNEL, "_inbox:_system"):
+    if channel != state.SERVER_INBOX_CHANNEL:
         return False
 
     # ── 获取发送者信息 ──
@@ -2389,7 +2389,18 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
 
     # ═══ R102: to_agent 派活路由 ═══
+    # 支持顶层 to_agent 字段 (ws_client.send_message(to_agent=...))
+    # 也兼容 JSON 内嵌 (json.dumps({"to_agent":..., "content":...}) 作为 content)
     to_agent = (msg.get("to_agent") or "").strip()
+    if not to_agent:
+        # 回退: 尝试从内容 JSON 中解析
+        text = msg.get("content", "").strip()
+        if text.startswith("{"):
+            try:
+                inner = json.loads(text)
+                to_agent = (inner.get("to_agent") or "").strip()
+            except json.JSONDecodeError:
+                pass
     if to_agent:
         # 校验: 必须是合法 agent_id 格式
         if not _is_valid_agent_id(to_agent):
@@ -2572,7 +2583,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══════════════════════════════════════════
 
     # 非中继消息 → 走正常路由
-    if channel not in (state.SERVER_INBOX_CHANNEL, "_inbox:_system"):
+    if channel != state.SERVER_INBOX_CHANNEL:
         return False
 
     # ── 获取发送者信息 ──
@@ -2580,7 +2591,18 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
 
     # ═══ R102: to_agent 派活路由 ═══
+    # 支持顶层 to_agent 字段 (ws_client.send_message(to_agent=...))
+    # 也兼容 JSON 内嵌 (json.dumps({"to_agent":..., "content":...}) 作为 content)
     to_agent = (msg.get("to_agent") or "").strip()
+    if not to_agent:
+        # 回退: 尝试从内容 JSON 中解析
+        text = msg.get("content", "").strip()
+        if text.startswith("{"):
+            try:
+                inner = json.loads(text)
+                to_agent = (inner.get("to_agent") or "").strip()
+            except json.JSONDecodeError:
+                pass
     if to_agent:
         # 校验: 必须是合法 agent_id 格式
         if not _is_valid_agent_id(to_agent):
