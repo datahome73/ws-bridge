@@ -2315,6 +2315,36 @@ def _is_valid_agent_id(aid: str) -> bool:
     return bool(aid and aid.startswith("ws_") and len(aid) > 10)
 
 
+async def _send_to_agent(target_agent_id: str, payload: dict) -> int:
+    """定向发送 payload 给指定 agent 的所有 WS 连接。不广播。同时持久化到 DB。"""
+    payload_json = json.dumps(payload)
+    sent = 0
+    for conn in list(_connections.get(target_agent_id, set())):
+        try:
+            if hasattr(conn, "send_str"):
+                await conn.send_str(payload_json)
+            elif hasattr(conn, "send"):
+                await conn.send(payload_json)
+            sent += 1
+        except Exception:
+            pass
+    # 同时持久化到 DB
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="broadcast",
+            from_agent=state.SYSTEM_AGENT_ID,
+            from_name="系统",
+            content=payload.get("content", ""),
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+            channel=payload.get("channel", ""),
+        )
+    except Exception:
+        pass
+    return sent
+
+
 async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     """R87: 处理发往 _inbox:server 的 bot 回复中继.
 
@@ -2374,7 +2404,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             "content": msg.get("content", "").strip(),
             "ts": time.time(),
         }
-        await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
+        await _send_to_agent(to_agent, relay_payload)
         logger.info("[Dispatch] %s → %s: %s...",
                      agent_id[:12], to_agent[:16],
                      (msg.get("content") or "")[:60])
@@ -2394,9 +2424,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 1: 收到 ✅ / ACK ✅ → 转发 PM（进度通知）═══
     if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2412,9 +2440,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     if content.startswith("已完成 ✅") or content.startswith("✅ 完成"):
         # ⑤ 转发给 PM
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2424,9 +2450,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # ⑥ 自动确认给 bot（发到 bot 的 inbox，不走 _inbox:server）
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
@@ -2441,9 +2465,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 3: 退回 🔄 ═══
     if content.startswith("退回 🔄"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2453,9 +2475,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # 自动确认给 bot
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
@@ -2470,9 +2490,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 4: 失败 ❌ ═══
     if content.startswith("失败 ❌"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2482,9 +2500,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # 自动确认给 bot
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
@@ -2579,7 +2595,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             "content": msg.get("content", "").strip(),
             "ts": time.time(),
         }
-        await _broadcast_to_channel(f"_inbox:{to_agent}", relay_payload)
+        await _send_to_agent(to_agent, relay_payload)
         logger.info("[Dispatch] %s → %s: %s...",
                      agent_id[:12], to_agent[:16],
                      (msg.get("content") or "")[:60])
@@ -2599,9 +2615,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 1: 收到 ✅ / ACK ✅ → 转发 PM（进度通知）═══
     if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2617,9 +2631,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     if content.startswith("已完成 ✅") or content.startswith("✅ 完成"):
         # ⑤ 转发给 PM
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2629,9 +2641,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # ⑥ 自动确认给 bot（发到 bot 的 inbox，不走 _inbox:server）
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
@@ -2646,9 +2656,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 3: 退回 🔄 ═══
     if content.startswith("退回 🔄"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2658,9 +2666,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # 自动确认给 bot
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
@@ -2675,9 +2681,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     # ═══ 规则 4: 失败 ❌ ═══
     if content.startswith("失败 ❌"):
         if pm_agent_id:
-            await _broadcast_to_channel(
-                f"_inbox:{pm_agent_id}",
-                {
+            await _send_to_agent(pm_agent_id, {
                     "type": "broadcast",
                     "channel": f"_inbox:{pm_agent_id}",
                     "from_name": "系统",
@@ -2687,9 +2691,7 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
                 },
             )
         # 自动确认给 bot
-        await _broadcast_to_channel(
-            f"_inbox:{agent_id}",
-            {
+        await _send_to_agent(agent_id, {
                 "type": "broadcast",
                 "channel": f"_inbox:{agent_id}",
                 "from_name": "系统",
