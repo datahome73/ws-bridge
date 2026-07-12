@@ -23,6 +23,8 @@ async def api_workspaces(request: web.Request) -> web.Response:
             "created_at": w.created_at,
             "last_active_at": w.last_active_at,
             "closed_at": w.closed_at,
+            "pipeline_round": w.pipeline_round,
+            "roles": w.roles,
         })
     # Sort by last_active descending
     workspaces.sort(key=lambda x: x["last_active_at"], reverse=True)

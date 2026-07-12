@@ -55,6 +55,7 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 .ws-panel .ws-badge{font-size:0.7rem;padding:1px 6px;border-radius:4px;flex-shrink:0;}
 .ws-panel .ws-active{color:#3fb950;border:1px solid #3fb95044;}
 .ws-panel .ws-archived{color:#8b949e;border:1px solid #30363d;}
+.ws-panel .ws-round-tag{font-size:0.65rem;padding:1px 5px;border-radius:4px;flex-shrink:0;line-height:1.4;}
 .ws-section-header{padding:6px 14px;font-size:0.75rem;border-bottom:1px solid #30363d;}
 .ws-section-active{color:#3fb950;}
 .ws-section-archived{color:#8b949e;}
@@ -461,22 +462,30 @@ function createArchiveMessageEl(m) {
 function buildWsItem(w) {
   const badge = w.state === 'active' ? '🟢' : '🗂️';
   const cls = w.state === 'active' ? 'ws-active' : 'ws-archived';
-  var clickAction;
-  if (w.state === 'active') {
-    const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
-    clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
-  } else {
-    const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
-    clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
-  }
+  const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
+  const clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
+  // Round badge (empty string = hide)
+  const roundHtml = w.pipeline_round
+    ? '<span class="ws-round-tag ' + cls + '">🏷️ ' + escapeHtml(w.pipeline_round) + '</span>'
+    : '';
+  // Member count
+  const memberHtml = w.member_count > 0
+    ? '<span style="color:#8b949e;font-size:0.7rem;flex-shrink:0;margin-left:4px;">👥' + w.member_count + '</span>'
+    : '';
+  // Time string for archived items
   var timeStr = '';
-  if (w.state === 'archived' && w.closed_at) {
-    timeStr = '<span style="margin-left:auto;color:#8b949e;font-size:0.65rem;">' + formatClosedAt(w.closed_at) + '</span>';
+  if (w.state === 'archived') {
+    if (w.created_at) {
+      timeStr += '<span style="color:#8b949e;font-size:0.6rem;flex-shrink:0;">' + formatClosedAt(w.created_at) + '</span>';
+    }
+    if (w.closed_at) {
+      timeStr += '<span style="margin-left:auto;color:#8b949e;font-size:0.65rem;flex-shrink:0;">' + formatClosedAt(w.closed_at) + '</span>';
+    }
   }
   return '<div class="ws-item" onclick="' + clickAction + '; document.getElementById(\'wsPanel\').classList.remove(\'open\')">' +
     '<span class="ws-badge ' + cls + '">' + badge + '</span>' +
-    '<span style="flex:1;">' + escapeHtml(w.name) + '</span>' +
-    timeStr + '</div>';
+    '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(w.name) + '</span>' +
+    roundHtml + memberHtml + timeStr + '</div>';
 }
 
 async function renderWsPanel() {
