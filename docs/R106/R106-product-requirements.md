@@ -79,15 +79,17 @@ Bot 发 "已完成 ✅ R106 Step 2" → Server 解析
     "work_plan_url": "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R{round}/WORK_PLAN.md"
   },
   "artifacts": {
-    "step1": {"work_plan_commit": ""},
-    "step2": {"tech_plan_url": ""},
-    "step3": {"commit_sha": "", "files_changed": ""},
-    "step4": {"review_report_url": ""},
-    "step5": {"test_commit_sha": ""},
-    "step6": {"merge_commit": ""}
+    "step1": {},
+    "step2": {},
+    "step3": {},
+    "step4": {},
+    "step5": {},
+    "step6": {}
   }
 }
 ```
+
+> **说明：** `artifacts` 是通用 k-v 存储，每步的产出键名由具体轮次决定。开发轮常用键如 `work_plan_commit`、`tech_plan_url`、`commit_sha`、`files_changed`、`review_report_url`、`test_commit_sha`、`merge_commit` 等，其他类型的轮次可用完全不同的键名。英文单词即可，LLM 能理解语义。
 
 ### 3.2 Pipeline Context 操作
 
