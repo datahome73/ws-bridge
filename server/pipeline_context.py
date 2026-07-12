@@ -130,6 +130,12 @@ class PipelineContext:
     created_by: str = ""                             # 创建者 agent_id
     tags: dict[str, str] = field(default_factory=dict)  # 可扩展标签
 
+    # ── R107: 自动派活元数据 ──
+    round_title: str = ""                        # 人类可读标题
+    references: dict = field(default_factory=dict)  # 文档 URL
+    artifacts: dict = field(default_factory=dict)   # 每步产出 KV
+    message_templates: dict = field(default_factory=dict)  # 派活模板
+
     # ── 派生路径（property，不持久化）──
 
     @property
@@ -196,6 +202,11 @@ class PipelineContext:
             "updated_at": self.updated_at,
             "created_by": self.created_by,
             "tags": self.tags,
+            # R107: 仅非空时序列化，保持向后兼容
+            **({"round_title": self.round_title} if self.round_title else {}),
+            **({"references": self.references} if self.references else {}),
+            **({"artifacts": self.artifacts} if self.artifacts else {}),
+            **({"message_templates": self.message_templates} if self.message_templates else {}),
         }
 
     @classmethod
@@ -229,6 +240,10 @@ class PipelineContext:
             updated_at=d.get("updated_at", 0.0),
             created_by=d.get("created_by", ""),
             tags=d.get("tags", {}),
+            round_title=d.get("round_title", ""),
+            references=d.get("references", {}),
+            artifacts=d.get("artifacts", {}),
+            message_templates=d.get("message_templates", {}),
         )
 
 

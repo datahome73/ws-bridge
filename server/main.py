@@ -2403,6 +2403,14 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                 "[R106] %s Step %d → %d (auto-advance from completion)",
                 round_name, old_step, old_step + 1,
             )
+            # ── R107: 自动派活下一步（受 AUTO_DISPATCH_ENABLED 控制）──
+            next_step = old_step + 1
+            if next_step <= ctx.total_steps:
+                asyncio.ensure_future(_auto_dispatch(ctx, next_step))
+            else:
+                # 最后一步已完成，标记管线 completed
+                asyncio.ensure_future(mgr.transition_to(round_name, PipelineStatus.COMPLETED))
+                logger.info("[R107] %s 全管线已完成 ✅", round_name)
             return True, round_name
         elif completed_step < old_step:
             logger.info(
@@ -2421,208 +2429,98 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
         return False, f"error: {e}"
 
 
-async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
-    """R87: 处理发往 _inbox:server 的 bot 回复中继.
+# ── R107: 消息模板渲染 ──────────────────────────────────
 
-    Args:
-        ws: WebSocket 连接
-        agent_id: 发送消息的 bot 的 agent_id（已认证）
-        msg: 消息 dict（必须含 channel/content 字段）
 
-    Returns:
-        True  — 消息已由中继处理（调用方应 continue，不继续路由）
-        False — 不是 _inbox:server 消息（调用方继续正常路由）
+def _render_template(template: str, ctx: PipelineContext, step_num: int) -> str:
+    """用 Pipeline Context 数据渲染模板字符串。
+
+    变量来源优先级（高→低）:
+    1. ctx.artifacts 中各 step 的产出 KV
+    2. ctx.references 中的文档 URL
+    3. ctx 基本信息 (round_name, round_title)
     """
-    channel = msg.get("channel", "")
-    content = (msg.get("content") or "").strip()
+    vars = {
+        "round": ctx.round_name,
+        "round_title": ctx.round_title,
+        "requirements_url": ctx.references.get("requirements_url", ""),
+        "work_plan_url": ctx.references.get("work_plan_url", ""),
+    }
+    # 补充来自 artifacts 的变量（覆盖同名变量）
+    for step_key, step_artifacts in ctx.artifacts.items():
+        if isinstance(step_artifacts, dict):
+            vars.update(step_artifacts)
+    # 填充模板中的 {var} 占位符
+    for key, value in vars.items():
+        template = template.replace(f"{{{key}}}", str(value))
+    return template
 
-    # ── R96: 回路测试拦截 ──
-    if content.startswith("test ✅"):
-        from_name = msg.get("from_name", "?")
+
+def _get_step_agent_name(ctx: PipelineContext, step_num: int) -> str:
+    """辅助函数：获取指定 step 的 agent 名称。"""
+    step_key = f"step{step_num}"
+    info = next((s for s in ctx.steps if s.get("name") == step_key), None)
+    if info:
+        return info.get("agent_name", info.get("agent_id", "?"))
+    return "?"
+
+
+async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
+    """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。"""
+    if not config.AUTO_DISPATCH_ENABLED:
         logger.info(
-            "🔄 Loopback test from %s (%s)", from_name, agent_id[:16]
+            "[R107] 自动派活已关闭，跳过 step%d 发送 (round=%s)",
+            step_num, ctx.round_name,
         )
-        try:
-            await _send(ws, {
-                "type": "broadcast",
-                "channel": f"_inbox:{agent_id}",
-                "from_name": "系统",
-                "from_agent": state.SYSTEM_AGENT_ID,
-                "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
-                "ts": time.time(),
-            })
-        except Exception as e:
-            logger.warning("R96: 回路测试回复失败: %s", e)
-        return True
-    # ═══════════════════════════════════════════
-
-    # 非中继消息 → 走正常路由
-    if channel != state.SERVER_INBOX_CHANNEL:
+        # 模拟：仅打印渲染结果，不实际发送
+        next_step_key = f"step{step_num}"
+        next_template = ctx.message_templates.get(next_step_key, "")
+        if next_template:
+            rendered = _render_template(next_template, ctx, step_num)
+            logger.info(
+                "[R107] [模拟] 将派活 step%d 给 %s:\n%s",
+                step_num,
+                _get_step_agent_name(ctx, step_num),
+                rendered,
+            )
         return False
 
-    # ── 获取发送者信息 ──
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-
-    # ═══ R102: to_agent 派活路由 ═══
-    # 支持顶层 to_agent 字段 (ws_client.send_message(to_agent=...))
-    # 也兼容 JSON 内嵌 (json.dumps({"to_agent":..., "content":...}) 作为 content)
-    to_agent = (msg.get("to_agent") or "").strip()
-    if not to_agent:
-        # 回退: 尝试从内容 JSON 中解析
-        text = msg.get("content", "").strip()
-        if text.startswith("{"):
-            try:
-                inner = json.loads(text)
-                to_agent = (inner.get("to_agent") or "").strip()
-            except json.JSONDecodeError:
-                pass
-    if to_agent:
-        # 校验: 必须是合法 agent_id 格式
-        if not _is_valid_agent_id(to_agent):
-            logger.warning("[Dispatch] 拒绝: 非法 to_agent=%s", to_agent)
-            return True
-        # 隐藏发件人，构造转发 payload
-        relay_payload = {
-            "type": "broadcast",
-            "channel": f"_inbox:{to_agent}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": msg.get("content", "").strip(),
-            "ts": time.time(),
-        }
-        await _send_to_agent(to_agent, relay_payload)
-        logger.info("[Dispatch] %s → %s: %s...",
-                     agent_id[:12], to_agent[:16],
-                     (msg.get("content") or "")[:60])
-        return True
-    # ═══════════════════════════════════════════
-
-    # ═══ 安全守卫: PM 误发 _inbox:server ═══
-    # 排除带 to_agent 的派活消息（已在上面拦截）
-    if pm_agent_id and agent_id == pm_agent_id:
-        await _send(ws, {
-            "type": "error",
-            "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱.",
-        })
-        logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
-        return True
-
-    # ═══ 规则 1: 收到 ✅ / ACK ✅ → 转发 PM（进度通知）═══
-    if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
-        if pm_agent_id:
-            await _send_to_agent(pm_agent_id, {
-                    "type": "broadcast",
-                    "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统",
-                    "from_agent": state.SYSTEM_AGENT_ID,
-                    "content": f"📬 {sender_name} 已接活:\n{content}",
-                    "ts": time.time(),
-                },
-            )
-        logger.info("[Relay] ACK: %s → PM", sender_name)
-        return True
-
-    # ═══ 规则 2: 已完成 ✅ / ✅ 完成 → 转发PM + 自动确认bot（同时触发）═══
-    if content.startswith("已完成 ✅") or content.startswith("✅ 完成"):
-        # ⑤ 转发给 PM
-        if pm_agent_id:
-            await _send_to_agent(pm_agent_id, {
-                    "type": "broadcast",
-                    "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统",
-                    "from_agent": state.SYSTEM_AGENT_ID,
-                    "content": f"✅ {sender_name} 任务完成:\n{content}",
-                    "ts": time.time(),
-                },
-            )
-        # ⑥ 自动确认给 bot（发到 bot 的 inbox，不走 _inbox:server）
-        await _send_to_agent(agent_id, {
-                "type": "broadcast",
-                "channel": f"_inbox:{agent_id}",
-                "from_name": "系统",
-                "from_agent": state.SYSTEM_AGENT_ID,
-                "content": "✅ 确认，已收到你的完成通知.本轮任务完成.",
-                "ts": time.time(),
-            },
+    # ← 实际发送逻辑（开关打开后才执行）
+    next_step_key = f"step{step_num}"
+    next_template = ctx.message_templates.get(next_step_key)
+    if not next_template:
+        logger.warning(
+            "[R107] 管线 %s 缺少 step%d 模板，跳过自动派活",
+            ctx.round_name, step_num,
         )
-        logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
-        # ═══ R106: 自动推进管线 step ═══
-        _try_advance_pipeline(content, agent_id)
-        return True
-
-    # ═══ 规则 3: 退回 🔄 ═══
-    if content.startswith("退回 🔄"):
-        if pm_agent_id:
-            await _send_to_agent(pm_agent_id, {
-                    "type": "broadcast",
-                    "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统",
-                    "from_agent": state.SYSTEM_AGENT_ID,
-                    "content": f"🔄 {sender_name} 退回:\n{content}",
-                    "ts": time.time(),
-                },
-            )
-        # 自动确认给 bot
-        await _send_to_agent(agent_id, {
-                "type": "broadcast",
-                "channel": f"_inbox:{agent_id}",
-                "from_name": "系统",
-                "from_agent": state.SYSTEM_AGENT_ID,
-                "content": "🔄 已记录退回.",
-                "ts": time.time(),
-            },
-        )
-        logger.info("[Relay] 退回: %s → PM + 自动确认", sender_name)
-        return True
-
-    # ═══ 规则 4: 失败 ❌ ═══
-    if content.startswith("失败 ❌"):
-        if pm_agent_id:
-            await _send_to_agent(pm_agent_id, {
-                    "type": "broadcast",
-                    "channel": f"_inbox:{pm_agent_id}",
-                    "from_name": "系统",
-                    "from_agent": state.SYSTEM_AGENT_ID,
-                    "content": f"⚠️ {sender_name} 失败:\n{content}",
-                    "ts": time.time(),
-                },
-            )
-        # 自动确认给 bot
-        await _send_to_agent(agent_id, {
-                "type": "broadcast",
-                "channel": f"_inbox:{agent_id}",
-                "from_name": "系统",
-                "from_agent": state.SYSTEM_AGENT_ID,
-                "content": "⚠️ 已记录失败.",
-                "ts": time.time(),
-            },
-        )
-        logger.info("[Relay] 失败: %s → PM + 自动确认", sender_name)
-        return True
-
-    # ═══ 规则 0: ! 命令 → 透传到 normal routing（兼容 R82 _handle_server_query）═══
-    if content.startswith("!"):
-        logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
         return False
 
-    # ═══ 规则 5: 无匹配 → 入库留痕 ═══
-    # 入库留痕（不转发，不回复）
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="message",
-            channel=channel,
-            from_agent=agent_id,
-            from_name=sender_name,
-            content=content,
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
+    next_step_info = next(
+        (s for s in ctx.steps if s.get("name") == next_step_key), None,
+    )
+    if not next_step_info or not next_step_info.get("agent_id"):
+        logger.warning(
+            "[R107] 管线 %s step%d 无 agent_id，跳过自动派活",
+            ctx.round_name, step_num,
         )
-    except Exception:
-        pass  # 入库失败不阻塞主流程
-    logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
-    return True
+        return False
+
+    target_agent_id = next_step_info["agent_id"]
+    content = _render_template(next_template, ctx, step_num)
+
+    payload = {
+        "type": "message",
+        "channel": "_inbox:server",
+        "content": content,
+        "from_name": "小谷",
+        "agent_id": "ws_f26e585f6479",
+        "to_agent": target_agent_id,
+        "id": f"auto-{ctx.round_name}-step{step_num}-{int(time.time() * 1000)}",
+        "ts": time.time(),
+    }
+
+    sent = await _send_to_agent(target_agent_id, payload)
+    return sent > 0
 
 
 async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
