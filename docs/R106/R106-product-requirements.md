@@ -79,6 +79,7 @@ Bot 发 "已完成 ✅ R106 Step 2" → Server 解析
     "work_plan_url": "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R{round}/WORK_PLAN.md"
   },
   "artifacts": {
+    "step1": {"work_plan_commit": ""},
     "step2": {"tech_plan_url": ""},
     "step3": {"commit_sha": "", "files_changed": ""},
     "step4": {"review_report_url": ""},
