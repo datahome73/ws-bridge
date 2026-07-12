@@ -166,9 +166,9 @@ SERVER_INBOX_CHANNEL: str = "_inbox:server"
 """Bot 回复中继通道。bot 将 ACK/完成回复发至此通道，由 server 筛选转发。"""
 
 
-# ── R107: 自动派活开关 — 默认关闭，R108 再开启 ──────────
-AUTO_DISPATCH_ENABLED: bool = os.environ.get("AUTO_DISPATCH_ENABLED", "0") == "1"
-"""自动派活开关。False 时所有自动派活只打日志，不实际发送消息。"""
+# ── R107/R108: 自动派活开关 — R108 永久开启 ─────────────────
+AUTO_DISPATCH_ENABLED: bool = True
+"""自动派活开关。True 时 Step 完成后自动派活下一棒。"""
 
 
 # ── R102: Dispatch notification target ──────────────────────────
