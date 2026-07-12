@@ -47,7 +47,7 @@ Bot 发 "已完成 ✅ R106 Step 2" → Server 解析
   → 更新状态 step2.completed, current_step=3
   → 用 message_templates["step3"] 拼消息
   → 填充 artifacts（commit_sha 等）
-  → 自动发 _inbox:server + to_agent=ws_0bb747d3ea2a
+  → 自动发 _inbox:server + to_agent={目标 bot 的 agent_id}
 ```
 
 ---
@@ -67,12 +67,12 @@ Bot 发 "已完成 ✅ R106 Step 2" → Server 解析
   "status": "running",
   "current_step": 1,
   "steps": [
-    {"step": 1, "role": "pm",     "agent_id": "ws_f26e585f6479", "status": "pending"},
-    {"step": 2, "role": "arch",   "agent_id": "ws_3f7cdd736c1c", "status": "pending"},
-    {"step": 3, "role": "dev",    "agent_id": "ws_0bb747d3ea2a", "status": "pending"},
-    {"step": 4, "role": "review", "agent_id": "ws_fcf496ca1b4f", "status": "pending"},
-    {"step": 5, "role": "qa",     "agent_id": "ws_eab784ac7652", "status": "pending"},
-    {"step": 6, "role": "ops",    "agent_id": "ws_c47032fa1f67", "status": "pending"}
+    {"step": 1, "role": "pm",     "agent_id": "{pm_agent_id}", "status": "pending"},
+    {"step": 2, "role": "arch",   "agent_id": "{arch_agent_id}", "status": "pending"},
+    {"step": 3, "role": "dev",    "agent_id": "{dev_agent_id}", "status": "pending"},
+    {"step": 4, "role": "review", "agent_id": "{review_agent_id}", "status": "pending"},
+    {"step": 5, "role": "qa",     "agent_id": "{qa_agent_id}", "status": "pending"},
+    {"step": 6, "role": "ops",    "agent_id": "{ops_agent_id}", "status": "pending"}
   ],
   "references": {
     "requirements_url": "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R{round}/R{round}-product-requirements.md",
