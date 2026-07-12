@@ -1156,25 +1156,55 @@ def _format_pipeline_context(ctx: PipelineContext) -> str:
         f"  Step: {ctx.current_step}/{ctx.total_steps}",
         f"  阶段: {ctx.current_phase}",
     ]
-    # R78 D2: ACK 状态逐 step 展示
-    if ctx.ack_states:
-        ack_parts = []
-        for i in range(1, ctx.total_steps + 1):
-            step = f"step{i}"
-            ack = ctx.ack_states.get(step, {})
-            state = ack.get("state", "")
-            role = ack.get("role_name", "")
-            if state == "ACKED":
-                ack_parts.append(f"step{i} ✅{role}")
-            elif state == "PENDING":
-                ack_parts.append(f"step{i} ⏳{role}")
-            elif state == "FAILED":
-                ack_parts.append(f"step{i} ❌{role}")
-            elif state in ("SENT", "DELIVERED", "IN_PROGRESS", "ACKNOWLEDGED"):
-                ack_parts.append(f"step{i} 🔄{role}")
-            else:
-                ack_parts.append(f"step{i} ⬜")
-        lines.append(f"  ACK: {' | '.join(ack_parts)}")
+    # ── R106: Step-by-step status (role mapping) ──
+    step_roles = ["pm", "arch", "dev", "review", "qa", "operations"]
+    role_names = {"pm": "PM", "arch": "架构师", "dev": "开发",
+                  "review": "审查", "qa": "测试", "operations": "运维"}
+    step_parts = []
+    for i in range(1, ctx.total_steps + 1):
+        step_key = f"step{i}"
+        role = step_roles[i - 1] if i - 1 < len(step_roles) else "?"
+        role_name = role_names.get(role, role)
+        # Determine status from current_step + ack_states
+        ack = ctx.ack_states.get(step_key, {})
+        ack_state = ack.get("state", "")
+        if ack_state == "FAILED":
+            icon = "❌"
+            desc = "失败"
+        elif ack_state == "ACKED" or i < ctx.current_step:
+            icon = "✅"
+            desc = "已完成"
+        elif i == ctx.current_step:
+            icon = "🔄"
+            desc = "进行中"
+        elif ack_state in ("SENT", "DELIVERED", "IN_PROGRESS"):
+            icon = "🔄"
+            desc = "进行中"
+        else:
+            icon = "⏳"
+            desc = "待开始"
+        step_parts.append(f"  Step{i} {icon} {role_name} → {desc}")
+    if step_parts:
+        lines.append("  步骤:")
+        lines.extend(step_parts)
+    # R78 D2: ACK 状态逐 step 展示（缩略版）
+    ack_parts = []
+    for i in range(1, ctx.total_steps + 1):
+        step = f"step{i}"
+        ack = ctx.ack_states.get(step, {})
+        state = ack.get("state", "")
+        role = ack.get("role_name", "")
+        if state == "ACKED":
+            ack_parts.append(f"step{i} ✅{role}")
+        elif state == "PENDING":
+            ack_parts.append(f"step{i} ⏳{role}")
+        elif state == "FAILED":
+            ack_parts.append(f"step{i} ❌{role}")
+        elif state in ("SENT", "DELIVERED", "IN_PROGRESS", "ACKNOWLEDGED"):
+            ack_parts.append(f"step{i} 🔄{role}")
+        else:
+            ack_parts.append(f"step{i} ⬜")
+    lines.append(f"  ACK: {' | '.join(ack_parts)}")
     if ctx.blocked_reason:
         lines.append(f"  阻塞: {ctx.blocked_reason}")
     if ctx.role_agent_map:
@@ -2345,6 +2375,52 @@ async def _send_to_agent(target_agent_id: str, payload: dict) -> int:
     return sent
 
 
+# ── R106: Pipeline step auto-advance on completion message ─────────
+
+
+def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
+    """Parse 已完成 ✅ R{N} Step {N} and auto-advance pipeline context.
+
+    Returns:
+        (True, "round_name") on success, (False, reason) on skip.
+    """
+    m = re.match(r"已完成 ✅ R(\d+) Step (\d+)", content)
+    if not m:
+        return False, "no match"
+    round_name = f"R{m.group(1)}"
+    completed_step = int(m.group(2))
+    try:
+        mgr = _ensure_pipeline_manager()
+        ctx = mgr.get(round_name)
+        if not ctx:
+            logger.info("[R106] 管线 %s 无上下文，跳过自动推进", round_name)
+            return False, "no context"
+        old_step = ctx.current_step
+        # Only advance if completed_step matches current_step
+        if completed_step == old_step:
+            asyncio.ensure_future(mgr.advance_step(round_name))
+            logger.info(
+                "[R106] %s Step %d → %d (auto-advance from completion)",
+                round_name, old_step, old_step + 1,
+            )
+            return True, round_name
+        elif completed_step < old_step:
+            logger.info(
+                "[R106] %s Step %d already past completed Step %d (skip)",
+                round_name, old_step, completed_step,
+            )
+            return False, "already past"
+        else:
+            logger.info(
+                "[R106] %s Step %d > current %d (gap, skip)",
+                round_name, completed_step, old_step,
+            )
+            return False, "future step"
+    except Exception as e:
+        logger.warning("[R106] 自动推进异常: %s", e)
+        return False, f"error: {e}"
+
+
 async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
     """R87: 处理发往 _inbox:server 的 bot 回复中继.
 
@@ -2471,6 +2547,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             },
         )
         logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
+        # ═══ R106: 自动推进管线 step ═══
+        _try_advance_pipeline(content, agent_id)
         return True
 
     # ═══ 规则 3: 退回 🔄 ═══
@@ -2673,6 +2751,8 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             },
         )
         logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
+        # ═══ R106: 自动推进管线 step ═══
+        _try_advance_pipeline(content, agent_id)
         return True
 
     # ═══ 规则 3: 退回 🔄 ═══
