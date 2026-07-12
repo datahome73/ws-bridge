@@ -649,6 +649,34 @@ async def handle_api_auth_me(request: web.Request) -> web.Response:
 
 
 
+# ── R104: Workspace list API for web service ─────────────────────────
+
+
+async def handle_api_workspaces(request: web.Request) -> web.Response:
+    """GET /api/workspaces — return all workspaces (same shape as WSS core)."""
+    token = request.query.get("token", "")
+    if not validate_token(token):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    workspaces = []
+    for w in ws_mod.get_all_workspaces():
+        workspaces.append({
+            "id": w.id,
+            "name": w.name,
+            "owner_id": w.owner_id[:16] if w.owner_id else "",
+            "owner_name": w.owner_name,
+            "state": w.state.value,
+            "member_count": len(w.members),
+            "ack_count": 0,
+            "created_at": w.created_at,
+            "last_active_at": w.last_active_at,
+            "closed_at": w.closed_at,
+            "pipeline_round": w.pipeline_round,
+            "roles": w.roles,
+        })
+    workspaces.sort(key=lambda x: x["last_active_at"], reverse=True)
+    return web.json_response({"workspaces": workspaces, "count": len(workspaces)})
+
+
 # ── Routes registration ──────────────────────────────────────────
 
 
@@ -675,3 +703,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/chat/inbox", handle_api_inbox)
     # R76 B: archive full channel history
     app.router.add_get("/api/chat/archive", handle_api_archive)
+    # R104: workspace list
+    app.router.add_get("/api/workspaces", handle_api_workspaces)
