@@ -423,39 +423,66 @@ def _get_bot_status() -> dict:
 
 ### 3.8 Web 前端减法
 
-#### 去掉 `_admin` 频道
+#### 当前状态确认
 
-`web-ui/templates.py` 中：
+经过前面轮次的简化，Web 当前已是简洁状态：
+- ✅ **无绑定码** — `BIND_TEMPLATE` 是残留代码（`web_viewer.py` 的 `handle_chat()` 已直接返回 `CHAT_TEMPLATE`），实际界面不再使用
+- ✅ **纯 GitHub OAuth 登录** — 是唯一认证方式
+- ✅ **收件箱 Tab** — 已实现
 
-- `CHAT_TEMPLATE` 的频道 Tab 列表不再包含 `_admin` 频道
-- 前端 JS 不再请求 `channel=_admin` 的数据
-- 如果 Tab 列表是动态从 `/api/channels` 获取的，在 `handle_api_channels()` 中过滤掉 `_admin` 和 `_inbox:server` 等系统通道
-
-#### 去掉绑定码页面
-
-- `BIND_TEMPLATE` 可以简化或完全移除——仅保留 GitHub OAuth 登录按钮
-- Web 服务启动时不再需要绑定码机制
-
-#### 去掉 Workspace 管理
-
-- 前端不再展示 Workspace 面板（列表、创建、管理等）
-- `handle_api_workspaces()` 可以删除（或保留但简化）
-
-#### 简化后的 Web 页面结构
+当前 Tab 结构（`server/templates.py`）：
 
 ```
-首页 (/)
-  └── GitHub Login Button
+📬 收件箱  |  🔧 管理员  |  🗂️ 历史
+```
+
+#### R109 减法目标
+
+| 去掉 | 原因 | 所在文件 |
+|:-----|:------|:---------|
+| ❌ `🔧 管理员` Tab | 自动化管线后无意义 | `templates.py:137` — `tab2` |
+| ❌ 📋 工作室列表按钮/面板 | Web 不再管理 workspace | `templates.py:110` — `wsListBtn` |
+| ❌ 活跃工作室视图 | 只留历史归档查看 | `templates.py:504` — `activeWs` 相关渲染 |
+| ❌ 大厅引用 | 已不再需要 | `templates.py:276` — 清理 |
+| ❌ `BIND_TEMPLATE` | 残留代码，不再使用 | `templates.py:4` — 删除整个常量 |
+| ❌ `handle_api_bind` / `handle_api_check` | 残留路由 | `web_viewer.py:206,213` |
+| ❌ `handle_api_approve_web` | 残留 | `web_viewer.py:327` |
+
+#### 减法后的 Web 结构
+
+```
+首页 (/) → GitHub OAuth 登录按钮 → 跳转至聊天页
 
 聊天页 (/chat)
-  ├── Tab 频道列表
-  │   ├── 🌐 大厅 (lobby)
-  │   ├── 📋 活跃工作室 (ws:xxx)
-  │   ├── 📥 收件箱 (inbox)
-  │   └── 🗂️ 已归档工作室
-  ├── 消息列表（只读）
-  ├── 搜索框
-  └── 设置/登出按钮
+  ├── 📬 收件箱       ← 默认 Tab，显示 inbox 消息
+  ├── 🗂️ 历史        ← 选择已归档工作室查看历史
+  ├── 搜索框          ← 搜索当前频道消息
+  └── 登出按钮
+```
+
+```javascript
+// 减法后的 TAB_STATE
+const TAB_STATE = {
+  tab1: { id: 'tab1', channel: '__inbox__', label: '📬 收件箱', permanent: true },
+  tab3: { id: 'tab3', channel: null,         label: '🗂️ 历史',  permanent: true },
+};
+```
+
+```python
+# 减法后的路由（web-ui/handlers.py 将精简为）
+setup_routes(app):
+    GET  /                 → GitHub 登录页
+    GET  /chat             → 聊天页面
+    GET  /api/chat         → 消息查询（只读）
+    GET  /api/channels     → 频道列表
+    GET  /api/chat/inbox   → 收件箱聚合
+    GET  /api/chat/archive → 归档历史查询
+    GET  /api/chat/search  → 消息搜索
+    GET  /api/version      → 版本号
+    GET  /auth/github/login    → GitHub OAuth
+    GET  /auth/github/callback → OAuth 回调
+    GET  /api/auth/me     → 当前用户状态
+    POST /api/logout       → 登出
 ```
 
 ---
@@ -572,9 +599,11 @@ command=python3 -u -m web-ui
 
 | # | 验收项 | 方法 |
 |:-:|:-------|:------|
-| 16 | 前端无 `_admin` 频道 | 聊天页 Tab 列表不包含 `_admin` |
-| 17 | 前端无绑定码页面 | 首页只有 GitHub 登录按钮，无绑定码输入 |
-| 18 | 前端无 Workspace 面板 | 消息列表上方无 workspace 管理入口 |
+| 16 | 前端只有两个 Tab：收件箱 + 历史 | 页面 Tab 区域无 `🔧 管理员`、无 `🌐 大厅` |
+| 17 | 前端无绑定码 | 首页仅 GitHub 登录按钮，无绑定码输入框 |
+| 18 | 前端无工作室列表按钮/面板 | 页面右上角无 📋 按钮，无活跃/历史工作室列表 |
+| 19 | `BIND_TEMPLATE` 已删除 | `grep 'BIND_TEMPLATE' web-ui/` → 0 |
+| 20 | `handle_api_bind` / `handle_api_check` 已删除 | 路由列表无 `/api/bind` `/api/check` |
 
 ### 5.4 解耦验证
 
