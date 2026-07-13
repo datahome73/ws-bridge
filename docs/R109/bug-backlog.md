@@ -31,6 +31,31 @@
 |:-:|:-------|:-----|:---------|
 | 6 | **Web UI bot 列表排版** | 8 个 bot 平铺展示，手机端（576px）列表挤占聊天消息空间。改为折叠式/底部 Tab/横向滚动/仅显示在线 | R109 核心问题解决后 |
 
+## 测试失败项（R109 Step 5 泰虾报告，待修复）
+
+### B — Config 精简 (❌ 5/7)
+| # | 失败项 | 详情 |
+|:-:|:-------|:-----|
+| B2 | `HTTP_PORT` 死代码未删 | `common/config.py` 中无引用 |
+| B3 | `APP_ID` 死代码未删 | 同上 |
+| B6 | `AUTO_DISPATCH_ENABLED` 缺失 | `main.py L2470` 引用但 config 无此属性 → AttributeError |
+
+### C — 前端减法 (❌ 0/5)
+| # | 失败项 | 详情 |
+|:-:|:-------|:-----|
+| C1 | `BIND_TEMPLATE` 未删 | `web_ui/templates.py L4` 仍存在 |
+| C2 | 管理员 Tab 未删 | `TAB_STATE` 仍有 3 个 Tab |
+| C3 | 工作区按钮 (`wsListBtn`) 未删 | 前端仍在 |
+| C4 | 绑定码 handler 未删 | `handle_api_bind/check/approve_web` |
+| C5 | 绑定码路由未删 | 3 条路由仍注册 |
+
+### E — Bot 状态文件传递 (❌ 0/3)
+| # | 失败项 | 详情 |
+|:-:|:-------|:-----|
+| E1 | `ws_server` 未写 `_bot_status.json` | 无任何文件写入逻辑 |
+| E2 | `web_ui` 未读取 `_bot_status.json` | 仍在 HTTP 轮询 |
+| E3 | HTTP 轮询未移除 | `web_ui/main.py:29` 仍用 HTTP |
+
 ## 排查线索
 
 - Bug 4（L2 断连）可能与 pipeline manager 初始化异常有关，`_ensure_pipeline_manager()` 或 `PipelineContextManager(data_dir=...)` 可能因文件权限/路径问题崩溃
