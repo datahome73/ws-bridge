@@ -3,6 +3,7 @@
     "agent_id": "arch-bot",
     "display_name": "小开",
     "role": "architect",
+    "pipeline_roles": ["arch"],
     "skills": [
       {"id": "write-tech-plan", "description": "编写技术方案"},
       {"id": "design-architecture", "description": "架构设计"}
@@ -14,6 +15,7 @@
     "agent_id": "dev-bot",
     "display_name": "爱泰",
     "role": "developer",
+    "pipeline_roles": ["dev"],
     "skills": [
       {"id": "implement-code", "description": "编码实现"},
       {"id": "fix-bugs", "description": "修复缺陷"}
@@ -25,6 +27,7 @@
     "agent_id": "review-bot",
     "display_name": "小周",
     "role": "reviewer",
+    "pipeline_roles": ["review"],
     "skills": [
       {"id": "code-review", "description": "代码审查"},
       {"id": "quality-check", "description": "质量检查"}
@@ -36,6 +39,7 @@
     "agent_id": "qa-bot",
     "display_name": "泰虾",
     "role": "qa",
+    "pipeline_roles": ["qa"],
     "skills": [
       {"id": "test-automation", "description": "自动化测试"},
       {"id": "deploy-dev", "description": "Dev 部署"}
@@ -47,6 +51,7 @@
     "agent_id": "pm-bot",
     "display_name": "小谷",
     "role": "product-manager",
+    "pipeline_roles": ["pm"],
     "skills": [
       {"id": "write-requirements", "description": "撰写需求文档"},
       {"id": "review-requirements", "description": "评审需求"}
@@ -58,6 +63,7 @@
     "agent_id": "admin-bot",
     "display_name": "小爱",
     "role": "admin",
+    "pipeline_roles": ["operations"],
     "skills": [
       {"id": "manage-platform", "description": "全平台管理"},
       {"id": "merge-deploy", "description": "合并部署"}
