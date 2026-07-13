@@ -25,6 +25,12 @@
 
 ---
 
+## 后续优化（非 bug）
+
+| # | 优化项 | 描述 | 触发条件 |
+|:-:|:-------|:-----|:---------|
+| 6 | **Web UI bot 列表排版** | 8 个 bot 平铺展示，手机端（576px）列表挤占聊天消息空间。改为折叠式/底部 Tab/横向滚动/仅显示在线 | R109 核心问题解决后 |
+
 ## 排查线索
 
 - Bug 4（L2 断连）可能与 pipeline manager 初始化异常有关，`_ensure_pipeline_manager()` 或 `PipelineContextManager(data_dir=...)` 可能因文件权限/路径问题崩溃
