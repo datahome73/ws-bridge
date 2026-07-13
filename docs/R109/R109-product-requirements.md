@@ -142,6 +142,17 @@ WSS 配置回归精简，去掉历史残留：
 - ❌ **`PIPELINE_ARCH_FROM_NAME`** — 自动化管线不需要特殊触发名
 - ❌ **`DISPATCH_SENDER_ID` / `PIPELINE_PM_AGENT_ID`** — 合并为 `PM_AGENT_ID`
 
+#### 数据层修复：管线消息入库
+
+自动派活后 inbox 消息没有落库，Web 端收件箱看不到管线消息。根因是 `_auto_dispatch()` 和 `_handle_server_relay()` 的 to_agent 转发路径直接调 `_send_to_agent()`，缺了 `save_message()`。
+
+**修复点：**
+
+| 位置 | 文件 | 行号区间 | 修复 |
+|:-----|:------|:---------|:------|
+| `_auto_dispatch()` | `main.py` | 2511-2520 | payload 构造后、`_send_to_agent()` 前，调 `ms.save_message(channel=f"_inbox:{target_agent_id}")` |
+| `_handle_server_relay()` to_agent 分支 | `main.py` | 2588-2596 | `relay_payload` 发送前，调 `ms.save_message(channel=f"_inbox:{to_agent}")` |
+
 ### 2.3 目标清单
 
 | # | 目标 | 衡量标准 |
@@ -666,10 +677,18 @@ command=python3 -u -m web-ui
 
 | # | 验收项 | 方法 |
 |:-:|:-------|:------|
-| 19 | 停 Web → bot 正常 | `kill web-ui` → bot 收发 inbox 正常 |
-| 20 | 停 WSS → Web 显示历史 | `kill ws-server` → Web 端显示已有数据 |
-| 21 | Supervisor 双进程 | `supervisorctl status` → wss RUNNING, web RUNNING |
-| 22 | Docker 构建 | `docker build -t ws-bridge:r109 .` → 无错误 |
+| 21 | 停 Web → bot 正常 | `kill web-ui` → bot 收发 inbox 正常 |
+| 22 | 停 WSS → Web 显示历史 | `kill ws-server` → Web 端显示已有数据 |
+| 23 | Supervisor 双进程 | `supervisorctl status` → wss RUNNING, web RUNNING |
+| 24 | Docker 构建 | `docker build -t ws-bridge:r109 .` → 无错误 |
+
+### 5.5 数据层验收
+
+| # | 验收项 | 方法 |
+|:-:|:-------|:------|
+| 25 | `_auto_dispatch` 派活消息落库 | 派活后查 DB：`SELECT * FROM messages WHERE channel LIKE '_inbox:%'` → 有数据 |
+| 26 | `_handle_server_relay` 转发消息落库 | Bot 回复 `_inbox:server` → 查 DB：该条消息在 `_inbox:<target>` 下有记录 |
+| 27 | Web inbox Tab 可见管线消息 | 打开 Web 收件箱 Tab → 显示管线派活/完成通知 |
 
 ---
 
