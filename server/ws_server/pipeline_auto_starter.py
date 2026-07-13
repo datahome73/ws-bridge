@@ -149,3 +149,60 @@ async def scan_and_start(
     if count:
         logger.info("Auto-started %d pipeline(s) from WORK_PLAN files", count)
     return count
+
+
+class PipelineAutoStarter:
+    """管线自动启动器 — 服务器启动时扫描 WORK_PLAN.md 并创建 PipelineContext。
+
+    零后台循环（用户已禁用自动特性 2026-07-13）。
+    生命周期由 aiohttp app.on_startup / on_shutdown 管理。
+    """
+
+    def __init__(
+        self,
+        repo_path: str = "/opt/data/ws-bridge",
+        data_dir: str = "./data",
+        pm_agent_id: str = "",
+        context_mgr: PipelineContextManager | None = None,
+        dispatch_fn=None,
+    ):
+        self.repo_path = repo_path
+        self.data_dir = data_dir
+        self.pm_agent_id = pm_agent_id
+        self._ctx_mgr = context_mgr
+        self._dispatch = dispatch_fn
+        self._running = False
+
+    @property
+    def ctx_mgr(self) -> PipelineContextManager | None:
+        return self._ctx_mgr
+
+    @ctx_mgr.setter
+    def ctx_mgr(self, mgr: PipelineContextManager) -> None:
+        self._ctx_mgr = mgr
+
+    async def start(self) -> None:
+        """首次启动：扫描并创建 WORK_PLAN 管线。
+
+        不循环。启动后即静默。
+        """
+        if self._running:
+            logger.debug("PipelineAutoStarter already running")
+            return
+        self._running = True
+        mgr = self._ctx_mgr or PipelineContextManager(data_dir=Path(self.data_dir))
+        count = await scan_and_start(
+            mgr,
+            self.repo_path,
+            pm_inbox_id=self.pm_agent_id,
+            created_by="_system",
+        )
+        logger.info(
+            "PipelineAutoStarter: %d pipeline(s) auto-started, entering standby",
+            count,
+        )
+
+    def stop(self) -> None:
+        """停止（清理标记）。"""
+        self._running = False
+        logger.info("PipelineAutoStarter stopped")
