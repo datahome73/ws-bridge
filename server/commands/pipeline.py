@@ -15,6 +15,11 @@ from .. import pipeline_sync as pps
 from .. import agent_card as ac_mod
 from ..pipeline_context import PipelineContext, PipelineStatus, PipelineTaskKind, PipelineContextManager
 
+# Lazy import from main to avoid circular dependency
+def _get_pipeline_manager() -> PipelineContextManager:
+    from ..main import _ensure_pipeline_manager
+    return _ensure_pipeline_manager()
+
 async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
     """处理 !pipeline 子命令。
 
@@ -26,7 +31,7 @@ async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
     rest = raw[len("!pipeline "):] if raw.startswith("!pipeline ") else raw
     parts = rest.strip().split(maxsplit=2)
     subcmd = parts[0] if len(parts) >= 1 else ""
-    mgr = _ensure_pipeline_manager()
+    mgr = _get_pipeline_manager()
 
     if subcmd == "create":
         # R78 D3: !pipeline create R78 dev [--steps 6] [--ws ws_id] [--pm-inbox inbox_id]
@@ -171,7 +176,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     round_name = positional[0].upper()
 
     # 防重复
-    mgr = _ensure_pipeline_manager()
+    mgr = _get_pipeline_manager()
     existing = mgr.get_context(round_name)
     if existing and isinstance(existing, dict):
         if existing.get("status") in ("running",):
@@ -298,7 +303,7 @@ async def _cmd_pipeline_stop(sender_id: str, params: dict) -> str:
     round_name = positional[0].upper()
 
     # 1. 从 PipelineContextManager 查找
-    mgr = _ensure_pipeline_manager()
+    mgr = _get_pipeline_manager()
     ctx = mgr.get(round_name)
 
     # 2. 从 state._PIPELINE_STATE 查找（旧系统）
@@ -655,7 +660,7 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         )
         if not val_passed:
             # Block the pipeline
-            mgr = _ensure_pipeline_manager()
+            mgr = _get_pipeline_manager()
             try:
                 await mgr.transition_to(
                     round_name, PipelineStatus.BLOCKED,
@@ -1062,7 +1067,7 @@ async def _cmd_step_verify(sender_id: str, params: dict) -> str:
 
     if val_passed:
         # 恢复管线运行
-        mgr = _ensure_pipeline_manager()
+        mgr = _get_pipeline_manager()
         try:
             await mgr.transition_to(round_name, PipelineStatus.RUNNING)
         except Exception:
@@ -1704,7 +1709,7 @@ def _get_agents_by_role(role: str,
     """
     # R78 A4: 优先走 Manager 查询
     try:
-        mgr = _ensure_pipeline_manager()
+        mgr = _get_pipeline_manager()
         agents = mgr.get_role_agents(role)
     except Exception:
         agents = []
@@ -1896,7 +1901,7 @@ def _get_step_config(round_name: str) -> dict[str, dict]:
     """
     # R78 C3: 优先走 Manager
     try:
-        mgr = _ensure_pipeline_manager()
+        mgr = _get_pipeline_manager()
         ctx_steps = mgr.get_step_config(round_name)
         if ctx_steps:
             return ctx_steps
