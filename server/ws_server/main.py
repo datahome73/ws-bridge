@@ -2519,6 +2519,21 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
         "ts": time.time(),
     }
 
+    # ── R109 修复: 派活消息落库 ──
+    try:
+        ms.save_message(
+            msg_id=payload["id"],
+            msg_type="broadcast",
+            from_agent=payload["agent_id"],
+            from_name=payload["from_name"],
+            content=content,
+            ts=payload["ts"],
+            data_dir=config.DATA_DIR,
+            channel=f"_inbox:{target_agent_id}",
+        )
+    except Exception:
+        pass  # 入库失败不阻塞派活
+
     sent = await _send_to_agent(target_agent_id, payload)
     return sent > 0
 
@@ -2593,6 +2608,21 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
             "content": msg.get("content", "").strip(),
             "ts": time.time(),
         }
+        # ── R109 修复: 中继转发消息落库 ──
+        try:
+            import uuid as _uuid
+            ms.save_message(
+                msg_id=str(_uuid.uuid4()),
+                msg_type="broadcast",
+                from_agent=state.SYSTEM_AGENT_ID,
+                from_name="系统",
+                content=relay_payload["content"],
+                ts=relay_payload["ts"],
+                data_dir=config.DATA_DIR,
+                channel=relay_payload["channel"],
+            )
+        except Exception:
+            pass
         await _send_to_agent(to_agent, relay_payload)
         logger.info("[Dispatch] %s → %s: %s...",
                      agent_id[:12], to_agent[:16],
