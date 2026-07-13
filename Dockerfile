@@ -26,4 +26,4 @@ COPY supervisord.conf /etc/supervisor/conf.d/ws-bridge.conf
 
 EXPOSE 8765 8766
 
-CMD [supervisord, -c, /etc/supervisor/conf.d/ws-bridge.conf]
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/ws-bridge.conf"]
