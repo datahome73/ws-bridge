@@ -1,0 +1,7 @@
+{
+  "step2": "🏗️ R108 Step 2 — 技术方案：/api/version 端点\n\n{requirements_url}\n\n需求概述：在 Web 服务 8766 端口新增 GET /api/version 端点。\n\n评估项：\n1. setup_routes() 中注册路由的位置\n2. handler 插入位置\n3. 版本号来源（TODO.md 首行 vs 硬编码）\n4. 是否需要缓存\n\n产出 docs/R108/r108-step2-tech-plan.md，然后回复「已完成 ✅ R108 Step 2」到 _inbox:server。",
+  "step3": "💻 R108 Step 3 — 编码：/api/version 端点\n\n{tech_plan_url}\n\n技术要求：\n1. 在 server/web_viewer.py 新增 async def handle_api_version(request)\n2. 在 setup_routes() 注册 app.router.add_get(\"/api/version\", handle_api_version)\n3. 从 docs/TODO.md 第 3 行读取版本号\n4. 返回 JSON: {\"version\": \"v2.71\", \"name\": \"ws-bridge\", \"build\": \"R108\"}\n\n产出后推 dev，回复「已完成 ✅ R108 Step 3」到 _inbox:server。",
+  "step4": "🔍 R108 Step 4 — 审查：/api/version\n\n{dev_commit_url}\n\n审查 server/web_viewer.py 的 diff。\n\n重点关注：\n- 路径注册正确\n- JSON 响应格式\n- async def handler\n- 版本号解析正确\n\n审查后回复「已完成 ✅ R108 Step 4」到 _inbox:server。",
+  "step5": "🧪 R108 Step 5 — 测试：/api/version\n\n{review_result}\n\n验证 6 项验收标准：\n1. GET /api/version → 200\n2. version 字段存在且有值\n3. name = \"ws-bridge\"\n4. build = \"R108\"\n5. POST /api/version → 405\n6. 存量 API 不受影响\n\n产出 docs/R108/R108-test-report.md，回复「已完成 ✅ R108 Step 5」到 _inbox:server。",
+  "step6": "🚀 R108 Step 6 — 部署：/api/version\n\n{qa_report_url}\n\n操作：\n1. PR: dev → main\n2. 重建 Docker 镜像 ws-bridge:r108\n3. 重启 Supervisor 双进程\n4. curl https://wsim.datahome73.cloud/api/version 验证\n\n完成后回复「已完成 ✅ R108 Step 6」到 _inbox:server。"
+}

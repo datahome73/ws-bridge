@@ -391,6 +391,19 @@ async def _handle_health(request: web.Request) -> web.Response:
     return web.Response(text="ok\n")
 
 
+# ── R108: /api/version ─────────────────────────────────────────────────
+
+
+async def handle_api_version(request: web.Request) -> web.Response:
+    """GET /api/version — return ws-bridge version info."""
+    version = "v2.71"
+    return web.json_response({
+        "version": version,
+        "name": "ws-bridge",
+        "build": "R108",
+    })
+
+
 # ── R76 A: Inbox aggregation API ──────────────────────────────────────
 
 
@@ -689,6 +702,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/api/approve_web", handle_api_approve_web)
     app.router.add_get("/api/channels", handle_api_channels)
     app.router.add_get("/health", _handle_health)
+    # R108: version
+    app.router.add_get("/api/version", handle_api_version)
     # R8: logout
     app.router.add_post("/api/logout", handle_api_logout)
     # R8: search
