@@ -427,6 +427,133 @@ class PipelineContextManager:
                 return ctx.role_agent_map[role]
         return getattr(self, "_global_role_map", {}).get(role, [])
 
+    # ── R109: WORK_PLAN.md 解析与自动创建 ──
+
+    async def from_work_plan(
+        self,
+        work_plan_path: Path,
+        workspace_dir: Path | None = None,
+        workspace_id: str = "",
+        pm_inbox_id: str = "",
+        created_by: str = "",
+    ) -> PipelineContext:
+        """从 WORK_PLAN.md 文件解析 frontmatter 创建 PipelineContext。
+
+        WORK_PLAN.md 格式（markdown > 引用行）:
+            > **轮次：** R109
+            > **auto_chain:** true
+            > **角色映射：** pm=小谷, arch=小开, ...
+
+        Returns:
+            PipelineContext 实例（已持久化）。
+        """
+        if not work_plan_path.exists():
+            raise FileNotFoundError(f"WORK_PLAN not found: {work_plan_path}")
+
+        text = work_plan_path.read_text(encoding="utf-8")
+        lines = text.split("\n")
+
+        # 解析 frontmatter（> **key:** value 格式）
+        meta: dict[str, str] = {}
+        in_frontmatter = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("> **"):
+                in_frontmatter = True
+                # Extract key and value from "> **key:** value"
+                rest = stripped[2:].strip()  # remove "> "
+                if "**" in rest and ":** " in rest:
+                    parts = rest.split(":** ", 1)
+                    key = parts[0].strip("*").strip().lower()
+                    val = parts[1].strip()
+                    meta[key] = val
+            elif in_frontmatter and not stripped.startswith(">"):
+                in_frontmatter = False  # reached non-frontmatter content
+
+        round_name = meta.get("轮次", meta.get("round", "")).upper().strip()
+        if not round_name:
+            raise ValueError("WORK_PLAN missing 轮次/round field in frontmatter")
+
+        # 解析步骤（Step 1, Step 2, ...）
+        step_order: list[str] = []
+        step_titles: dict[str, str] = {}
+        step_roles: dict[str, str] = {
+            "step1": "pm",
+            "step2": "arch",
+            "step3": "dev",
+            "step4": "review",
+            "step5": "qa",
+            "step6": "operations",
+        }
+        import re as _re
+        for line in lines:
+            m = _re.match(r"^###\s+(Step\s+\d+)\s*[—–-]?\s*(.*)", line.strip())
+            if m:
+                step_key = "step" + m.group(1).lower().replace("step ", "")
+                title = m.group(2).strip()
+                if step_key not in step_order:
+                    step_order.append(step_key)
+                step_titles[step_key] = title
+
+        total_steps = max(
+            int(k.replace("step", "")) for k in (step_order or ["step6"])
+        )
+
+        # 解析角色映射
+        raw_role_map = meta.get("角色映射", meta.get("roles", meta.get("role mapping", "")))
+        role_agent_map: dict[str, list[str]] = {}
+        if raw_role_map:
+            for pair in raw_role_map.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    role, name = pair.split("=", 1)
+                    role_agent_map[role.strip()] = [name.strip()]
+
+        # auto_chain 标记
+        auto_chain = meta.get("auto_chain", "").strip().lower() in ("true", "yes", "1")
+
+        wd = workspace_dir or work_plan_path.parent.parent.parent
+        req_url = meta.get("说明", "").strip()
+        now = time.time()
+
+        ctx = PipelineContext(
+            round_name=round_name,
+            task_kind=PipelineTaskKind.DEV,
+            workspace_dir=wd,
+            task_dir=wd / "pipeline_tasks" / round_name,
+            workspace_id=workspace_id or round_name.lower(),
+            pm_inbox_id=pm_inbox_id,
+            status=PipelineStatus.INIT,
+            current_phase="plan",
+            current_step=1,
+            total_steps=max(total_steps, len(step_order) or 6),
+            blocked_reason=None,
+            role_agent_map=role_agent_map,
+            agent_card_ids={},
+            last_output_sha="",
+            git_sync_branch="dev",
+            created_at=now,
+            updated_at=now,
+            created_by=created_by,
+            tags={
+                "work_plan_path": str(work_plan_path),
+                "auto_chain": str(auto_chain),
+            },
+            round_title=meta.get("说明", round_name)[:80],
+            references={"work_plan": str(work_plan_path)},
+        )
+        # 持久化
+        async with self._lock:
+            self._contexts[round_name] = ctx
+            self._save()
+        logger.info(
+            "Pipeline auto-created from WORK_PLAN: %s (%d steps, %d roles)",
+            round_name, ctx.total_steps, len(role_agent_map),
+        )
+        return ctx
+
     async def update_role_agent_map_round(
         self, round_name: str, role: str, agent_ids: list[str],
     ) -> bool:
