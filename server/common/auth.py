@@ -27,7 +27,7 @@ def is_workspace_admin(ws_id: str, agent_id: str) -> bool:
     Uses lazy import of workspace module to avoid import-time dependency.
     """
     try:
-        from server import workspace as ws_mod
+        from server.ws_server import workspace as ws_mod
         ws = ws_mod.get_workspace(ws_id)
         if not ws:
             return False
@@ -51,7 +51,7 @@ def set_workspace_admin(ws_id: str, agent_id: str, by_agent: str) -> bool:
     """Global admin by_agent appoints agent_id as workspace admin."""
     if not is_global_admin(by_agent):
         return False
-    from server import workspace as ws_mod
+    from server.ws_server import workspace as ws_mod
     ws = ws_mod.get_workspace(ws_id)
     if not ws:
         return False
