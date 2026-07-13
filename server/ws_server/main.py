@@ -2535,6 +2535,9 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
         pass  # 入库失败不阻塞派活
 
     sent = await _send_to_agent(target_agent_id, payload)
+    logger.info("[R109] 自动派活 step%d → %s (%s): sent=%d",
+                step_num, target_agent_id,
+                next_step_info.get("agent_name", "?"), sent)
     return sent > 0
 
 

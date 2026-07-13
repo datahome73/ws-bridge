@@ -87,6 +87,7 @@ async def _handle_pipeline_command(sender_id: str, params: dict) -> str:
             ctx = mgr.get(round_name)
             if not ctx:
                 return f"❌ Pipeline {round_name} not found"
+            from ..main import _format_pipeline_context
             return _format_pipeline_context(ctx)
         active = mgr.get_all_active()
         if not active:
