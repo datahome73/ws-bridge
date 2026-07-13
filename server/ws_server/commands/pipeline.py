@@ -244,6 +244,14 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     role_map = mgr.get_global_role_map()
     if not role_map:
         role_map = dict(getattr(state, '_ROLE_AGENT_MAP', {}))
+    # ── Build display_name → WS agent_id lookup (R109 bridge) ──
+    from server.common import persistence
+    _name_to_ws_id: dict[str, str] = {}
+    for _aid, _rec in persistence.get_api_keys().items():
+        _dn = _rec.get("display_name", "")
+        if _dn:
+            _name_to_ws_id[_dn] = _aid
+
     for step in ctx.steps:
         role = step["role"]
         agents = role_map.get(role, [])
@@ -251,6 +259,11 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
             step["agent_id"] = agents[0]
             card = ac_mod.get_agent_card(agents[0])
             step["agent_name"] = card.get("display_name", agents[0][:12]) if card else agents[0][:12]
+            # R109: 通过 display_name 桥接卡 key → WS 连接 ID
+            if card:
+                _real_id = _name_to_ws_id.get(card.get("display_name", ""))
+                if _real_id:
+                    step["agent_id"] = _real_id
 
     # 持久化
     mgr.set_context(round_name, ctx)
