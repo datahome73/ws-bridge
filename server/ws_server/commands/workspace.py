@@ -1,8 +1,9 @@
 """R100: workspace domain commands — extracted from handler.py."""
 
-from .. import state, auth, command_utils
+from .. import state, command_utils
+from server.common import auth
 from .. import workspace as ws_mod
-from .. import config
+from server.common import config
 import time
 import uuid
 from .. import message_store as ms

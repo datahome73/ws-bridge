@@ -9,12 +9,12 @@ import uuid
 
 from aiohttp import web
 
-from .config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SENDER_ID  # R102: PM guard
+from server.common.config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SENDER_ID  # R102: PM guard
 from .main import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
 from .message_store import init_db, search_messages as _search_messages
-from .persistence import get_approved_users as _get_approved_users
+from server.common.persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
-from .persistence import (
+from server.common.persistence import (
     load_approved_users,
     load_web_sessions,
     load_api_keys,
@@ -98,7 +98,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
                 _channel = data.get("channel", "")
                 if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != f"{p.INBOX_CHANNEL_PREFIX}server":
-                    from . import auth as _auth
+                    from server.common import auth as _auth
                     _sender_level = _auth.get_level(agent_id)
                     if _sender_level < 4:
                         await ws.send_json({
@@ -270,7 +270,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             elif msg_type == p.MSG_ADMIN_REQUEST_APPROVED and agent_id:
                 from . import workspace as _ws_mod
-                from . import auth as _auth
+                from server.common import auth as _auth
                 users = (await _get_users())
                 if users.get(agent_id, {}).get("role") != "admin":
                     await ws.send_json({"type": "error", "error": "权限不足：仅全局管理员可审批"})
@@ -643,7 +643,7 @@ async def _broadcast_workspace_closing_aiohttp(ws_id: str):
 
 async def _get_users():
     """Lazy import to avoid circular dependency."""
-    from . import auth
+    from server.common import auth
     return auth.get_users()
 
 
@@ -652,10 +652,10 @@ async def _get_users():
 
 async def _api_status(request: web.Request) -> web.Response:
     """Return online/offline status for all approved agents."""
-    from .config import HIDDEN_AGENTS as _hidden
-    from .persistence import get_web_sessions as _gws  # noqa: F811
+    from server.common.config import HIDDEN_AGENTS as _hidden
+    from server.common.persistence import get_web_sessions as _gws  # noqa: F811
     users = _get_approved_users()
-    from .persistence import get_api_keys as _get_api_keys
+    from server.common.persistence import get_api_keys as _get_api_keys
     api_keys = _get_api_keys()
     now = time.time()
     agents_list = []

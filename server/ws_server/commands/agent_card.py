@@ -1,8 +1,9 @@
 """R100: agent_card domain commands — extracted from handler.py."""
 
-from .. import state, auth, command_utils
+from .. import state, command_utils
+from server.common import auth
 from .. import agent_card as ac_mod
-from .. import config
+from server.common import config
 from ..command_utils import _refresh_role_agent_map
 _card_watcher = None  # R100: module-level variable for _cmd_agent_card_watch
 

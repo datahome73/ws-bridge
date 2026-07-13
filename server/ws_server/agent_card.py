@@ -382,7 +382,7 @@ def register_from_agent(agent_id: str, msg: dict) -> dict:
 
     # ── R99: Agent Card 提交成功 → L2→L3 自动晋升 ──
     try:
-        from . import auth as _auth_mod
+        from server.common import auth as _auth_mod
         current_level = _auth_mod.get_level(agent_id)
         if current_level == 2:
             _auth_mod.set_level(agent_id, 3)
