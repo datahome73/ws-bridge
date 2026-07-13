@@ -188,6 +188,9 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 获取发起者名称
     sender_name = auth.get_users().get(sender_id, {}).get("name", sender_id[:16])
 
+    # 确保角色映射已加载
+    command_utils._refresh_role_agent_map()
+
     # 创建 R97 PipelineContext（dict 格式，轻量）
     from ..pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
     ctx = {
@@ -213,6 +216,19 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
         "work_plan_url": "",
         "references": {},
     }
+
+    # ── 从角色映射填充 agent_id（先查 Manager，后备 state）──
+    role_map = mgr.get_global_role_map()
+    if not role_map:
+        role_map = dict(getattr(state, '_ROLE_AGENT_MAP', {}))
+    for k, step in ctx["steps"].items():
+        role = step["role"]
+        agents = role_map.get(role, [])
+        if agents:
+            step["agent_id"] = agents[0]
+            step["agent_name"] = ac_mod.get_agent_card(
+                agents[0]
+            ).get("display_name", agents[0][:12])
 
     # 持久化
     mgr.set_context(round_name, ctx)
