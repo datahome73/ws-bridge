@@ -9,6 +9,7 @@ import asyncio
 import enum
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -643,7 +644,75 @@ class PipelineContextManager:
             self._save()
             return True
 
-    # ── R78 D1: restore from history ──
+    # ── R110: from_work_plan — 从 WORK_PLAN.md 创建上下文 ──
+
+    async def from_work_plan(
+        self,
+        round_name: str,
+        work_plan_path: str | Path,
+        repo_path: str,
+        pm_agent_id: str,
+        role_to_agent_ids: dict[str, list[str]],
+    ) -> PipelineContext:
+        """从 WORK_PLAN.md 创建 PipelineContext。
+
+        解析 frontmatter → 自动填充 round_title / steps / references / message_templates。
+        """
+        work_plan_path = Path(work_plan_path)
+        workspace_dir = Path(repo_path)
+
+        info = _parse_work_plan_frontmatter(str(work_plan_path))
+        templates = _generate_message_templates(round_name, str(work_plan_path), repo_path)
+        refs = _generate_references(round_name)
+        steps = _generate_steps(round_name)
+
+        # 角色映射（系统角色 → agent_id list）
+        role_display_map = info.get("role_display_map", {})
+        role_agent_map: dict[str, list[str]] = {}
+        for system_role, display_name in role_display_map.items():
+            agent_ids = role_to_agent_ids.get(system_role, [])
+            if not agent_ids:
+                agent_ids = _find_agent_ids_by_display_name(display_name)
+            role_agent_map[system_role] = agent_ids or []
+            if not agent_ids:
+                logger.warning(
+                    "[from_work_plan] %s: role '%s' (display='%s') has no agent",
+                    round_name, system_role, display_name,
+                )
+
+        async with self._lock:
+            if round_name in self._contexts:
+                raise ValueError(f"Pipeline {round_name} already exists")
+            now = time.time()
+            ctx = PipelineContext(
+                round_name=round_name,
+                task_kind=PipelineTaskKind.DEV,
+                workspace_dir=workspace_dir,
+                task_dir=workspace_dir / "pipeline_tasks" / round_name,
+                workspace_id=f"auto-{round_name.lower()}",
+                pm_inbox_id=f"_inbox:{pm_agent_id}",
+                status=PipelineStatus.INIT,
+                current_phase="plan",
+                current_step=1,
+                total_steps=6,
+                role_agent_map=role_agent_map,
+                created_at=now,
+                updated_at=now,
+                created_by="system:pipeline_auto_starter",
+                round_title=info.get("title", round_name),
+                references=refs,
+                message_templates=templates,
+            )
+            ctx.steps = steps
+            self._contexts[round_name] = ctx
+            self._save()
+            logger.info(
+                "PipelineContext %s created from work_plan: %s",
+                round_name, info.get("title", ""),
+            )
+            return ctx
+
+    # ── R110: from_work_plan ──
 
     async def restore_from_history(
         self, round_name: str,
@@ -722,3 +791,125 @@ class PipelineContextManager:
                 f.write(json.dumps(ctx.to_dict(), ensure_ascii=False) + "\n")
         except (OSError, PermissionError) as e:
             logger.warning("PipelineContext history append failed: %s", e)
+
+
+# ── R110: WORK_PLAN.md frontmatter 解析 ──────────────────────────────
+
+_ROLE_MAP_RE = re.compile(r"(\w+)=(\S+)")
+
+
+def _parse_work_plan_frontmatter(work_plan_path: str) -> dict:
+    """解析 WORK_PLAN.md frontmatter 返回结构化 dict。"""
+    head = Path(work_plan_path).read_text(encoding="utf-8")[:500]
+    result: dict = {}
+
+    # 轮次名
+    m = re.search(r"\*\*轮次：\*\*\s*(R\d+)", head)
+    if m:
+        result["round_name"] = m.group(1)
+
+    # auto_chain
+    m = re.search(r"\*\*auto_chain:\*\*\s*(true|false)", head, re.IGNORECASE)
+    if m:
+        result["auto_chain"] = m.group(1).lower() == "true"
+
+    # auto_start
+    m = re.search(r"\*\*auto_start:\*\*\s*(true|false)", head, re.IGNORECASE)
+    if m:
+        result["auto_start"] = m.group(1).lower() == "true"
+
+    # 说明/标题
+    m = re.search(r"\*\*说明：\*\*\s*(.+)", head)
+    if m:
+        result["title"] = m.group(1).strip()
+
+    # 角色映射字符串 → dict
+    m = re.search(r"\*\*角色映射：\*\*\s*(.+)", head)
+    if m:
+        raw = m.group(1)
+        role_map: dict[str, str] = {}
+        for rm in _ROLE_MAP_RE.finditer(raw):
+            role_map[rm.group(1)] = rm.group(2)
+        result["role_display_map"] = role_map
+
+    return result
+
+
+# ── R110: 消息模板自动生成 ─────────────────────────────────
+
+
+def _generate_message_templates(
+    round_name: str, work_plan_path: str, repo_path: str,
+) -> dict[str, str]:
+    """根据轮次名自动生成 6 步派活模板。"""
+    r = round_name.lower()
+    base = f"https://github.com/datahome73/ws-bridge/blob/main/docs/{round_name}"
+    req_url = f"{base}/{round_name}-product-requirements.md"
+    wp_url = f"{base}/WORK_PLAN.md"
+    tech_url = f"{base}/{r}-step2-tech-plan.md"
+
+    return {
+        "step1": (
+            f"📋 **{round_name} Step 1 — PM 审核**\n\n"
+            f"需求文档已就绪：\n{req_url}\n\n"
+            f"请审核后回复 ✅ 完成"
+        ),
+        "step2": (
+            f"🏗️ **{round_name} Step 2 — 技术方案**\n\n"
+            f"需求文档：{req_url}\n"
+            f"WORK_PLAN：{wp_url}\n\n"
+            f"请输出技术方案文档，推 dev 后回复 ✅ 完成"
+        ),
+        "step3": (
+            f"💻 **{round_name} Step 3 — 编码实现**\n\n"
+            f"技术方案：{tech_url}\n\n"
+            f"按方案实现，推 dev 后回复 ✅ 完成"
+        ),
+        "step4": (
+            f"🔍 **{round_name} Step 4 — 代码审查**\n\n"
+            f"审查 Step 3 改动。通过后回复 ✅ 完成"
+        ),
+        "step5": (
+            f"🧪 **{round_name} Step 5 — 测试验证**\n\n"
+            f"验证验收标准。全部通过后回复 ✅ 完成"
+        ),
+        "step6": (
+            f"🚀 **{round_name} Step 6 — 合并部署归档**\n\n"
+            f"PR dev→main，重建镜像，部署。完成后回复 ✅ 完成"
+        ),
+    }
+
+
+def _generate_references(round_name: str) -> dict:
+    """生成 references 字典。"""
+    base = f"https://github.com/datahome73/ws-bridge/blob/main/docs/{round_name}"
+    return {
+        "requirements_url": f"{base}/{round_name}-product-requirements.md",
+        "work_plan_url": f"{base}/WORK_PLAN.md",
+        "tech_plan_url": f"{base}/{round_name.lower()}-step2-tech-plan.md",
+    }
+
+
+def _generate_steps(round_name: str) -> list[dict]:
+    """生成默认的 6 步配置列表。"""
+    return [
+        {"name": "step1", "executor_role": "pm",          "title": "PM 审核"},
+        {"name": "step2", "executor_role": "arch",        "title": "技术方案"},
+        {"name": "step3", "executor_role": "dev",         "title": "编码实现"},
+        {"name": "step4", "executor_role": "review",      "title": "代码审查"},
+        {"name": "step5", "executor_role": "qa",          "title": "测试验证"},
+        {"name": "step6", "executor_role": "operations",  "title": "合并部署归档"},
+    ]
+
+
+def _find_agent_ids_by_display_name(display_name: str) -> list[str]:
+    """从 Agent Card 反向查找 display_name 对应的 agent_id 列表。"""
+    try:
+        from .agent_card import get_all_cards
+        found = []
+        for agent_id, info in get_all_cards().items():
+            if info.get("display_name") == display_name:
+                found.append(agent_id)
+        return found
+    except (ImportError, Exception):
+        return []
