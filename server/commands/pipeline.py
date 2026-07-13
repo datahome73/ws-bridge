@@ -183,7 +183,7 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     sender_name = auth.get_users().get(sender_id, {}).get("name", sender_id[:16])
 
     # 创建 R97 PipelineContext（dict 格式，轻量）
-    from .pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
+    from ..pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
     ctx = {
         "round_name": round_name,
         "status": "running",
