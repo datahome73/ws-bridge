@@ -2,7 +2,7 @@
 
 > **轮次：** R109
 > **日期：** 2026-07-13
-> **auto_chain:** false
+> **auto_chain:** true
 > **说明：** 将 server/ 拆分为 ws-server/（WSS 核心）+ web-ui/（HTTP 服务），两者零 import 依赖，只在 data/ 目录通过 SQLite/JSON 关联。web 做减法至仅收件箱+历史两个 Tab。WSS config 精简。
 > **角色映射：** pm=小谷, arch=小开, dev=爱泰, review=小周, qa=泰虾, ops=小爱
 
