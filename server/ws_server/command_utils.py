@@ -10,7 +10,7 @@ import time
 import uuid
 
 from . import state, workspace as ws_mod
-from server.common import auth
+from server.common import auth, config
 from . import message_store as ms
 
 
@@ -39,7 +39,7 @@ async def _broadcast_to_channel(channel: str, payload: dict) -> int:
             from_name="系统",
             content=payload.get("content", ""),
             ts=time.time(),
-            data_dir=__import__("server.config", fromlist=[""]).DATA_DIR,
+            data_dir=config.DATA_DIR,
             channel=channel,
         )
     except Exception:
@@ -66,7 +66,7 @@ async def _send_cmd_response(ws, sender_id: str, from_name: str, content: str, c
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
             from_agent=sender_id, from_name=from_name,
             content=content, ts=time.time(),
-            data_dir=__import__("server.config", fromlist=[""]).DATA_DIR, channel=channel,
+            data_dir=config.DATA_DIR, channel=channel,
         )
     except Exception:
         pass
