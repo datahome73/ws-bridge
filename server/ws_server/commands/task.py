@@ -1,9 +1,10 @@
 """R100: task domain commands — extracted from handler.py."""
 
-from .. import state, auth, command_utils
+from .. import state, command_utils
+from server.common import auth
 from .. import task_store as ts
 from .. import workspace as ws_mod
-from .. import config
+from server.common import config
 import asyncio
 import shared.protocol as p
 

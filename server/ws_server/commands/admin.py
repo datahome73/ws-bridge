@@ -1,6 +1,7 @@
 """R100: admin domain commands — extracted from handler.py."""
 
-from .. import state, auth, command_utils, persistence
+from .. import state, command_utils
+from server.common import auth, persistence
 import time
 from .. import workspace as ws_mod
 

@@ -16,7 +16,7 @@ import time
 import uuid
 
 from . import agent_card as ac_mod  # R67: unified Agent Card interface
-from . import auth, config, persistence
+from server.common import auth, config, persistence
 from . import state  # R100: shared state container
 from . import command_utils  # R100: command routing utilities
 from . import message_store as ms

@@ -6,7 +6,8 @@ import uuid
 import os
 
 from ..state import SYSTEM_AGENT_ID
-from .. import state, auth, command_utils, config
+from .. import state, command_utils
+from server.common import auth, config
 from .. import task_store as ts
 from .. import message_store as ms
 from .. import workspace as ws_mod
@@ -1888,7 +1889,7 @@ def _infer_artifact_url(step_name: str, round_name: str, step_config: dict | Non
 
 def _load_step_config() -> dict[str, dict]:
     """Load step map from config."""
-    from . import config as _r42cfg
+    from server.common import config as _r42cfg
     return _r42cfg.PIPELINE_STEP_MAP
 
 

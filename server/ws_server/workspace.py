@@ -18,7 +18,7 @@ import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge.workspace")
 
-from server.config import DATA_DIR
+from server.common.config import DATA_DIR
 WORKSPACES_FILE = "workspaces.json"
 
 
@@ -140,7 +140,7 @@ def get_pending_requests(ws_id: str | None = None) -> list[AdminRequest]:
 
 def list_workspace_admins(ws_id: str) -> list[dict]:
     """Get workspace admin list with member info."""
-    from . import auth
+    from server.common import auth
     users = auth.get_users()
     ws = get_workspace(ws_id)
     if not ws:

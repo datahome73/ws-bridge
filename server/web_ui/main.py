@@ -7,21 +7,21 @@ Reads from SQLite DB (shared DATA_DIR), serves HTML + JSON APIs.
 R102: Bot status cache — background poll from WSS core /api/status.
 """
 import asyncio
+import logging
 import os
 import time
 
 import aiohttp
 from aiohttp import web
 
-from .config import DATA_DIR, HOST, PORT as WSS_PORT
-from . import web_viewer
-from . import persistence
-from . import message_store as ms
+from server.common.config import DATA_DIR, HOST, PORT as WSS_PORT, HTTP_PORT
+from server.common import persistence
+from server.common import message_store as ms
+from server.web_ui import viewer
 
 MY_PORT = int(os.environ.get("WS_HTTP_PORT") or os.environ.get("PORT", "8766"))
 
 # ── R102: In-memory bot status cache ─────────────────────────────────
-# Background task polls WSS core's /api/status every N seconds.
 _BOT_STATUS_CACHE: dict = {"agents": [], "_last_update": 0}
 _BOT_POLL_INTERVAL = 10  # seconds
 
@@ -61,42 +61,50 @@ async def _api_status(request: web.Request) -> web.Response:
     })
 
 
-# ── Main ──────────────────────────────────────────────────────────
+async def _wait_for_wss_ready(max_wait=30):
+    """启动时等待 WS 进程的 /api/status 就绪。"""
+    url = f"http://127.0.0.1:{WSS_PORT}/api/status"
+    for i in range(max_wait):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=2) as resp:
+                    if resp.status == 200:
+                        return True
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    logger = logging.getLogger("ws-bridge.web")
+    logger.warning("WSS not ready after %ds — bot status cache will start empty", max_wait)
+    return False
 
 
 async def _run_app(app: web.Application) -> None:
-    """async runner: AppRunner + TCPSite, replacing web.run_app (which fails under supervisor)."""
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, HOST, MY_PORT)
     await site.start()
     print(f"WEB READY: http://{HOST}:{MY_PORT}/", flush=True)
-    # Block forever — supervisor handles restart on crash
     await asyncio.Event().wait()
 
 
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    persistence.load_web_sessions(DATA_DIR)
     persistence.load_api_keys(DATA_DIR)
     persistence.load_approved_users(DATA_DIR)
-    ms.init_db(DATA_DIR)
-
-    # Seed state._r72_users from api_keys so auth.get_agent_name() works
-    from . import state as _state
-    for aid, info in persistence.get_api_keys().items():
-        name = info.get("display_name") if isinstance(info, dict) else None
-        if name:
-            _state._r72_users[aid] = {"name": name}
+    viewer.load_web_sessions(DATA_DIR)
 
     app = web.Application()
-    web_viewer.setup_routes(app)
+    viewer.setup_routes(app)
 
     # R102: register /api/bot_status + start background poll
     app.router.add_get("/api/bot_status", _api_status)
     async def _start_poll(app):
         asyncio.ensure_future(_poll_bot_status_loop(app))
     app.on_startup.append(_start_poll)
+
+    async def _wait_wss(app):
+        await _wait_for_wss_ready()
+    app.on_startup.append(_wait_wss)
 
     asyncio.run(_run_app(app))
 

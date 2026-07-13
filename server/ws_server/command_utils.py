@@ -9,7 +9,8 @@ import json
 import time
 import uuid
 
-from . import state, auth, workspace as ws_mod
+from . import state, workspace as ws_mod
+from server.common import auth
 from . import message_store as ms
 
 

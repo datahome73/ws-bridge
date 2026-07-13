@@ -1,8 +1,15 @@
-"""Web viewer — chat log viewer + bind code auth + multi-tab channels."""
+"""Web viewer — chat log viewer + bind code auth + multi-tab channels.
 
+Adapted from server/web_viewer.py for web_ui/ package.
+Imports common services from server.common.* instead of local . imports.
+Workspace queries → HTTP poll to WS server /api/workspaces.
+"""
 import asyncio
 import json
 import logging
+import os
+import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,24 +19,84 @@ import uuid
 import aiohttp
 from aiohttp import web
 
-from . import auth, config, persistence, workspace as ws_mod
-from . import message_store as ms
-import secrets
-from .templates import BIND_TEMPLATE, CHAT_TEMPLATE
-import time as _time  # R76: explicit time import for archive state
+from server.common import auth, config, persistence
+from server.common import message_store as ms
+from server.web_ui.templates import BIND_TEMPLATE, CHAT_TEMPLATE
 
 logger = logging.getLogger("ws-bridge.web")
+
+# ── Web-ui specific persistence (sessions, bind codes) ────────────────
+_web_sessions: dict = {}
+_web_bind_codes: dict = {}
+_data_dir_lock = threading.Lock()
+_ARCHIVE_STATE_FILE = "_archive_state.json"
+
+
+def _load_json(path: Path) -> dict:
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_json_atomic(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.rename(path)
+
+
+def load_web_sessions(data_dir: Path) -> None:
+    global _web_sessions
+    _web_sessions = _load_json(data_dir / "_web_sessions.json")
+
+
+def save_web_sessions(data_dir: Path) -> None:
+    with _data_dir_lock:
+        _save_json_atomic(data_dir / "_web_sessions.json", _web_sessions)
+
+
+def get_web_sessions() -> dict:
+    with _data_dir_lock:
+        return dict(_web_sessions)
+
+
+def set_web_sessions(sessions: dict) -> None:
+    global _web_sessions
+    with _data_dir_lock:
+        _web_sessions = dict(sessions)
+
+
+def _load_web_bind_codes(data_dir: Path) -> None:
+    global _web_bind_codes
+    _web_bind_codes = _load_json(data_dir / "_web_bind_codes.json")
+
+
+def save_web_bind_codes(data_dir: Path) -> None:
+    with _data_dir_lock:
+        _save_json_atomic(data_dir / "_web_bind_codes.json", _web_bind_codes)
+
+
+def get_web_bind_codes() -> dict:
+    with _data_dir_lock:
+        return dict(_web_bind_codes)
+
+
+def set_web_bind_codes(codes: dict) -> None:
+    global _web_bind_codes
+    with _data_dir_lock:
+        _web_bind_codes = dict(codes)
+
 
 # ── In-memory chat log buffer (per channel) ────────────────────
 _chat_buffers: dict[str, list[dict]] = {"lobby": []}
 _MAX_BUFFER = 1000
 
 # ── Daily chat log file (per channel) ──────────────────────────
-
+_CHAT_LOG_DIR = config.DATA_DIR / "chat_logs"
 
 # ── R76: Archive state persistence ────────────────────────────────────
-
-_ARCHIVE_STATE_FILE = "_archive_state.json"
 
 
 def _load_archive_state() -> dict:
@@ -57,7 +124,7 @@ def _save_archive_state(state: dict) -> None:
 
 def set_archive_state(ws_id: str, ws_name: str, start_ts: float) -> None:
     """Record archive entry for a workspace. Called when last workspace closes."""
-    now = _time.time()
+    now = time.time()
     state = _load_archive_state()
     state["last_archive_ts"] = now
     state["archived_workspaces"].append({
@@ -79,28 +146,23 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
     """Append a chat message to channel-specific daily log file + buffer."""
     global _chat_buffers
     ict_now = datetime.now(timezone.utc) + timedelta(hours=7)
-    # 🔧 F-8: Use numeric ts (time.time()) for dedup consistency with DB path
-    # Keep human-readable format for log file line
     ts_human = ict_now.strftime("%H:%M:%S")
     ts = time.time()
     line = f"[{ts_human}] {sender_name}: {content}"
     safe_channel = channel.replace("/", "_").replace(":", "_")
 
-    # Write to per-channel daily log file
+    _CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     today = _today_str()
     try:
-        config.CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = config.CHAT_LOG_DIR / f"chat_{today}_{safe_channel}.log"
+        log_file = _CHAT_LOG_DIR / f"chat_{today}_{safe_channel}.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except OSError as e:
         logger.warning("Failed to write chat log: %s", e)
 
-    # Add to in-memory buffer
     if channel not in _chat_buffers:
         _chat_buffers[channel] = []
     entry = {"ts": ts, "sender": sender_name, "from_name": sender_name, "content": content}
-    # R84: WS 推送附带 inbox 的 to_name 字段
     if channel.startswith("_inbox:"):
         owner_id = persistence.resolve_inbox_owner(channel)
         if owner_id:
@@ -112,17 +174,7 @@ def write_chat_log(sender_name: str, content: str, channel: str = "lobby") -> No
 
 
 def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
-    """Read chat logs from channel-specific files, spanning multiple days.
-    
-    Args:
-        channel: Channel name (default "lobby").
-        days: Number of days to look back (default 1 = today only).
-              Specify 7 for a week's worth of logs.
-    
-    Returns:
-        List of message dicts, newest first.
-    """
-    # Try in-memory buffer first (always has latest)
+    """Read chat logs from channel-specific files, spanning multiple days."""
     if channel in _chat_buffers and _chat_buffers[channel]:
         result = list(_chat_buffers[channel])
     else:
@@ -130,15 +182,13 @@ def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
 
     safe_channel = channel.replace("/", "_").replace(":", "_")
     seen_entries = set()
-    # Dedup: mark buffer entries so we don't double-add from files
     for e in result:
         seen_entries.add((e["ts"], e["sender"], e["content"], "buffer"))
 
-    # Read from log files, going back 'days' days
     for offset in range(days):
         d = datetime.now(timezone.utc) + timedelta(hours=7) - timedelta(days=offset)
         day_str = d.strftime("%Y-%m-%d")
-        path = config.CHAT_LOG_DIR / f"chat_{day_str}_{safe_channel}.log"
+        path = _CHAT_LOG_DIR / f"chat_{day_str}_{safe_channel}.log"
         if not path.exists():
             continue
         try:
@@ -158,28 +208,40 @@ def read_channel_logs(channel: str = "lobby", days: int = 1) -> list[dict]:
                         result.append({"ts": ts, "sender": sender, "content": msg_content})
         except OSError:
             continue
-
-    # Return messages as collected (oldest-first from buffer + newest-first from file)
     return result
 
 
-# R36 D-2: Keep backward-compat alias
 read_today_log = read_channel_logs
 
 
-# ── Auth helpers ──────────────────────────────────────────────────
+# ── Auth helpers (bind code deprecated in R83, kept as stubs) ──────
+
+
+WEB_CODE_PREFIX = "WSIM-"
 
 
 def validate_token(token: str) -> str | None:
-    sessions = persistence.get_web_sessions()
-    # R33: defensive — if sessions empty but token looks valid, log for debugging
+    sessions = get_web_sessions()
     entry = sessions.get(token)
     if entry:
         return entry.get("name")
-    # R33: debug log when valid-looking token is rejected (deployment session loss)
     if token and len(token) >= 8:
         logger.debug("validate_token: token %s... not found in %d sessions", token[:8], len(sessions))
     return None
+
+
+async def _fetch_channels_from_wss() -> dict:
+    """HTTP poll workspace list from WSS core's /api/workspaces."""
+    url = f"http://127.0.0.1:{config.PORT}/api/workspaces"
+    try:
+        async with asyncio.timeout(5):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+    except Exception:
+        pass
+    return {"workspaces": [], "count": 0}
 
 
 # ── API handlers ──────────────────────────────────────────────────
@@ -204,37 +266,13 @@ async def handle_chat(request: web.Request) -> web.Response:
 
 
 async def handle_api_bind(request: web.Request) -> web.Response:
-    code = auth.generate_web_bind_code()
-    auth.create_web_bind_code(code)
-    persistence.save_web_bind_codes(config.DATA_DIR)
-    return web.json_response({"code": code})
+    """Bind code deprecated in R83 — return error."""
+    return web.json_response({"error": "bind_code_deprecated", "message": "请使用 GitHub 登录"})
 
 
 async def handle_api_check(request: web.Request) -> web.Response:
-    code = request.query.get("code", "").strip().upper()
-    if not code.startswith(auth.WEB_CODE_PREFIX):
-        return web.json_response({"approved": False})
-    codes = persistence.get_web_bind_codes()
-    entry = codes.get(code)
-    if not entry:
-        return web.json_response({"approved": False, "error": "not_found"})
-    if entry.get("approved"):
-        # R8: Set session cookie (7 days) so client restores login on reopen
-        resp = web.json_response({
-            "approved": True,
-            "token": entry.get("token", ""),
-            "name": entry.get("name", ""),
-        })
-        resp.set_cookie(
-            "ws_im_session",
-            entry.get("token", ""),
-            max_age=604800,     # 7 days
-            httponly=True,
-            samesite="Lax",
-            path="/",
-        )
-        return resp
-    return web.json_response({"approved": False})
+    """Bind code deprecated in R83 — return error."""
+    return web.json_response({"approved": False, "error": "deprecated"})
 
 
 async def handle_api_chat(request: web.Request) -> web.Response:
@@ -246,7 +284,6 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     channel = request.query.get("channel", "lobby")
     limit = int(request.query.get("limit", "50"))
 
-    # R76 B3: optional since parameter — only messages after this timestamp
     since = request.query.get("since", None)
     if since:
         try:
@@ -254,12 +291,11 @@ async def handle_api_chat(request: web.Request) -> web.Response:
         except (ValueError, TypeError):
             since = None
 
-    # Try DB first (Phase 1 message_store)
+    # Try DB first
     if since is not None:
         try:
             db_msgs = ms.get_messages_since(since, config.DATA_DIR, limit=limit, channel=channel)
             if db_msgs:
-                # ★ 强制倒序：最新在上
                 return web.json_response({"channel": channel, "messages": db_msgs})
         except Exception:
             pass
@@ -271,10 +307,9 @@ async def handle_api_chat(request: web.Request) -> web.Response:
         except Exception:
             pass
 
-    # Fallback to log file — R36 D-2: multi-day fallback (days=7 for broader history)
+    # Fallback to log file
     messages = read_channel_logs(channel, days=7)
     if messages:
-        # Sort by ts descending (newest first)
         def _sort_key(m):
             ts = m.get("ts", 0)
             if isinstance(ts, (int, float)):
@@ -290,32 +325,27 @@ async def handle_api_chat(request: web.Request) -> web.Response:
 
 
 async def handle_api_channels(request: web.Request) -> web.Response:
-    """Return available channels — dynamically from workspace module, with state (active/archived)."""
+    """Return available channels — HTTP poll from WSS workspace API."""
     channels = [
         {"id": "lobby", "name": "大厅", "emoji": "🌐", "state": "active"},
     ]
-    # Merge all workspaces (active + archived)
     try:
-        ws_list = ws_mod.get_all_workspaces()
-        for ws in ws_list:
-            state = ws.state.value
+        data = await _fetch_channels_from_wss()
+        for ws in data.get("workspaces", []):
             channels.append({
-                "id": ws.id,
-                "name": ws.name,
-                "emoji": "📋" if state == "active" else "🗂️",
-                "state": state,
-                "admin_ids": list(ws.admin_ids),
+                "id": ws["id"],
+                "name": ws["name"],
+                "emoji": "📋" if ws.get("state") == "active" else "🗂️",
+                "state": ws.get("state", "active"),
+                "admin_ids": [],
             })
     except Exception:
         pass
 
-    # R76 B3: attach archive state so frontend knows whether to use since filtering
     try:
-        active_ws = [w for w in ws_mod.get_all_workspaces()
-                     if w.state == ws_mod.WorkspaceState.ACTIVE]
         arch_state = _load_archive_state()
         archive_state = {
-            "active": len(active_ws) > 0,
+            "active": True,
             "last_archive_ts": arch_state.get("last_archive_ts", 0),
         }
     except Exception:
@@ -335,16 +365,8 @@ async def handle_api_approve_web(request: web.Request) -> web.Response:
 
     code = body.get("code", "").strip().upper()
     name = body.get("name", "大宏")
-    result = auth.approve_web_bind_code(code, name)
-    persistence.save_web_bind_codes(config.DATA_DIR)
-    persistence.save_web_sessions(config.DATA_DIR)
-
-    if result.get("type") == "approve_ok":
-        logger.info("Web viewer '%s' approved", name)
-    return web.json_response(result)
-
-
-# ── R8: Logout endpoint ────────────────────────────────────────
+    logger.warning("Web viewer bind code rejected: deprecated feature removed in R83")
+    return web.json_response({"type": "error", "error": "bind_code_deprecated"})
 
 
 async def handle_api_logout(request: web.Request) -> web.Response:
@@ -352,9 +374,6 @@ async def handle_api_logout(request: web.Request) -> web.Response:
     resp = web.json_response({"ok": True})
     resp.del_cookie("ws_im_session", path="/")
     return resp
-
-
-# ── R8: Message search endpoint ─────────────────────────────────
 
 
 async def handle_api_chat_search(request: web.Request) -> web.Response:
@@ -391,27 +410,8 @@ async def _handle_health(request: web.Request) -> web.Response:
     return web.Response(text="ok\n")
 
 
-# ── R108: /api/version ─────────────────────────────────────────────────
-
-
-async def handle_api_version(request: web.Request) -> web.Response:
-    """GET /api/version — return ws-bridge version info."""
-    version = "v2.71"
-    return web.json_response({
-        "version": version,
-        "name": "ws-bridge",
-        "build": "R108",
-    })
-
-
-# ── R76 A: Inbox aggregation API ──────────────────────────────────────
-
-
 async def handle_api_inbox(request: web.Request) -> web.Response:
-    """Return aggregated inbox messages with resolved recipient names.
-
-    GET /api/chat/inbox?token={token}&limit={n}&since={ts}
-    """
+    """Return aggregated inbox messages with resolved recipient names."""
     token = request.query.get("token", "")
     if not validate_token(token):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -431,7 +431,6 @@ async def handle_api_inbox(request: web.Request) -> web.Response:
     except Exception:
         db_msgs = []
 
-    # Resolve recipient names from channel + ensure from_name populated
     for m in db_msgs:
         owner_id = persistence.resolve_inbox_owner(m.get("channel", ""))
         m["to_name"] = auth.get_agent_name(owner_id) if owner_id else (owner_id or "?")
@@ -443,14 +442,8 @@ async def handle_api_inbox(request: web.Request) -> web.Response:
     return web.json_response({"messages": db_msgs})
 
 
-# ── R76 B: Archive API — full channel history for a workspace ─────────
-
-
 async def handle_api_archive(request: web.Request) -> web.Response:
-    """Return all messages from a workspace's archive window, across all channels.
-
-    GET /api/chat/archive?workspace_id={id}&token={token}
-    """
+    """Return all messages from a workspace's archive window, across all channels."""
     token = request.query.get("token", "")
     if not validate_token(token):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -474,7 +467,6 @@ async def handle_api_archive(request: web.Request) -> web.Response:
     all_msgs = ms.get_messages_by_time_range(start, end, config.DATA_DIR)
     all_msgs.reverse()
 
-    # Add channel labels + inbox recipient resolution
     for m in all_msgs:
         ch = m.get("channel", "")
         if ch == "lobby":
@@ -498,35 +490,39 @@ async def handle_api_archive(request: web.Request) -> web.Response:
     })
 
 
-# ── R11 P1.3: Online status API ────────────────────────────────────
-
-
 async def handle_api_agents_status(request: web.Request) -> web.Response:
-    """Return online/offline status for all registered agents."""
+    """Return online/offline status for all registered agents (from WS poll cache)."""
     token = request.query.get("token", "")
     if not validate_token(token):
         return web.json_response({"error": "unauthorized"}, status=401)
 
-    # Lazy import to avoid circular dep
-    from .main import get_connections
-    connections = get_connections()
+    # Get status from WS /api/status HTTP poll (via bot status cache)
+    from server.web_ui.main import _BOT_STATUS_CACHE
+    cached = _BOT_STATUS_CACHE.get("agents", [])
     users = auth.get_users()
+
     result = {}
-    for agent_id, user_info in users.items():
-        name = user_info.get("name", agent_id[:12])
-        is_online = agent_id in connections
-        workspaces = []
-        try:
-            ws_list = ws_mod.get_workspaces_for_agent(agent_id)
-            workspaces = [w.id for w in ws_list if w.state == ws_mod.WorkspaceState.ACTIVE]
-        except Exception:
-            pass
-        result[agent_id] = {
+    for agent_info in cached:
+        aid = agent_info.get("id", "")
+        if not aid:
+            continue
+        name = agent_info.get("name", aid[:12])
+        result[aid] = {
             "name": name,
-            "online": is_online,
-            "role": user_info.get("role", "member"),
-            "workspaces": workspaces,
+            "online": agent_info.get("online", False),
+            "role": users.get(aid, {}).get("role", "member"),
+            "workspaces": [],
         }
+    # Add offline users from approved_users
+    for agent_id, user_info in users.items():
+        if agent_id not in result:
+            result[agent_id] = {
+                "name": user_info.get("name", agent_id[:12]),
+                "online": False,
+                "role": user_info.get("role", "member"),
+                "workspaces": [],
+            }
+
     return web.json_response({
         "agents": result,
         "total": len(result),
@@ -534,16 +530,29 @@ async def handle_api_agents_status(request: web.Request) -> web.Response:
     })
 
 
-
 # ── R40: GitHub OAuth ────────────────────────────────────────────────
+
+# GitHub OAuth config — web-ui only
+_GITHUB_CLIENT_ID = os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
+_GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
+_GITHUB_REDIRECT_URI = os.environ.get(
+    "GITHUB_OAUTH_REDIRECT_URI",
+    os.environ.get("WS_PUBLIC_URL", "http://0.0.0.0:8765") + "/auth/github/callback",
+)
+_OAUTH_NAME_MAP: dict[str, str] = {}
+_raw = os.environ.get("OAUTH_NAME_MAP", "")
+if _raw.strip():
+    try:
+        _OAUTH_NAME_MAP.update(json.loads(_raw))
+    except json.JSONDecodeError:
+        pass
 
 
 async def handle_github_login(request: web.Request) -> web.Response:
     """Redirect to GitHub OAuth authorization page."""
-    client_id = config.GITHUB_OAUTH_CLIENT_ID
-    if not client_id:
+    if not _GITHUB_CLIENT_ID:
         return web.Response(text="GitHub OAuth not configured", status=501)
-    redirect_uri = config.GITHUB_OAUTH_REDIRECT_URI
+    redirect_uri = _GITHUB_REDIRECT_URI
     state = secrets.token_hex(16)
     if "oauth_states" not in request.app:
         request.app["oauth_states"] = {}
@@ -551,7 +560,7 @@ async def handle_github_login(request: web.Request) -> web.Response:
     import urllib.parse as _urlparse
     github_url = (
         "https://github.com/login/oauth/authorize?"
-        "client_id=" + _urlparse.quote(client_id, safe="") + "&"
+        "client_id=" + _urlparse.quote(_GITHUB_CLIENT_ID, safe="") + "&"
         "redirect_uri=" + _urlparse.quote(redirect_uri, safe="") + "&"
         "state=" + _urlparse.quote(state, safe="") + "&"
         "scope=read:user"
@@ -569,16 +578,15 @@ async def handle_github_callback(request: web.Request) -> web.Response:
     stored_states = request.app.get("oauth_states", {})
     if state not in stored_states:
         return web.Response(text="Invalid state (CSRF)", status=403)
-    # Consume state to prevent replay
     del stored_states[state]
 
     # Exchange code for access token
     token_url = "https://github.com/login/oauth/access_token"
     payload = {
-        "client_id": config.GITHUB_OAUTH_CLIENT_ID,
-        "client_secret": config.GITHUB_OAUTH_CLIENT_SECRET,
+        "client_id": _GITHUB_CLIENT_ID,
+        "client_secret": _GITHUB_CLIENT_SECRET,
         "code": code,
-        "redirect_uri": config.GITHUB_OAUTH_REDIRECT_URI,
+        "redirect_uri": _GITHUB_REDIRECT_URI,
     }
     headers = {"Accept": "application/json"}
     try:
@@ -613,32 +621,29 @@ async def handle_github_callback(request: web.Request) -> web.Response:
     if not github_login:
         return web.Response(text="Could not determine GitHub username", status=400)
 
-    # Resolve display name via map, fallback to GitHub login
-    display_name = config.OAUTH_NAME_MAP.get(github_login, github_name)
+    display_name = _OAUTH_NAME_MAP.get(github_login, github_name)
 
-    # Generate session token
     import hashlib
     import time as _time
     raw = "github:" + github_login + ":" + str(_time.time()) + ":" + secrets.token_hex(8)
     token = hashlib.sha256(raw.encode()).hexdigest()
 
-    sessions = persistence.get_web_sessions()
+    sessions = get_web_sessions()
     sessions[token] = {
         "name": display_name,
         "created_at": _time.time(),
         "oauth_provider": "github",
         "oauth_login": github_login,
     }
-    persistence.set_web_sessions(sessions)
-    persistence.save_web_sessions(config.DATA_DIR)
+    set_web_sessions(sessions)
+    save_web_sessions(config.DATA_DIR)
 
-    # Set cookie and redirect to /chat
     resp = web.HTTPFound(location="/chat")
     _scheme = request.url.scheme if hasattr(request, "url") else "http"
     resp.set_cookie(
         "ws_im_session",
         token,
-        max_age=604800,     # 7 days
+        max_age=604800,
         httponly=True,
         secure=True if _scheme == "https" else False,
         samesite="Lax",
@@ -661,33 +666,16 @@ async def handle_api_auth_me(request: web.Request) -> web.Response:
     })
 
 
-
 # ── R104: Workspace list API for web service ─────────────────────────
 
 
 async def handle_api_workspaces(request: web.Request) -> web.Response:
-    """GET /api/workspaces — return all workspaces (same shape as WSS core)."""
+    """GET /api/workspaces — HTTP relay to WSS core."""
     token = request.query.get("token", "")
     if not validate_token(token):
         return web.json_response({"error": "unauthorized"}, status=401)
-    workspaces = []
-    for w in ws_mod.get_all_workspaces():
-        workspaces.append({
-            "id": w.id,
-            "name": w.name,
-            "owner_id": w.owner_id[:16] if w.owner_id else "",
-            "owner_name": w.owner_name,
-            "state": w.state.value,
-            "member_count": len(w.members),
-            "ack_count": 0,
-            "created_at": w.created_at,
-            "last_active_at": w.last_active_at,
-            "closed_at": w.closed_at,
-            "pipeline_round": w.pipeline_round,
-            "roles": w.roles,
-        })
-    workspaces.sort(key=lambda x: x["last_active_at"], reverse=True)
-    return web.json_response({"workspaces": workspaces, "count": len(workspaces)})
+    data = await _fetch_channels_from_wss()
+    return web.json_response(data)
 
 
 # ── Routes registration ──────────────────────────────────────────
@@ -702,21 +690,12 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/api/approve_web", handle_api_approve_web)
     app.router.add_get("/api/channels", handle_api_channels)
     app.router.add_get("/health", _handle_health)
-    # R108: version
-    app.router.add_get("/api/version", handle_api_version)
-    # R8: logout
     app.router.add_post("/api/logout", handle_api_logout)
-    # R8: search
     app.router.add_get("/api/chat/search", handle_api_chat_search)
-    # R11 P1.3: agent status
     app.router.add_get("/api/agents/status", handle_api_agents_status)
-    # R40: GitHub OAuth
     app.router.add_get("/auth/github/login", handle_github_login)
     app.router.add_get("/auth/github/callback", handle_github_callback)
     app.router.add_get("/api/auth/me", handle_api_auth_me)
-    # R76 A: inbox aggregation
     app.router.add_get("/api/chat/inbox", handle_api_inbox)
-    # R76 B: archive full channel history
     app.router.add_get("/api/chat/archive", handle_api_archive)
-    # R104: workspace list
     app.router.add_get("/api/workspaces", handle_api_workspaces)
