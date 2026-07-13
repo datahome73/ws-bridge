@@ -1,8 +1,12 @@
 """R100: pipeline domain commands — extracted from handler.py."""
 
+import logging
 import asyncio
 import json
 import time
+
+logger = logging.getLogger("ws-bridge.pipeline")
+
 import uuid
 import os
 
