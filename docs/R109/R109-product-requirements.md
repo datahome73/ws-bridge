@@ -384,7 +384,44 @@ OAUTH_NAME_MAP: dict[str, str] = ...
 WS_ENV = os.environ.get("WS_ENV", "dev")
 ```
 
-### 3.7 Web 前端减法
+### 3.7 Bot 在线状态传递
+
+**不用 HTTP 轮询，用文件传递。**
+
+ws-server 定时（每 10 秒）将当前在线 bot 状态写入 `data/_bot_status.json`，web-ui 每次刷新页面时读取该文件。两者只在 data 目录层面产生关联。
+
+```json
+// data/_bot_status.json（由 ws-server 定时写入）
+{
+  "agents": [
+    {"id": "ws_xxx", "name": "小谷", "online": true, "uptime_secs": 3600},
+    {"id": "ws_yyy", "name": "爱泰", "online": false}
+  ],
+  "_last_update": 1712345678.0
+}
+```
+
+```python
+# web-ui/handlers.py — 读取文件（原 web_service.py 中的 _fetch_bot_status 改为读文件）
+import json
+from .config import DATA_DIR
+
+def _get_bot_status() -> dict:
+    path = DATA_DIR / "_bot_status.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"agents": []}
+```
+
+**变更点：**
+- **`ws-server/`**：新增一个轻量定时任务，每 10 秒将 `_connections` 状态写入 `data/_bot_status.json`
+- **`web-ui/`**：删除 HTTP 轮询 `_fetch_bot_status()`，改为读本地文件
+- 两者零网络依赖，只在 data 目录关联
+
+### 3.8 Web 前端减法
 
 #### 去掉 `_admin` 频道
 
