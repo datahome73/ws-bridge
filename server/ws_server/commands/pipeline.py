@@ -1,5 +1,6 @@
 """R100: pipeline domain commands — extracted from handler.py."""
 
+import asyncio
 import json
 import time
 import uuid
@@ -191,52 +192,77 @@ async def _cmd_pipeline_start(sender_id: str, params: dict) -> str:
     # 确保角色映射已加载
     command_utils._refresh_role_agent_map()
 
-    # 创建 R97 PipelineContext（dict 格式，轻量）
+    # 创建 PipelineContext 对象（替代旧 dict 格式）
+    from pathlib import Path
     from ..pipeline_context import StepInfo, DEFAULT_STEP_ORDER, DEFAULT_STEPS
-    ctx = {
-        "round_name": round_name,
-        "status": "running",
-        "created_at": time.time(),
-        "triggerer_id": sender_id,
-        "triggerer_name": sender_name,
-        "steps": {
-            k: {
-                "step_key": v.step_key,
-                "role": v.role,
-                "title": v.title,
-                "status": "pending",
-                "agent_id": "",
-                "agent_name": "",
-                "output": None,
-                "result_msg": "",
-            }
-            for k, v in DEFAULT_STEPS.items()
+
+    _ws_dir = Path(config.REPO_PATH) if hasattr(config, 'REPO_PATH') else Path("/opt/data/ws-bridge")
+    steps_list = [
+        {
+            "name": v.step_key,
+            "step_key": v.step_key,
+            "role": v.role,
+            "title": v.title,
+            "status": "pending",
+            "agent_id": "",
+            "agent_name": "",
+            "output": None,
+            "result_msg": "",
+        }
+        for k, v in DEFAULT_STEPS.items()
+    ]
+
+    ctx = PipelineContext(
+        round_name=round_name,
+        task_kind=PipelineTaskKind.DEV,
+        workspace_dir=_ws_dir,
+        task_dir=_ws_dir / "pipeline_tasks" / round_name,
+        workspace_id="",
+        pm_inbox_id="",
+        status=PipelineStatus.RUNNING,
+        current_step=1,
+        total_steps=len(DEFAULT_STEPS),
+        steps=steps_list,
+        created_at=time.time(),
+        created_by=sender_id,
+        round_title=round_name,
+        message_templates={
+            "step1": "🚀 **{round} 管线已启动**\n\n任务: {round} Step 1 — 标注 WORK_PLAN 已审核\n\n请完成后回复：已完成 ✅ {round} Step 1",
+            "step2": "📋 **{round} Step 2 — 技术方案**\n\n请开始设计技术方案，完成后回复：已完成 ✅ {round} Step 2",
+            "step3": "💻 **{round} Step 3 — 编码实现**\n\n请根据技术方案编码实现，完成后回复：已完成 ✅ {round} Step 3",
+            "step4": "👁 **{round} Step 4 — 代码审查**\n\n请审查代码，完成后回复：已完成 ✅ {round} Step 4",
+            "step5": "🧪 **{round} Step 5 — 测试验证**\n\n请进行测试验证，完成后回复：已完成 ✅ {round} Step 5",
+            "step6": "🚀 **{round} Step 6 — 合并部署归档**\n\n请合并部署并归档，完成后回复：已完成 ✅ {round} Step 6",
         },
-        "step_order": list(DEFAULT_STEP_ORDER),
-        "work_plan_url": "",
-        "references": {},
-    }
+    )
 
     # ── 从角色映射填充 agent_id（先查 Manager，后备 state）──
     role_map = mgr.get_global_role_map()
     if not role_map:
         role_map = dict(getattr(state, '_ROLE_AGENT_MAP', {}))
-    for k, step in ctx["steps"].items():
+    for step in ctx.steps:
         role = step["role"]
         agents = role_map.get(role, [])
         if agents:
             step["agent_id"] = agents[0]
-            step["agent_name"] = ac_mod.get_agent_card(
-                agents[0]
-            ).get("display_name", agents[0][:12])
+            card = ac_mod.get_agent_card(agents[0])
+            step["agent_name"] = card.get("display_name", agents[0][:12]) if card else agents[0][:12]
 
     # 持久化
     mgr.set_context(round_name, ctx)
 
+    # ── 自动派活 Step 1 ──
+    async def _auto_dispatch_step1():
+        from ..main import _auto_dispatch as _ad
+        pc = mgr.get(round_name)
+        if pc and config.AUTO_DISPATCH_ENABLED:
+            await _ad(pc, 1)
+    asyncio.ensure_future(_auto_dispatch_step1())
+
     # 广播 _admin
     step_chain = " → ".join(
         f"{s['step_key']}({s['role']})"
-        for s in ctx["steps"].values()
+        for s in ctx.steps
     )
     try:
         await _broadcast_to_channel(p.ADMIN_CHANNEL, {
