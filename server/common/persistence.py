@@ -102,3 +102,27 @@ def resolve_inbox_owner(channel: str) -> str | None:
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
         return channel[len(p.INBOX_CHANNEL_PREFIX):]
     return None
+
+# ── Web sessions (shared between WSS core and Web UI) ──────────────
+_web_sessions: dict = {}
+
+
+def load_web_sessions(data_dir: Path) -> None:
+    global _web_sessions
+    _web_sessions = _load_json(data_dir / "_web_sessions.json")
+
+
+def save_web_sessions(data_dir: Path) -> None:
+    with _lock:
+        _save_json_atomic(data_dir / "_web_sessions.json", _web_sessions)
+
+
+def get_web_sessions() -> dict:
+    with _lock:
+        return dict(_web_sessions)
+
+
+def set_web_sessions(sessions: dict) -> None:
+    global _web_sessions
+    with _lock:
+        _web_sessions = dict(sessions)

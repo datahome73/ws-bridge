@@ -125,7 +125,7 @@ async def handle_auth(ws, msg: dict) -> str | None:
 def _update_agent_online_status(agent_id: str) -> None:
     """R72 B: 认证/注册后同步更新 Agent Card 状态为 online 并刷新 last_online.
     确保 card 状态与 WebSocket 连接状态一致，防止 mark_stale_offline 后无法恢复."""
-    import server.agent_card as ac_mod
+    from . import agent_card as ac_mod
     cards = ac_mod.get_all_cards()
     card = cards.get(agent_id)
     if card:

@@ -11,9 +11,11 @@ RUN apt-get update && apt-get install -y supervisor && rm -rf /var/lib/apt/lists
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application (R109: split server/ into ws_server + web_ui + common)
 COPY shared/ shared/
-COPY server/ server/
+COPY server/ws_server/ server/ws_server/
+COPY server/web_ui/ server/web_ui/
+COPY server/common/ server/common/
 COPY clients/ clients/
 COPY scripts/ scripts/
 COPY config/ config/

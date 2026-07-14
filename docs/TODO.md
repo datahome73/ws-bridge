@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.71
+> **版本：** v2.72
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -266,9 +266,10 @@ Phase 3 (Coder Agent)
 ## 五、变更记录
 
 || 版本 | 日期 | 变更 |
-|| v2.71 | 2026-07-11 | R102: to_agent 派活路由 + 前缀匹配 + 入库留痕 🚀 |
+|| v2.72 | 2026-07-11 | R102: to_agent 派活路由 + 前缀匹配 + 入库留痕 🚀 |
 || v2.70 | 2026-07-11 | R101: WSS/Web 解耦 — 独立 web_service.py + Supervisor 双进程部署 🚀 |
 ||:---:|:----:|:----|
+||| v2.72 | 2026-07-13 | 🎯 **R109 完成 ✅** — 架构大重构：server/ 拆分为 ws_server/ + web_ui/ + common/ 🏗️。Dockerfile 适配新目录结构，supervisord 双进程管理。修复 import 路径迁移问题（agent_card / load_web_sessions）。8 生产 bot 全部 🟢 在线。合并部署 main fff70e3，ws-bridge:r109 镜像
 ||| v2.63 | 2026-07-12 | 🎯 **R97 完成 ✅** — AutoRouter 稳定化：PipelineContext 驱动，去 frontmatter 依赖 🔧。重构 3 文件 +330/-666 净删 -336 行。核心变化：`!pipeline_start` 零参数（无需 frontmatter/workspace）、AutoRouter 从 PipelineContext 读拓扑、角色映射实时查询 Agent Card、PM=Step1 执行者、全链 6 Step 机械组装。19/19 单元测试 ALL GREEN 🟢。合并部署 main `7830639`，ws-bridge:r97 镜像 |
 ||| v2.62 | 2026-07-11 | 📄 **R96 启动** — 新 bot 入驻体验修复：3 个 P0 bug。基于晓周实测反馈 |
 ||| v2.56 | 2026-07-10 | 🎯 **R90 完成 ✅** — AutoRouter 坑位修补 🅰️🅱️🅲。改 2 文件 +67 行。审查 5/5 🟢，测试 61/61 ALL GREEN 🟢。合并部署 main `6dbaad6`，ws-bridge:r90 镜像 |
