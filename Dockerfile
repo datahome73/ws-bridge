@@ -18,6 +18,8 @@ COPY server/web_ui/ server/web_ui/
 COPY server/common/ server/common/
 COPY clients/ clients/
 COPY scripts/ scripts/
+# Copy server-level config (agent_cards.json, etc.)
+COPY server/config/ server/config/
 COPY config/ config/
 COPY docs/ docs/
 
