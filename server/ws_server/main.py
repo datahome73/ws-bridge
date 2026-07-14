@@ -2633,6 +2633,11 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         return True
     # ═══════════════════════════════════════════
 
+    # ═══ R111: ## 命令 ═══
+    if content.startswith("##"):
+        return await _handle_hash_cmd(content, agent_id, ws)
+    # ═══════════════════════════════════════════
+
     # ═══ 安全守卫: PM 误发 _inbox:server ═══
     # 排除带 to_agent 的派活消息（已在上面拦截）
     if pm_agent_id and agent_id == pm_agent_id:
@@ -2758,6 +2763,301 @@ async def _handle_server_relay(ws, agent_id: str, msg: dict) -> bool:
         pass  # 入库失败不阻塞主流程
     logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
     return True
+
+
+# ════════════════════════════════════════════════════════════════
+# R111: ## 命令 — 简洁可靠的自动派活入口
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_name_to_ws_map() -> dict[str, str]:
+    """从 persistence.get_api_keys() 构建 display_name → ws_agent_id 映射."""
+    _name_to_ws: dict[str, str] = {}
+    for _aid, _rec in persistence.get_api_keys().items():
+        _dn = _rec.get("display_name", "")
+        if _dn:
+            _name_to_ws[_dn] = _aid
+    return _name_to_ws
+
+
+def _build_default_templates() -> dict[str, str]:
+    """返回 6 步标准模板组（复用 commands/pipeline.py L234-241 模板字符串）."""
+    return {
+        "step1": "🚀 **{round} 管线已启动**\n\n任务: {round} Step 1 — 标注 WORK_PLAN 已审核\n\n请完成后回复：已完成 ✅ {round} Step 1",
+        "step2": "📋 **{round} Step 2 — 技术方案**\n\n请开始设计技术方案，完成后回复：已完成 ✅ {round} Step 2",
+        "step3": "💻 **{round} Step 3 — 编码实现**\n\n请根据技术方案编码实现，完成后回复：已完成 ✅ {round} Step 3",
+        "step4": "👁 **{round} Step 4 — 代码审查**\n\n请审查代码，完成后回复：已完成 ✅ {round} Step 4",
+        "step5": "🧪 **{round} Step 5 — 测试验证**\n\n请进行测试验证，完成后回复：已完成 ✅ {round} Step 5",
+        "step6": "🚀 **{round} Step 6 — 合并部署归档**\n\n请合并部署并归档，完成后回复：已完成 ✅ {round} Step 6",
+    }
+
+
+async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
+    """处理 ## 前缀命令。
+    ##start##R{N}##key=value
+    ##status##R{N}
+    ##stop##R{N}
+    ##help
+    """
+    parts = content.split("##")
+    if len(parts) < 3:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": (
+                "📋 **## 命令帮助**\n\n"
+                "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
+                "`##status##R{N}` — 查询管线状态\n"
+                "`##stop##R{N}` — 停止管线\n"
+                "`##help` — 显示本帮助"
+            ),
+            "ts": time.time(),
+        })
+        return True
+
+    cmd = parts[1].lower()
+    round_name = parts[2].upper()
+
+    # 解析 key=value 数据段
+    kv: dict[str, str] = {}
+    for p in parts[3:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k.strip()] = v.strip()
+
+    if cmd == "start":
+        return await _handle_hash_start(round_name, kv, agent_id, ws)
+    elif cmd == "status":
+        return await _handle_hash_status(round_name, agent_id, ws)
+    elif cmd == "stop":
+        return await _handle_hash_stop(round_name, agent_id, ws)
+    elif cmd == "help":
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": (
+                "📋 **## 命令帮助**\n\n"
+                "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
+                "`##status##R{N}` — 查询管线状态\n"
+                "`##stop##R{N}` — 停止管线\n"
+                "`##help` — 显示本帮助"
+            ),
+            "ts": time.time(),
+        })
+        return True
+
+    await _send(ws, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": f"❌ 未知 ## 命令: {cmd}，可用: start / status / stop / help",
+        "ts": time.time(),
+    })
+    return True
+
+
+async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bool:
+    """处理 ##start 命令：创建 PipelineContext + 落盘 + 自动派活 Step 1."""
+    mgr = _ensure_pipeline_manager()
+    if mgr.exists(round_name):
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"❌ {round_name} 管线已存在，无法重复创建",
+            "ts": time.time(),
+        })
+        return True
+
+    # 1. 刷新角色映射
+    try:
+        _refresh_role_agent_map()
+    except Exception:
+        pass
+
+    # 2. 构建 steps（从 DEFAULT_STEPS 填充 agent_id）
+    from .pipeline_context import DEFAULT_STEPS, DEFAULT_STEP_ORDER
+    from . import agent_card as _ac_mod
+
+    role_map = mgr.get_global_role_map()
+    if not role_map:
+        role_map = dict(getattr(state, '_ROLE_AGENT_MAP', {}))
+    name_to_ws = _build_name_to_ws_map()
+
+    steps_list: list[dict] = []
+    for sk in DEFAULT_STEP_ORDER:
+        step_info = DEFAULT_STEPS[sk]
+        agents = role_map.get(step_info.role, [])
+        agent_card_name = ""
+        agent_id_for_step = ""
+        if agents:
+            agent_id_for_step = agents[0]
+            card = _ac_mod.get_agent_card(agents[0])
+            agent_card_name = card.get("display_name", agents[0][:12]) if card else agents[0][:12]
+            # 通过 display_name 桥接卡 key → WS 连接 ID
+            if card:
+                _real_id = name_to_ws.get(card.get("display_name", ""))
+                if _real_id:
+                    agent_id_for_step = _real_id
+
+        steps_list.append({
+            "name": sk,
+            "step_key": sk,
+            "role": step_info.role,
+            "title": step_info.title,
+            "status": "pending",
+            "agent_id": agent_id_for_step,
+            "agent_name": agent_card_name,
+            "output": None,
+            "result_msg": "",
+        })
+
+    # 3. 构建 references
+    references: dict[str, str] = {}
+    for ref_key in ("requirements_url", "work_plan_url"):
+        if kv.get(ref_key):
+            references[ref_key] = kv[ref_key]
+
+    # 4. 构建 message_templates
+    templates = _build_default_templates()
+
+    # 5. 创建 PipelineContext
+    from pathlib import Path
+    workspace_dir = Path(getattr(config, 'REPO_PATH', '/opt/data/ws-bridge'))
+    task_dir = Path(config.DATA_DIR) / "pipeline_tasks" / round_name
+
+    ctx = PipelineContext(
+        round_name=round_name,
+        task_kind=PipelineTaskKind.DEV,
+        workspace_dir=workspace_dir,
+        task_dir=task_dir,
+        workspace_id="",
+        pm_inbox_id=config.PIPELINE_PM_AGENT_ID,
+        status=PipelineStatus.INIT,
+        current_step=1,
+        total_steps=len(DEFAULT_STEPS),
+        steps=steps_list,
+        references=references,
+        message_templates=templates,
+        round_title=kv.get("round_title", round_name),
+        created_by=agent_id,
+    )
+
+    # 6. 落盘
+    mgr.set_context(round_name, ctx)
+    await mgr.transition_to(round_name, PipelineStatus.RUNNING)
+
+    # 7. 自动派活 Step 1
+    await _auto_dispatch(ctx, 1)
+
+    # 8. 回复发送者
+    await _send(ws, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": f"✅ {round_name} 管线已启动，Step 1 已派活",
+        "ts": time.time(),
+    })
+    logger.info("[R111] ##start: %s by %s", round_name, agent_id[:16])
+    return True
+
+
+async def _handle_hash_status(round_name: str, agent_id: str, ws) -> bool:
+    """处理 ##status 命令：查询管线当前状态."""
+    mgr = _ensure_pipeline_manager()
+    ctx = mgr.get(round_name)
+    if not ctx:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"❌ {round_name} 管线不存在",
+            "ts": time.time(),
+        })
+        return True
+
+    # 拼装状态文本
+    step_lines = []
+    status_icons = {
+        "pending": "⬜",
+        "active": "🟢",
+        "done": "✅",
+        "failed": "❌",
+        "skipped": "⏭",
+    }
+    step_names = {
+        "pm": "小谷",
+        "arch": "小开",
+        "dev": "爱泰",
+        "review": "小周",
+        "qa": "泰虾",
+        "operations": "小爱",
+    }
+
+    for step in ctx.steps:
+        step_key = step.get("step_key", step.get("name", "?"))
+        step_num = step_key.replace("step", "")
+        st = step.get("status", "pending")
+        icon = status_icons.get(st, "⬜")
+        role = step.get("role", "?")
+        name = step_names.get(role, role)
+        step_lines.append(f"  Step {step_num}: {icon} {name}")
+
+    status_text = (
+        f"📊 **{round_name} 管线状态**\n"
+        f"  状态: {ctx.status.value}\n"
+        f"  当前步: Step {ctx.current_step}\n"
+        + "\n".join(step_lines)
+    )
+
+    await _send(ws, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": status_text,
+        "ts": time.time(),
+    })
+    return True
+
+
+async def _handle_hash_stop(round_name: str, agent_id: str, ws) -> bool:
+    """处理 ##stop 命令：停止/取消管线."""
+    mgr = _ensure_pipeline_manager()
+    ctx = mgr.get(round_name)
+    if not ctx:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"❌ {round_name} 管线不存在",
+            "ts": time.time(),
+        })
+        return True
+
+    await mgr.cancel(round_name)
+    await _send(ws, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": f"🛑 {round_name} 管线已停止（CANCELLED）",
+        "ts": time.time(),
+    })
+    logger.info("[R111] ##stop: %s by %s", round_name, agent_id[:16])
+    return True
+
+
+# ════════════════════════════════════════════════════════════════
 
 
 async def handler(ws):
