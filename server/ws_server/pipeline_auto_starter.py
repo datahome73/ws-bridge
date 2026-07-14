@@ -59,8 +59,11 @@ def parse_work_plan_meta(path: Path) -> dict:
         if stripped.startswith("> **"):
             in_frontmatter = True
             rest = stripped[2:].strip()
-            if ":** " in rest:
-                parts = rest.split(":** ", 1)
+            # 支持半角 :** 和全角 ：** 两种分隔符
+            if ":** " in rest or "：** " in rest:
+                # Detect which separator to use for splitting
+                sep = ":** " if ":** " in rest else "：** "
+                parts = rest.split(sep, 1)
                 key = parts[0].strip("*").strip().lower()
                 val = parts[1].strip()
                 if key in ("轮次", "round"):

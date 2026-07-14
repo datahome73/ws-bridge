@@ -453,7 +453,7 @@ class PipelineContextManager:
         text = work_plan_path.read_text(encoding="utf-8")
         lines = text.split("\n")
 
-        # 解析 frontmatter（> **key:** value 格式）
+        # 解析 frontmatter（> **key:** value / > **key：** value 格式，支持全角与半角冒号）
         meta: dict[str, str] = {}
         in_frontmatter = False
         for line in lines:
@@ -462,17 +462,25 @@ class PipelineContextManager:
                 continue
             if stripped.startswith("> **"):
                 in_frontmatter = True
-                # Extract key and value from "> **key:** value"
+                # Extract key and value from "> **key:** value" or "> **key：** value"
                 rest = stripped[2:].strip()  # remove "> "
-                if "**" in rest and ":** " in rest:
-                    parts = rest.split(":** ", 1)
-                    key = parts[0].strip("*").strip().lower()
-                    val = parts[1].strip()
-                    meta[key] = val
+                if "**" in rest:
+                    # 支持半角 :** 和全角 ：** 两种分隔符
+                    sep = None
+                    for s in (":** ", "：** "):
+                        if s in rest:
+                            sep = s
+                            break
+                    if sep:
+                        parts = rest.split(sep, 1)
+                        key = parts[0].strip("*").strip().lower()
+                        val = parts[1].strip()
+                        meta[key] = val
             elif in_frontmatter and not stripped.startswith(">"):
                 in_frontmatter = False  # reached non-frontmatter content
 
-        round_name = meta.get("轮次", meta.get("round", "")).upper().strip()
+        raw_round = meta.get("轮次", meta.get("round", ""))
+        round_name = raw_round.upper().strip()
         if not round_name:
             raise ValueError("WORK_PLAN missing 轮次/round field in frontmatter")
 
@@ -498,7 +506,7 @@ class PipelineContextManager:
                 step_titles[step_key] = title
 
         total_steps = max(
-            int(k.replace("step", "")) for k in (step_order or ["step6"])
+            [int(k.replace("step", "")) for k in (step_order or ["step6"])] + [6],
         )
 
         # 解析角色映射
@@ -514,8 +522,25 @@ class PipelineContextManager:
         # auto_chain 标记
         auto_chain = meta.get("auto_chain", "").strip().lower() in ("true", "yes", "1")
 
+        # 构建 steps 列表（PipelineContext.steps 为 _auto_dispatch 所必需）
+        # 始终创建全部 6 个默认 step 槽位，title 从 WORK_PLAN 填充
+        steps_list: list[dict] = []
+        for sk in DEFAULT_STEP_ORDER:
+            role = step_roles.get(sk, "pm")
+            title = step_titles.get(sk, "")
+            steps_list.append({
+                "name": sk,
+                "step_key": sk,
+                "role": role,
+                "title": title,
+                "status": "pending",
+                "agent_id": "",
+                "agent_name": "",
+                "output": None,
+                "result_msg": "",
+            })
+
         wd = workspace_dir or work_plan_path.parent.parent.parent
-        req_url = meta.get("说明", "").strip()
         now = time.time()
 
         ctx = PipelineContext(
@@ -530,6 +555,7 @@ class PipelineContextManager:
             current_step=1,
             total_steps=max(total_steps, len(step_order) or 6),
             blocked_reason=None,
+            steps=steps_list,
             role_agent_map=role_agent_map,
             agent_card_ids={},
             last_output_sha="",
