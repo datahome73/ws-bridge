@@ -63,7 +63,7 @@ class PipelineStatus(enum.StrEnum):
 
 # 合法转换矩阵
 _VALID_TRANSITIONS: dict[PipelineStatus, set[PipelineStatus]] = {
-    PipelineStatus.INIT: {PipelineStatus.PLANNING, PipelineStatus.CANCELLED},
+    PipelineStatus.INIT: {PipelineStatus.PLANNING, PipelineStatus.RUNNING, PipelineStatus.CANCELLED},
     PipelineStatus.PLANNING: {PipelineStatus.RUNNING, PipelineStatus.BLOCKED, PipelineStatus.CANCELLED},
     PipelineStatus.RUNNING: {PipelineStatus.BLOCKED, PipelineStatus.COMPLETED, PipelineStatus.CANCELLED, PipelineStatus.STOPPED},
     PipelineStatus.BLOCKED: {PipelineStatus.RUNNING, PipelineStatus.CANCELLED},
@@ -220,13 +220,13 @@ class PipelineContext:
         else:
             role_agent_map = raw_role_map
         return cls(
-            round_name=d["round_name"],
-            task_kind=PipelineTaskKind(d["task_kind"]),
-            workspace_dir=Path(d["workspace_dir"]),
-            task_dir=Path(d["task_dir"]),
+            round_name=d.get("round_name", ""),
+            task_kind=PipelineTaskKind(d.get("task_kind", "dev")),
+            workspace_dir=Path(d.get("workspace_dir", "")),
+            task_dir=Path(d.get("task_dir", "")),
             workspace_id=d.get("workspace_id", ""),
             pm_inbox_id=d.get("pm_inbox_id", ""),
-            status=PipelineStatus(d["status"]),
+            status=PipelineStatus(d.get("status", "init")),
             current_phase=d.get("current_phase", "plan"),
             current_step=d.get("current_step", 1),
             total_steps=d.get("total_steps", 6),
@@ -780,7 +780,7 @@ class PipelineContextManager:
                     "Restored %d pipeline context(s) from disk",
                     len(self._contexts),
                 )
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("PipelineContext load failed: %s", e)
 
     def _append_history(self, ctx: PipelineContext) -> None:

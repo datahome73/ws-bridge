@@ -2496,7 +2496,7 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
         return False
 
     next_step_info = next(
-        (s for s in ctx.steps if s.get("name") == next_step_key), None,
+        (s for s in (ctx.steps or []) if s.get("name") == next_step_key), None,
     )
     if not next_step_info or not next_step_info.get("agent_id"):
         logger.warning(
