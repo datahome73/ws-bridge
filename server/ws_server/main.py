@@ -2549,6 +2549,22 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
         return False
 
     target_agent_id = next_step_info["agent_id"]
+
+    # ═══ R117 fix: card key → WS ID fallback ═══
+    if not target_agent_id.startswith("ws_"):
+        _fallback_id = _resolve_card_key_to_ws_id(target_agent_id)
+        if _fallback_id:
+            logger.info("[R117] card key %s → WS ID %s (fallback)",
+                        target_agent_id, _fallback_id)
+            target_agent_id = _fallback_id
+            next_step_info["agent_id"] = _fallback_id
+        else:
+            logger.warning(
+                "[R117] 无法解析 card key %s 为 WS ID，跳过自动派活 step %d of %s",
+                target_agent_id, step_num, ctx.round_name,
+            )
+            return False
+
     content = _render_template(next_template, ctx, step_num)
 
     payload = {
