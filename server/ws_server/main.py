@@ -2358,6 +2358,11 @@ async def _send_to_agent(target_agent_id: str, payload: dict) -> int:
             sent += 1
         except Exception:
             pass
+    if sent == 0:
+        logger.warning(
+            "[R117] _send_to_agent(%s): 无目标连接 (sent=0)",
+            target_agent_id[:20],
+        )
     # 同时持久化到 DB
     try:
         ms.save_message(
@@ -2449,6 +2454,10 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
             # ── R107: 自动派活下一步（受 AUTO_DISPATCH_ENABLED 控制）──
             next_step = old_step + 1
             if next_step <= ctx.total_steps:
+                logger.info(
+                    "[R117] %s Step %d 已完成，尝试自动派活 Step %d",
+                    round_name, old_step, next_step,
+                )
                 asyncio.ensure_future(_auto_dispatch(ctx, next_step))
             else:
                 # 最后一步已完成，标记管线 completed
@@ -2549,6 +2558,22 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
         return False
 
     target_agent_id = next_step_info["agent_id"]
+
+    # ═══ R117 fix: card key → WS ID fallback ═══
+    if not target_agent_id.startswith("ws_"):
+        _fallback_id = _resolve_card_key_to_ws_id(target_agent_id)
+        if _fallback_id:
+            logger.info("[R117] card key %s → WS ID %s (fallback)",
+                        target_agent_id, _fallback_id)
+            target_agent_id = _fallback_id
+            next_step_info["agent_id"] = _fallback_id
+        else:
+            logger.warning(
+                "[R117] 无法解析 card key %s 为 WS ID，跳过自动派活 step %d of %s",
+                target_agent_id, step_num, ctx.round_name,
+            )
+            return False
+
     content = _render_template(next_template, ctx, step_num)
 
     payload = {
@@ -2823,6 +2848,43 @@ def _build_name_to_ws_map() -> dict[str, str]:
     return _name_to_ws
 
 
+def _resolve_card_key_to_ws_id(card_key: str) -> str:
+    """多策略解析 card key → WS 连接 ID。
+
+    优先级:
+    1. display_name → api_keys (persistence.get_api_keys())
+    2. display_name → state._r72_users name 匹配
+    3. _connections + _r72_users name 交叉匹配
+    """
+    card = ac_mod.get_agent_card(card_key)
+    if not card:
+        return ""
+    display_name = card.get("display_name", "")
+
+    # 策略 1: display_name → api_keys
+    if display_name:
+        name_to_ws = _build_name_to_ws_map()
+        _id = name_to_ws.get(display_name, "")
+        if _id and _id.startswith("ws_"):
+            return _id
+
+    # 策略 2: display_name → state._r72_users
+    if display_name:
+        for _aid, _rec in state._r72_users.items():
+            if _rec.get("name", "") == display_name:
+                return _aid
+
+    # 策略 3: _connections 中 ws_xxx → _r72_users name 匹配
+    if display_name:
+        for _aid in list(_connections.keys()):
+            if _aid.startswith("ws_"):
+                _info = state._r72_users.get(_aid, {})
+                if _info.get("name", "") == display_name:
+                    return _aid
+
+    return ""
+
+
 def _build_default_templates() -> dict[str, str]:
     """返回 6 步标准模板组（复用 commands/pipeline.py L234-241 模板字符串）."""
     return {
@@ -2948,6 +3010,13 @@ async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bo
                 _real_id = name_to_ws.get(card.get("display_name", ""))
                 if _real_id:
                     agent_id_for_step = _real_id
+                else:
+                    # ═══ R117 fix: card key → WS ID fallback ═══
+                    _fallback = _resolve_card_key_to_ws_id(agents[0])
+                    if _fallback:
+                        agent_id_for_step = _fallback
+                        logger.info("[R117] ##start fallback: %s → %s",
+                                    agents[0], _fallback)
 
         steps_list.append({
             "name": sk,
