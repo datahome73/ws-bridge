@@ -1,68 +1,92 @@
 {
   "arch-bot": {
-    "agent_id": "arch-bot",
     "display_name": "小开",
-    "role": "architect",
-    "skills": [
-      {"id": "write-tech-plan", "description": "编写技术方案"},
-      {"id": "design-architecture", "description": "架构设计"}
+    "pipeline_roles": [
+      "architect"
     ],
-    "triggers": ["!arch", "!方案"],
-    "state": "online"
+    "skills": [
+      "write-tech-plan",
+      "design-architecture"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "arch"
+    }
   },
   "dev-bot": {
-    "agent_id": "dev-bot",
     "display_name": "爱泰",
-    "role": "developer",
-    "skills": [
-      {"id": "implement-code", "description": "编码实现"},
-      {"id": "fix-bugs", "description": "修复缺陷"}
+    "pipeline_roles": [
+      "developer"
     ],
-    "triggers": ["!dev", "!编码"],
-    "state": "online"
+    "skills": [
+      "implement-code",
+      "fix-bugs"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "dev"
+    }
   },
   "review-bot": {
-    "agent_id": "review-bot",
     "display_name": "小周",
-    "role": "reviewer",
-    "skills": [
-      {"id": "code-review", "description": "代码审查"},
-      {"id": "quality-check", "description": "质量检查"}
+    "pipeline_roles": [
+      "reviewer"
     ],
-    "triggers": ["!review", "!审查"],
-    "state": "online"
+    "skills": [
+      "code-review",
+      "quality-check"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "review"
+    }
   },
   "qa-bot": {
-    "agent_id": "qa-bot",
     "display_name": "泰虾",
-    "role": "qa",
-    "skills": [
-      {"id": "test-automation", "description": "自动化测试"},
-      {"id": "deploy-dev", "description": "Dev 部署"}
+    "pipeline_roles": [
+      "qa"
     ],
-    "triggers": ["!qa", "!测试"],
-    "state": "online"
+    "skills": [
+      "test-automation",
+      "deploy-dev"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "qa"
+    }
   },
   "pm-bot": {
-    "agent_id": "pm-bot",
     "display_name": "小谷",
-    "role": "product-manager",
-    "skills": [
-      {"id": "write-requirements", "description": "撰写需求文档"},
-      {"id": "review-requirements", "description": "评审需求"}
+    "pipeline_roles": [
+      "product-manager"
     ],
-    "triggers": ["!pm", "!需求"],
-    "state": "online"
+    "skills": [
+      "write-requirements",
+      "review-requirements"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "pm"
+    }
   },
   "admin-bot": {
-    "agent_id": "admin-bot",
     "display_name": "小爱",
-    "role": "admin",
-    "skills": [
-      {"id": "manage-platform", "description": "全平台管理"},
-      {"id": "merge-deploy", "description": "合并部署"}
+    "pipeline_roles": [
+      "admin"
     ],
-    "triggers": ["!admin", "!merge"],
-    "state": "online"
+    "skills": [
+      "manage-platform",
+      "merge-deploy"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "admin"
+    }
   }
 }
