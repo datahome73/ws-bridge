@@ -2,8 +2,10 @@
 
 > **轮次：** R112
 > **auto_chain:** true
+> **状态：** ✅ 项目负责人审核通过
 > **说明：** 在 Web 端新增「📊 管线」Tab，消费 `pipeline_contexts.json` 数据，展示管线进度条 + Step 状态 + Agent 信息 + 产出链接
 > **需求文档：** [R112-product-requirements.md](https://github.com/datahome73/ws-bridge/blob/main/docs/R112/R112-product-requirements.md)
+> **审核记录：** v1.0 提交审核 → 2026-07-14 项目负责人 ✅ 通过
 
 ---
 
