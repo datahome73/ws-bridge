@@ -98,6 +98,31 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 .status-item.online{color:#c9d1d9;}
 .status-item.offline{color:#666;}
 .status-item .offline-warn{color:#f0883e;font-size:0.7rem;}
+/* R112: Pipeline dashboard styles */
+.pipeline-card{background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:12px;max-width:800px;margin-left:auto;margin-right:auto;}
+.pipeline-header{padding:12px 16px;border-bottom:1px solid #21262d;}
+.pipeline-title-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;}
+.pipeline-round{font-size:1.1rem;font-weight:700;color:#c9d1d9;}
+.pipeline-status{font-size:0.75rem;padding:2px 6px;border-radius:4px;border:1px solid currentColor;}
+.pipeline-round-title{font-size:0.8rem;color:#8b949e;margin-left:auto;}
+.pipeline-progress{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
+.progress-bar{flex:1;height:6px;background:#30363d;border-radius:3px;overflow:hidden;}
+.progress-fill{height:100%;border-radius:3px;transition:width 0.5s ease;}
+.progress-text{font-size:0.75rem;color:#8b949e;white-space:nowrap;}
+.pipeline-updated{font-size:0.7rem;color:#666;}
+.pipeline-step-list{padding:8px 16px;}
+.step-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-left:3px solid #30363d;margin-bottom:2px;border-radius:0 4px 4px 0;font-size:0.85rem;}
+.step-done,.step-completed{border-left-color:#3fb950;background:rgba(63,185,80,0.05);}
+.step-active,.step-working,.step-dispatched{border-left-color:#ffd700;background:rgba(255,215,0,0.05);}
+.step-pending{border-left-color:#30363d;}
+.step-failed{border-left-color:#e53935;background:rgba(229,57,53,0.05);}
+.step-skipped{border-left-color:#8b949e;}
+.step-icon{font-size:0.9rem;flex-shrink:0;}
+.step-role{color:#58a6ff;min-width:50px;font-size:0.8rem;}
+.step-agent{color:#c9d1d9;min-width:60px;}
+.step-title{color:#8b949e;font-size:0.8rem;}
+.pipeline-empty{text-align:center;padding:60px 20px;color:#8b949e;font-size:0.9rem;}
+.pipeline-empty small{display:block;font-size:0.8rem;color:#666;margin-top:8px;}
 </style>
 </head>
 <body>
@@ -136,6 +161,7 @@ const TAB_STATE = {
   tab1: { id: 'tab1', channel: '__inbox__',    label: '📬 收件箱',   permanent: true, visible: true },
   tab2: { id: 'tab2', channel: '_admin',       label: '🔧 管理员',   permanent: true, visible: true },
   tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史',    permanent: true, visible: true },
+  tab4: { id: 'tab4', channel: null,           label: '📊 管线',    permanent: true, visible: true },
 };
 let activeTabId = 'tab1';
 let unreadCounts = { '__inbox__': 0 };
@@ -266,6 +292,13 @@ function selectTab(tabId) {
     if (tab && tab.channel) {
       loadMessages(tab.channel, archiveMode ? lastArchiveTs : null);
     }
+    return;
+  }
+
+  // R112: pipeline tab (tab4)
+  if (tabId === 'tab4') {
+    document.getElementById('inputArea').style.display = 'none';
+    renderPipelineDashboard();
     return;
   }
 
@@ -526,6 +559,96 @@ async function renderWsPanel() {
 
 
 
+// ── R112: Pipeline Dashboard ─────────────────────────────────────
+
+
+async function renderPipelineDashboard() {
+  const list = document.getElementById('msgList');
+  list.innerHTML = '<div class="pipeline-empty">📊 加载中...</div>';
+  try {
+    const resp = await fetch('/api/pipelines?token=' + encodeURIComponent(TOKEN));
+    if (!resp.ok) { list.innerHTML = '<div class="pipeline-empty">❌ 加载失败</div>'; return; }
+    const data = await resp.json();
+    const pipelines = data.pipelines || [];
+    list.innerHTML = '';
+    if (pipelines.length === 0) {
+      list.innerHTML = '<div class="pipeline-empty">📊 暂无管线<small>使用 ##start##R{N} 启动一条管线</small></div>';
+      return;
+    }
+    // Sort: running first, then planning/blocked, then completed/cancelled
+    const order = {running:0, init:1, planning:2, blocked:3, completed:4, cancelled:5, stopped:6};
+    pipelines.sort(function(a,b) {
+      var oa = order[a.status] || 99, ob = order[b.status] || 99;
+      if (oa !== ob) return oa - ob;
+      return (b.updated_at || 0) - (a.updated_at || 0);
+    });
+    for (var i = 0; i < pipelines.length; i++) {
+      list.appendChild(createPipelineCard(pipelines[i]));
+    }
+  } catch(e) {
+    list.innerHTML = '<div class="pipeline-empty">❌ 加载失败: ' + escapeHtml(e.message || '') + '</div>';
+  }
+}
+
+function createPipelineCard(p) {
+  var card = document.createElement('div');
+  card.className = 'pipeline-card';
+
+  var progress = p.total_steps > 0 ? Math.round((p.current_step - 1) / p.total_steps * 100) : 0;
+  var iconMap = {running:'🟢', init:'🆕', planning:'📋', blocked:'🔴', completed:'✅', cancelled:'🛑', stopped:'🛑'};
+  var statusIcon = iconMap[p.status] || '❓';
+  var colorMap = {running:'#3fb950', init:'#8b949e', planning:'#ffd700', blocked:'#e53935', completed:'#4fc3f7', cancelled:'#e53935', stopped:'#e53935'};
+  var statusColor = colorMap[p.status] || '#8b949e';
+  var updated = p.updated_at ? formatTime(p.updated_at) : '';
+
+  var stepsHtml = '';
+  var stepIcons = {done:'🟢', completed:'🟢', active:'🟡', working:'🟡', dispatched:'⏳', pending:'⬜', failed:'🔴', skipped:'⏸️'};
+  if (p.steps && p.steps.length > 0) {
+    for (var j = 0; j < p.steps.length; j++) {
+      var s = p.steps[j];
+      var icon = stepIcons[s.status] || '⬜';
+      var agent = s.agent_name || '';
+      var role = s.role || '';
+      var title = s.title || '';
+      var statusClass = s.status === 'done' || s.status === 'completed' ? 'step-done' :
+                        s.status === 'active' || s.status === 'working' || s.status === 'dispatched' ? 'step-active' :
+                        s.status === 'failed' ? 'step-failed' :
+                        s.status === 'skipped' ? 'step-skipped' : 'step-pending';
+      stepsHtml += '<div class="step-row ' + statusClass + '">' +
+        '<span class="step-icon">' + icon + '</span>' +
+        '<span class="step-role">' + escapeHtml(role) + '</span>' +
+        '<span class="step-agent">' + escapeHtml(agent) + '</span>' +
+        '<span class="step-title">' + escapeHtml(title) + '</span>' +
+        '</div>';
+    }
+  } else {
+    stepsHtml = '<div style="padding:8px;color:#8b949e;font-size:0.8rem;text-align:center;">暂无 Step 数据</div>';
+  }
+
+  var titleHtml = '';
+  if (p.round_title && p.round_title !== p.round_name) {
+    titleHtml = '<span class="pipeline-round-title">' + escapeHtml(p.round_title) + '</span>';
+  }
+
+  card.innerHTML =
+    '<div class="pipeline-header">' +
+    '<div class="pipeline-title-row">' +
+    '<span class="pipeline-round">' + escapeHtml(p.round_name) + '</span>' +
+    '<span class="pipeline-status" style="color:' + statusColor + '">' + statusIcon + ' ' + (p.status || '').toUpperCase() + '</span>' +
+    titleHtml +
+    '</div>' +
+    '<div class="pipeline-progress">' +
+    '<div class="progress-bar"><div class="progress-fill" style="width:' + progress + '%;background:' + statusColor + '"></div></div>' +
+    '<span class="progress-text">' + (p.current_step || 0) + '/' + (p.total_steps || 6) + ' 步</span>' +
+    '</div>' +
+    '<div class="pipeline-updated">🕐 ' + updated + '</div>' +
+    '</div>' +
+    '<div class="pipeline-step-list">' + stepsHtml + '</div>';
+
+  return card;
+}
+
+
 // ── Initialization ──
 
 async function init() {
@@ -647,6 +770,12 @@ async function init() {
       }
     } catch(_) {}
   }, 15000);
+
+  // ── R112: Pipeline poll (15s) ──
+  async function pollPipelines() {
+    if (activeTabId === 'tab4') renderPipelineDashboard();
+  }
+  setInterval(pollPipelines, 15000);
 
   // 5. R8: Poll bot status
   let offlineSince = {};

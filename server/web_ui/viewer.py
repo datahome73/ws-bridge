@@ -22,6 +22,7 @@ from aiohttp import web
 from server.common import auth, config, persistence
 from server.common import message_store as ms
 from server.web_ui.templates import BIND_TEMPLATE, CHAT_TEMPLATE
+from server.ws_server.pipeline_context import PipelineContextManager
 
 logger = logging.getLogger("ws-bridge.web")
 
@@ -678,6 +679,82 @@ async def handle_api_workspaces(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+# ── R112: Lazy singleton for PipelineContextManager ─────────────────
+
+
+_PIPELINE_MGR: PipelineContextManager | None = None
+
+
+def _get_pipeline_mgr() -> PipelineContextManager:
+    global _PIPELINE_MGR
+    if _PIPELINE_MGR is None:
+        _PIPELINE_MGR = PipelineContextManager(data_dir=config.DATA_DIR)
+    return _PIPELINE_MGR
+
+
+def _summarize_steps(steps: list) -> list:
+    """R112: 从 StepInfo 列表提取前端展示字段。"""
+    result = []
+    for s in steps:
+        if isinstance(s, dict):
+            result.append({
+                "step_key": s.get("step_key", ""),
+                "role": s.get("role", ""),
+                "title": s.get("title", ""),
+                "status": s.get("status", "pending"),
+                "agent_name": s.get("agent_name", ""),
+                "result_msg": s.get("result_msg", ""),
+                "output": s.get("output"),
+            })
+    return result
+
+
+async def handle_api_pipelines(request: web.Request) -> web.Response:
+    """R112: GET /api/pipelines — 返回所有管线的摘要列表。"""
+    token = request.query.get("token", "")
+    if not validate_token(token):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        mgr = _get_pipeline_mgr()
+        items = []
+        for ctx in mgr.get_all_active():
+            d = ctx.to_dict()
+            items.append({
+                "round_name": d["round_name"],
+                "round_title": d.get("round_title", d["round_name"]),
+                "status": d["status"],
+                "current_step": d["current_step"],
+                "total_steps": d["total_steps"],
+                "created_at": d["created_at"],
+                "updated_at": d["updated_at"],
+                "steps": _summarize_steps(d.get("steps", [])),
+                "references": d.get("references", {}),
+            })
+        return web.json_response({"pipelines": items})
+    except Exception as exc:
+        logger.warning("[R112] 获取管线列表异常: %s", exc)
+        return web.json_response({"pipelines": []})
+
+
+async def handle_api_pipeline_detail(request: web.Request) -> web.Response:
+    """R112: GET /api/pipelines/{round_name} — 单管线完整详情。"""
+    token = request.query.get("token", "")
+    if not validate_token(token):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    round_name = request.match_info.get("round_name", "")
+    if not round_name:
+        return web.json_response({"error": "missing round_name"}, status=400)
+    try:
+        mgr = _get_pipeline_mgr()
+        ctx = mgr.get(round_name)
+        if not ctx:
+            return web.json_response({"error": f"pipeline {round_name} not found"}, status=404)
+        return web.json_response(ctx.to_dict())
+    except Exception as exc:
+        logger.warning("[R112] 获取管线详情异常: %s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 # ── Routes registration ──────────────────────────────────────────
 
 
@@ -699,3 +776,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/chat/inbox", handle_api_inbox)
     app.router.add_get("/api/chat/archive", handle_api_archive)
     app.router.add_get("/api/workspaces", handle_api_workspaces)
+    app.router.add_get("/api/pipelines", handle_api_pipelines)
+    app.router.add_get("/api/pipelines/{round_name}", handle_api_pipeline_detail)
