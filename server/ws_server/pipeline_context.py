@@ -224,7 +224,7 @@ class PipelineContext:
             task_kind=PipelineTaskKind(d["task_kind"]),
             workspace_dir=Path(d["workspace_dir"]),
             task_dir=Path(d["task_dir"]),
-            workspace_id=d["workspace_id"],
+            workspace_id=d.get("workspace_id", ""),
             pm_inbox_id=d.get("pm_inbox_id", ""),
             status=PipelineStatus(d["status"]),
             current_phase=d.get("current_phase", "plan"),
