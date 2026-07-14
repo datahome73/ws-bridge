@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -784,17 +785,6 @@ def main():
     # Initialise workspace module
     ws_mod.init()
     # R82: removed load_agent_channels
-
-    # R109: Auto-start pipelines from WORK_PLAN.md
-    try:
-        from .pipeline_auto_starter import scan_and_start
-        from .pipeline_context import PipelineContextManager
-        mgr = PipelineContextManager(data_dir=DATA_DIR)
-        asyncio.ensure_future(
-            scan_and_start(mgr, DATA_DIR.parent, pm_inbox_id=DISPATCH_SENDER_ID)
-        )
-    except Exception:
-        logger.warning("R109 auto-starter init failed (non-fatal)", exc_info=True)
 
     logger.info("WS Bridge starting on %s:%d", HOST, PORT)
     logger.info("Admin agents: %s", ADMIN_AGENTS or "none")
