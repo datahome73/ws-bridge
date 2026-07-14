@@ -256,9 +256,9 @@ function renderTabBar() {
       html += '<div class="tab admin-tab' + (isActive ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
         tab.label + '</div>';
     } else {
-      const tab3Class = 'tab' + (isActive ? ' active' : '') + (!tab.channel ? ' pending' : '');
-      html += '<div class="' + tab3Class + '" data-tab="tab3" onclick="selectTab(\'tab3\')">' +
-        (tab.channel ? tab.label : '🗂️ 历史') + '</div>';
+      const tabClass = 'tab' + (isActive ? ' active' : '') + (!tab.channel ? ' pending' : '');
+      html += '<div class="' + tabClass + '" data-tab="' + id + '" onclick="selectTab(\'' + id + '\')">' +
+        tab.label + '</div>';
     }
   }
   bar.innerHTML = html;
