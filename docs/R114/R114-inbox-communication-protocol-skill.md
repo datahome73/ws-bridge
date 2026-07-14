@@ -92,14 +92,15 @@
 | **嵌入信息** | | |
 | `##` key | 说明 | 必填 |
 |:---------|:-----|:----:|
-| `commit_sha` | 提交的 commit SHA（短格式，7 位） | ✅ |
+| `commit_sha` | 提交的 commit SHA（推荐全量，至少 7 位） | ✅ |
 | `files_changed` | 本次变更的文件列表，逗号分隔 | ✅ |
 | `commit_description` | 提交说明文字 | 可选 |
+| `branch_name` | 推送的目标分支名（默认 dev） | 可选 |
 | **场景说明** | 开发编码完成后 git push dev，发出完成通知 |
 
 **示例：**
 ```
-已完成 ✅ R114 Step 3##commit_sha=abc1234##files_changed=server/main.py,server/handler.py##commit_description=Add pipeline auto-archive feature
+已完成 ✅ R114 Step 3##commit_sha=abc1234def5678##files_changed=server/main.py,server/handler.py##commit_description=Add pipeline auto-archive feature##branch_name=dev
 ```
 
 ---
@@ -193,7 +194,7 @@
 | A — 创建管线 | — | PM | `round_title`, `requirements_url`（两条 kv 在 `##start` 命令中） |
 | B — 工作计划提交 | 1 | PM | `work_plan_url` |
 | C — 设计方案提交 | 2 | 小开 | `tech_plan_url`, `design_decision` |
-| D — 编码提交 | 3 | 爱泰 | `commit_sha`, `files_changed`, `commit_description` |
+| D — 编码提交 | 3 | 爱泰 | `已完成 ✅ R{N} Step 3` | `commit_sha`, `files_changed`, `commit_description`, `branch_name` |
 | E — 代码审查提交 | 4 | 小周 | `review_report_url`, `review_decision` |
 | F — 测试报告提交 | 5 | 泰虾 | `test_result`, `test_report_url`, `test_commit_sha` |
 | G — 合并部署 | 6 | 小爱 | `merge_commit_sha`, `deploy_version` |
