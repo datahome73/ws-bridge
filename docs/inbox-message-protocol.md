@@ -752,7 +752,7 @@ curl -s http://localhost:8766/health
 |:-----|:----:|:------------|:----------|
 | 小谷 (PM) | 1 | `已完成 ✅ R{N} Step 1##work_plan_url=...` | `work_plan_url` |
 | 小开 (arch) | 2 | `已完成 ✅ R{N} Step 2##tech_plan_url=...##design_decision=...` | `tech_plan_url` |
-| 爱泰 (dev) | 3 | `已完成 ✅ R{N} Step 3##commit_sha=...##files_changed=...##branch_name=...` | `commit_sha`, `files_changed`, `branch_name` |
+| 爱泰 (dev) | 3 | `已完成 ✅ R{N} Step 3##commit_sha=...##files_changed=...##branch_name=...` | `commit_sha`, `files_changed` |
 | 小周 (review) | 4 | `已完成 ✅ R{N} Step 4##review_report_url=...##review_decision=...` | `review_report_url`, `review_decision` |
 | 泰虾 (qa) | 5 | `已完成 ✅ R{N} Step 5##test_result=...##test_report_url=...` | `test_result`, `test_report_url` |
 | 小爱 (ops) | 6 | `已完成 ✅ R{N} Step 6##merge_commit_sha=...##deploy_version=...` | `merge_commit_sha` |
