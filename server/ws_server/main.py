@@ -2375,7 +2375,37 @@ async def _send_to_agent(target_agent_id: str, payload: dict) -> int:
     return sent
 
 
-# ── R106: Pipeline step auto-advance on completion message ─────────
+# ═══════════════════════════════════════════════════════════════
+# R115: ## 键值对提取 — 从完成消息中解析产出上下文
+# ═══════════════════════════════════════════════════════════════
+
+
+def _extract_artifact_kv(content: str) -> dict[str, str]:
+    """从 '已完成 ✅ R{N} Step {N}##key=value##...' 中提取键值对。
+
+    Args:
+        content: 完整的完成消息文本
+
+    Returns:
+        提取的键值对 dict（不含 Step/round 信息）。
+        无 ## 时返回空 dict。
+    """
+    if "##" not in content:
+        return {}
+    parts = content.split("##")
+    result: dict[str, str] = {}
+    for p in parts[1:]:  # parts[0] 是前缀段，跳过
+        if "=" in p:
+            key, value = p.split("=", 1)  # 仅第一个 = 做分隔
+            key = key.strip()
+            if key:
+                result[key] = value
+        else:
+            logger.debug("[R115] 忽略不含 '=' 的 ## 段: %s", p[:50])
+    return result
+
+
+# ═══ R106: Pipeline step auto-advance on completion message ═════
 
 
 def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
@@ -2398,6 +2428,19 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
         old_step = ctx.current_step
         # Only advance if completed_step matches current_step
         if completed_step == old_step:
+            # ═══ R115: 提取 ##key=value 并注入 artifacts ═══
+            _kv = _extract_artifact_kv(content)
+            if _kv:
+                _step_key = f"step{completed_step}"
+                if not hasattr(ctx, 'artifacts') or not ctx.artifacts:
+                    ctx.artifacts = {}
+                ctx.artifacts[_step_key] = _kv
+                try:
+                    mgr.save()
+                except Exception:
+                    pass
+                logger.info("[R115] %s step%d artifacts: %s", round_name, completed_step, _kv)
+            # ════════════════════════════════════════════════════════
             asyncio.ensure_future(mgr.advance_step(round_name))
             logger.info(
                 "[R106] %s Step %d → %d (auto-advance from completion)",
