@@ -3238,6 +3238,11 @@ async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bo
     ctx.current_step = 2
     ctx.steps[0]["status"] = "done"
     ctx.steps[0]["result_msg"] = "需求已就绪（##start 创建时自动确认）"
+    # ═══ R119 fix: 落盘 Step 1 自动确认状态，防止容器重启后丢失 ═══
+    try:
+        mgr.save()
+    except Exception:
+        pass
     await _auto_dispatch(ctx, 2)
 
     # 8. 回复发送者
