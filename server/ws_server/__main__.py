@@ -833,6 +833,14 @@ def main():
     else:
         logger.info("[PAS] disabled (PAS_ENABLED=0)")
 
+    # ── R118: 启动离线重试循环 ──
+    async def _start_retry_loop(app):
+        from .main import _retry_loop
+        asyncio.create_task(_retry_loop())
+        logger.info("[R118] retry loop started")
+
+    app.on_startup.append(_start_retry_loop)
+
     # [REMOVED] Start periodic cleanup + auto-archive via on_startup
     # User requested to stop ALL auto features (2026-07-13)
     # app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))

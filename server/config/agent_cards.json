@@ -1,4 +1,19 @@
 {
+  "pm-bot": {
+    "display_name": "小谷",
+    "pipeline_roles": [
+      "pm"
+    ],
+    "skills": [
+      "write-requirements",
+      "review-requirements"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "pm"
+    }
+  },
   "arch-bot": {
     "display_name": "小开",
     "pipeline_roles": [
@@ -57,21 +72,6 @@
     "trigger_preference": {
       "mode": "mention",
       "mention_keyword": "qa"
-    }
-  },
-  "pm-bot": {
-    "display_name": "小谷",
-    "pipeline_roles": [
-      "pm"
-    ],
-    "skills": [
-      "write-requirements",
-      "review-requirements"
-    ],
-    "status": "online",
-    "trigger_preference": {
-      "mode": "mention",
-      "mention_keyword": "pm"
     }
   },
   "admin-bot": {
