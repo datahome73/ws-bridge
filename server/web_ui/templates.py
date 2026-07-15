@@ -575,9 +575,13 @@ async function renderPipelineDashboard() {
       list.innerHTML = '<div class="pipeline-empty">📊 暂无管线<small>使用 ##start##R{N} 启动一条管线</small></div>';
       return;
     }
-    // Sort: newest first by created_at
+    // Sort: newest round first (R124 > R123 > R122)
+    function extractRoundNum(name) {
+      const m = (name || '').match(/R(\d+)/i);
+      return m ? parseInt(m[1], 10) : 0;
+    }
     pipelines.sort(function(a,b) {
-      return (b.created_at || 0) - (a.created_at || 0);
+      return extractRoundNum(b.round_name) - extractRoundNum(a.round_name);
     });
     for (var i = 0; i < pipelines.length; i++) {
       list.appendChild(createPipelineCard(pipelines[i]));
