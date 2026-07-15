@@ -1269,7 +1269,7 @@ async def _restore_pipeline_dispatches() -> None:
             step_info = next(
                 (s for s in (ctx.steps or []) if s.get("name") == step_key), None,
             )
-            if not step_info or step_info.get("status") != "pending":
+            if not step_info or step_info.get("status") not in ("pending", "in_progress"):
                 continue
             logger.info("[R119] 恢复派活: %s step%d → %s",
                         ctx.round_name, step_num,
@@ -2725,8 +2725,8 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
     content = _render_template(next_template, ctx, step_num)
 
     payload = {
-        "type": "message",
-        "channel": "_inbox:server",
+        "type": "broadcast",
+        "channel": f"_inbox:{target_agent_id}",
         "content": content,
         "from_name": "小谷",
         "agent_id": "ws_f26e585f6479",
@@ -2756,6 +2756,13 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
                 next_step_info.get("agent_name", "?"), sent)
     # R118: 派活成功后通知 PM
     if sent > 0:
+        # 标记 step 为进行中，防止重复派活
+        next_step_info["status"] = "in_progress"
+        try:
+            mgr = _ensure_pipeline_manager()
+            mgr.save()
+        except Exception:
+            pass
         asyncio.ensure_future(_notify_pm(ctx, step_num, "dispatched"))
     else:
         # R118: 离线重试
