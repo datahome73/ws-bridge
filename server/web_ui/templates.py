@@ -575,12 +575,9 @@ async function renderPipelineDashboard() {
       list.innerHTML = '<div class="pipeline-empty">📊 暂无管线<small>使用 ##start##R{N} 启动一条管线</small></div>';
       return;
     }
-    // Sort: running first, then planning/blocked, then completed/cancelled
-    const order = {running:0, init:1, planning:2, blocked:3, completed:4, cancelled:5, stopped:6};
+    // Sort: newest first by created_at
     pipelines.sort(function(a,b) {
-      var oa = order[a.status] || 99, ob = order[b.status] || 99;
-      if (oa !== ob) return oa - ob;
-      return (b.updated_at || 0) - (a.updated_at || 0);
+      return (b.created_at || 0) - (a.created_at || 0);
     });
     for (var i = 0; i < pipelines.length; i++) {
       list.appendChild(createPipelineCard(pipelines[i]));
