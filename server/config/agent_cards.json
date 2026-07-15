@@ -1,8 +1,23 @@
 {
+  "pm-bot": {
+    "display_name": "小谷",
+    "pipeline_roles": [
+      "pm"
+    ],
+    "skills": [
+      "write-requirements",
+      "review-requirements"
+    ],
+    "status": "online",
+    "trigger_preference": {
+      "mode": "mention",
+      "mention_keyword": "pm"
+    }
+  },
   "arch-bot": {
     "display_name": "小开",
     "pipeline_roles": [
-      "architect"
+      "arch"
     ],
     "skills": [
       "write-tech-plan",
@@ -17,7 +32,7 @@
   "dev-bot": {
     "display_name": "爱泰",
     "pipeline_roles": [
-      "developer"
+      "dev"
     ],
     "skills": [
       "implement-code",
@@ -32,7 +47,7 @@
   "review-bot": {
     "display_name": "小周",
     "pipeline_roles": [
-      "reviewer"
+      "review"
     ],
     "skills": [
       "code-review",
@@ -59,25 +74,10 @@
       "mention_keyword": "qa"
     }
   },
-  "pm-bot": {
-    "display_name": "小谷",
-    "pipeline_roles": [
-      "product-manager"
-    ],
-    "skills": [
-      "write-requirements",
-      "review-requirements"
-    ],
-    "status": "online",
-    "trigger_preference": {
-      "mode": "mention",
-      "mention_keyword": "pm"
-    }
-  },
   "admin-bot": {
     "display_name": "小爱",
     "pipeline_roles": [
-      "admin"
+      "operations"
     ],
     "skills": [
       "manage-platform",
