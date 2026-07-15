@@ -1274,7 +1274,8 @@ async def _restore_pipeline_dispatches() -> None:
             logger.info("[R119] 恢复派活: %s step%d → %s",
                         ctx.round_name, step_num,
                         step_info.get("agent_id", "?")[:20])
-            asyncio.ensure_future(_auto_dispatch(ctx, step_num))
+            _enqueue_retry(ctx, step_num)
+            _enqueue_retry(ctx, step_num)
     except Exception:
         pass
 
@@ -1344,7 +1345,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     # ── R43 A: Lazy-start watchdog on first message ──
     _ensure_watchdog()
     # R49 C: Restore pipeline timers on start
-    _restore_pipeline_timers()
+    await _restore_pipeline_timers()
     # ── R65 A2: Start git sync loop ──
     _ensure_git_scan()
     # ── R67 B1: Ensure agent cards loaded + watcher running ──
