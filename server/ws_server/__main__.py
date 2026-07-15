@@ -841,6 +841,14 @@ def main():
 
     app.on_startup.append(_start_retry_loop)
 
+    # ── R119: 启动时恢复活跃管线的自动派活 ──
+    async def _restore_dispatches(app):
+        from .main import _restore_pipeline_dispatches
+        await _restore_pipeline_dispatches()
+        logger.info("[R119] pipeline dispatch restoration completed")
+
+    app.on_startup.append(_restore_dispatches)
+
     # [REMOVED] Start periodic cleanup + auto-archive via on_startup
     # User requested to stop ALL auto features (2026-07-13)
     # app.on_startup.append(lambda _: asyncio.create_task(_periodic_cleanup()))
