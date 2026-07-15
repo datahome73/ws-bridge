@@ -2463,6 +2463,7 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                 # 最后一步已完成，标记管线 completed
                 asyncio.ensure_future(mgr.transition_to(round_name, PipelineStatus.COMPLETED))
                 logger.info("[R107] %s 全管线已完成 ✅", round_name)
+                asyncio.ensure_future(_notify_pm(ctx, ctx.total_steps, "completed"))
             return True, round_name
         elif completed_step < old_step:
             logger.info(
@@ -2479,6 +2480,121 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
     except Exception as e:
         logger.warning("[R106] 自动推进异常: %s", e)
         return False, f"error: {e}"
+
+
+# ── R118: PM 通知函数 ──────────────────────────────────
+
+
+async def _notify_pm(ctx: PipelineContext, step_num: int, status: str, detail: str = "") -> None:
+    """发送管线通知给 PM。
+    status: 'dispatched' | 'completed' | 'failed' | 'retrying'
+    """
+    pm_id = config.PIPELINE_PM_AGENT_ID
+    role_names = {1: "📋 PM", 2: "📐 Arch", 3: "💻 Dev", 4: "👁 Review", 5: "🧪 QA", 6: "🚢 Ops"}
+    step_role = role_names.get(step_num, "?")
+
+    if status == "dispatched":
+        agent_name = _get_step_agent_name(ctx, step_num)
+        content = (
+            f"✅ **{ctx.round_name} 管线自动推进**\n\n"
+            f"Step {step_num} 🚀 已派活 → {agent_name}（{step_role}）\n"
+            + (f"\n{detail}" if detail else "")
+        )
+    elif status == "completed":
+        # 构造完成摘要
+        step_lines = []
+        for i, s in enumerate(ctx.steps, 1):
+            role = role_names.get(i, "?")
+            agent = s.get("agent_name", s.get("agent_id", "?")[:12])
+            out = s.get("output", s.get("result_msg", ""))
+            out_short = out[:40] + "..." if len(str(out)) > 40 else out
+            step_lines.append(f"| {i} | {role} | {agent} | {out_short} |")
+        table_header = "| Step | 角色 | 执行者 | 产出 |\n|:---:|:-----|:-------|:-----|\n"
+        content = (
+            f"🎉 **{ctx.round_name} 管线已完成！**\n\n"
+            f"{table_header}{chr(10).join(step_lines)}"
+        )
+    elif status == "failed":
+        agent_name = _get_step_agent_name(ctx, step_num)
+        content = (
+            f"⚠️ **{ctx.round_name} 管线异常**\n\n"
+            f"Step {step_num}（{step_role}）→ {agent_name} 离线，"
+            f"自动派活失败（5 次重试）\n"
+            + (f"\n{detail}" if detail else "")
+        )
+    elif status == "retrying":
+        agent_name = _get_step_agent_name(ctx, step_num)
+        content = (
+            f"⏳ **{ctx.round_name} 派活排队中**\n\n"
+            f"Step {step_num}（{step_role}）→ {agent_name} 离线，排队中（{detail}）"
+        )
+    else:
+        return
+
+    payload = {
+        "type": "broadcast",
+        "channel": f"_inbox:{pm_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": content,
+        "ts": time.time(),
+    }
+    sent = await _send_to_agent(pm_id, payload)
+    logger.info("[R118] 通知 PM step%d status=%s sent=%d", step_num, status, sent)
+
+
+# ── R118: 离线重试队列 ──────────────────────────────────
+
+_pending_retries: dict[str, dict] = {}  # round_name → {ctx, step_num, retry_count, next_retry_at, notify_sent}
+
+async def _retry_loop() -> None:
+    """后台循环，每 30s 扫描待重试队列。最多重试 5 次，每次间隔 60s。"""
+    while True:
+        now = time.time()
+        for round_name in list(_pending_retries.keys()):
+            entry = _pending_retries[round_name]
+            if now < entry["next_retry_at"]:
+                continue
+            ctx = entry["ctx"]
+            step_num = entry["step_num"]
+            entry["retry_count"] += 1
+            logger.info("[R118] 重试派活 %s step%d (尝试 %d/5)",
+                        round_name, step_num, entry["retry_count"])
+            result = await _auto_dispatch(ctx, step_num)
+            if result:
+                del _pending_retries[round_name]
+                logger.info("[R118] 重试成功: %s step%d", round_name, step_num)
+            elif entry["retry_count"] >= 5:
+                del _pending_retries[round_name]
+                asyncio.ensure_future(
+                    _notify_pm(ctx, step_num, "failed",
+                               f"5 次重试均失败，目标 bot 持续离线"))
+                logger.warning("[R118] 重试耗尽: %s step%d 5/5 失败", round_name, step_num)
+            else:
+                entry["next_retry_at"] = time.time() + 60
+                if not entry.get("notify_sent"):
+                    entry["notify_sent"] = True
+                    asyncio.ensure_future(
+                        _notify_pm(ctx, step_num, "retrying",
+                                   f"尝试 {entry['retry_count']+1}/5"))
+                logger.info("[R118] 重试排队: %s step%d 等待 60s",
+                            round_name, step_num)
+        await asyncio.sleep(30)
+
+
+def _enqueue_retry(ctx: PipelineContext, step_num: int) -> None:
+    """将失败的自动派活加入重试队列。"""
+    round_name = ctx.round_name
+    if round_name in _pending_retries:
+        return  # 已在队列中
+    _pending_retries[round_name] = {
+        "ctx": ctx,
+        "step_num": step_num,
+        "retry_count": 0,
+        "next_retry_at": time.time() + 60,
+        "notify_sent": False,
+    }
+    logger.info("[R118] 入重试队列: %s step%d", round_name, step_num)
 
 
 # ── R107: 消息模板渲染 ──────────────────────────────────
@@ -2606,6 +2722,12 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
     logger.info("[R109] 自动派活 step%d → %s (%s): sent=%d",
                 step_num, target_agent_id,
                 next_step_info.get("agent_name", "?"), sent)
+    # R118: 派活成功后通知 PM
+    if sent > 0:
+        asyncio.ensure_future(_notify_pm(ctx, step_num, "dispatched"))
+    else:
+        # R118: 离线重试
+        _enqueue_retry(ctx, step_num)
     return sent > 0
 
 
@@ -2885,15 +3007,62 @@ def _resolve_card_key_to_ws_id(card_key: str) -> str:
     return ""
 
 
-def _build_default_templates() -> dict[str, str]:
-    """返回 6 步标准模板组（复用 commands/pipeline.py L234-241 模板字符串）."""
+def _build_rich_templates(round_name: str, references: dict = None, artifacts: dict = None) -> dict[str, str]:
+    """返回 6 步富上下文模板组，引用 references（文档 URL）和 artifacts（前序步产出）."""
+    ref = references or {}
+    art = artifacts or {}
+    req_url = ref.get("requirements_url", "")
+    wp_url = ref.get("work_plan_url", "")
+
+    # 从 artifacts 读取前序步产出（如 Step 2 产出 tech_plan_url）
+    step2_art = art.get("step2", {}) if isinstance(art.get("step2"), dict) else {}
+    step3_art = art.get("step3", {}) if isinstance(art.get("step3"), dict) else {}
+    step4_art = art.get("step4", {}) if isinstance(art.get("step4"), dict) else {}
+    step5_art = art.get("step5", {}) if isinstance(art.get("step5"), dict) else {}
+
     return {
-        "step1": "🚀 **{round} 管线已启动**\n\n任务: {round} Step 1 — 标注 WORK_PLAN 已审核\n\n请完成后回复：已完成 ✅ {round} Step 1",
-        "step2": "📋 **{round} Step 2 — 技术方案**\n\n请开始设计技术方案，完成后回复：已完成 ✅ {round} Step 2",
-        "step3": "💻 **{round} Step 3 — 编码实现**\n\n请根据技术方案编码实现，完成后回复：已完成 ✅ {round} Step 3",
-        "step4": "👁 **{round} Step 4 — 代码审查**\n\n请审查代码，完成后回复：已完成 ✅ {round} Step 4",
-        "step5": "🧪 **{round} Step 5 — 测试验证**\n\n请进行测试验证，完成后回复：已完成 ✅ {round} Step 5",
-        "step6": "🚀 **{round} Step 6 — 合并部署归档**\n\n请合并部署并归档，完成后回复：已完成 ✅ {round} Step 6",
+        "step1": "",
+        "step2": (
+            f"📋 **{round_name} Step 2 — 技术方案**\n\n"
+            + (f"##需求文档## {req_url}\n" if req_url else "")
+            + (f"##工作计划## {wp_url}\n" if wp_url else "")
+            + "\n请完成技术方案并推 dev，回复：已完成 ✅ {round} Step 2"
+        ),
+        "step3": (
+            f"💻 **{round_name} Step 3 — 编码实现**\n\n"
+            + (f"##需求文档## {req_url}\n" if req_url else "")
+            + (f"##技术方案## {step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))}\n"
+               if (step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))) else "")
+            + "\n请完成编码并推 dev，回复：已完成 ✅ {round} Step 3"
+        ),
+        "step4": (
+            f"👁 **{round_name} Step 4 — 代码审查**\n\n"
+            + (f"##需求文档## {req_url}\n" if req_url else "")
+            + (f"##技术方案## {step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))}\n"
+               if (step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))) else "")
+            + "\n请审查代码并回复审查报告，回复：已完成 ✅ {round} Step 4"
+        ),
+        "step5": (
+            f"🧪 **{round_name} Step 5 — 测试验证**\n\n"
+            + (f"##需求文档## {req_url}\n" if req_url else "")
+            + (f"##测试范围## {step3_art.get('test_scope', ref.get('test_scope', ''))}\n"
+               if step3_art.get('test_scope', ref.get('test_scope', '')) else "")
+            + (f"##分支## {step3_art.get('branch_name', ref.get('branch_name', ''))}\n"
+               if step3_art.get('branch_name', ref.get('branch_name', '')) else "")
+            + "\n请进行测试验证，回复：已完成 ✅ {round} Step 5"
+        ),
+        "step6": (
+            f"🚀 **{round_name} Step 6 — 合并部署归档**\n\n"
+            + (f"##分支## {step5_art.get('branch', step3_art.get('branch_name', ref.get('branch_name', '')))}\n"
+               if (step5_art.get('branch', step3_art.get('branch_name', ref.get('branch_name', '')))) else "")
+            + (f"##commit## {step5_art.get('commit_sha', ref.get('commit_sha', ''))}\n"
+               if step5_art.get('commit_sha', ref.get('commit_sha', '')) else "")
+            + (f"##测试结果## {step5_art.get('test_summary', ref.get('test_summary', ''))}\n"
+               if step5_art.get('test_summary', ref.get('test_summary', '')) else "")
+            + (f"##测试报告## {step5_art.get('test_report_url', ref.get('test_report_url', ''))}\n"
+               if step5_art.get('test_report_url', ref.get('test_report_url', '')) else "")
+            + f"\n请合并部署归档并推送 main，回复：已完成 ✅ {round} Step 6"
+        ),
     }
 
 
@@ -3036,8 +3205,8 @@ async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bo
         if kv.get(ref_key):
             references[ref_key] = kv[ref_key]
 
-    # 4. 构建 message_templates
-    templates = _build_default_templates()
+    # 4. 构建 message_templates（R118: 富上下文模板）
+    templates = _build_rich_templates(round_name, references, {})
 
     # 5. 创建 PipelineContext
     from pathlib import Path
@@ -3065,8 +3234,11 @@ async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bo
     mgr.set_context(round_name, ctx)
     await mgr.transition_to(round_name, PipelineStatus.RUNNING)
 
-    # 7. 自动派活 Step 1
-    await _auto_dispatch(ctx, 1)
+    # 7. 自动派活（R118: Step 1 自动确认，PM 发 ##start 表示需求已就绪）
+    ctx.current_step = 2
+    ctx.steps[0]["status"] = "done"
+    ctx.steps[0]["result_msg"] = "需求已就绪（##start 创建时自动确认）"
+    await _auto_dispatch(ctx, 2)
 
     # 8. 回复发送者
     await _send(ws, {
