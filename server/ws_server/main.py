@@ -1250,6 +1250,37 @@ async def _restore_pipeline_timers() -> None:
         pass
 
 
+# ═══ R119: 启动时恢复活跃管线的自动派活 ═══
+
+
+async def _restore_pipeline_dispatches() -> None:
+    """On server start, re-dispatch the current step for all RUNNING pipelines
+    whose current step is still pending.  Handles the case where a container
+    restart lost the original auto-dispatch message."""
+    try:
+        mgr = _ensure_pipeline_manager()
+        for ctx in mgr.get_all_active():
+            if ctx.status != PipelineStatus.RUNNING:
+                continue
+            step_num = ctx.current_step
+            if step_num < 1 or step_num > ctx.total_steps:
+                continue
+            step_key = f"step{step_num}"
+            step_info = next(
+                (s for s in (ctx.steps or []) if s.get("name") == step_key), None,
+            )
+            if not step_info or step_info.get("status") != "pending":
+                continue
+            logger.info("[R119] 恢复派活: %s step%d → %s",
+                        ctx.round_name, step_num,
+                        step_info.get("agent_id", "?")[:20])
+            asyncio.ensure_future(_auto_dispatch(ctx, step_num))
+    except Exception:
+        pass
+
+
+# ════════════════════════════════════════════════════════════
+
 # ── R38: Task notify broadcast ─────────────────────────────────────
 
 
