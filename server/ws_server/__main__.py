@@ -29,7 +29,15 @@ import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge")
 
-# ── [REMOVED] Periodic cleanup task — ALL auto stopped per user request (2026-07-13) ──
+# ── Logging config: show INFO+ in container logs ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+# ── [REMOVED] Periodic cleanup task ──
 #
 # async def _auto_archive_loop():
 #     ...removed...
