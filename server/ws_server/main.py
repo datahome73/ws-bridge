@@ -3279,6 +3279,7 @@ async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bo
         message_templates=templates,
         round_title=kv.get("round_title", round_name),
         created_by=agent_id,
+        created_at=time.time(),
     )
 
     # 6. 落盘
