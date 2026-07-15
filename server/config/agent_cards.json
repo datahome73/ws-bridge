@@ -2,7 +2,7 @@
   "arch-bot": {
     "display_name": "小开",
     "pipeline_roles": [
-      "architect"
+      "arch"
     ],
     "skills": [
       "write-tech-plan",
@@ -17,7 +17,7 @@
   "dev-bot": {
     "display_name": "爱泰",
     "pipeline_roles": [
-      "developer"
+      "dev"
     ],
     "skills": [
       "implement-code",
@@ -32,7 +32,7 @@
   "review-bot": {
     "display_name": "小周",
     "pipeline_roles": [
-      "reviewer"
+      "review"
     ],
     "skills": [
       "code-review",
@@ -62,7 +62,7 @@
   "pm-bot": {
     "display_name": "小谷",
     "pipeline_roles": [
-      "product-manager"
+      "pm"
     ],
     "skills": [
       "write-requirements",
@@ -77,7 +77,7 @@
   "admin-bot": {
     "display_name": "小爱",
     "pipeline_roles": [
-      "admin"
+      "operations"
     ],
     "skills": [
       "manage-platform",
