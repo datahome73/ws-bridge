@@ -2755,6 +2755,13 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
                 next_step_info.get("agent_name", "?"), sent)
     # R118: 派活成功后通知 PM
     if sent > 0:
+        # 标记 step 为进行中，防止重复派活
+        next_step_info["status"] = "in_progress"
+        try:
+            mgr = _ensure_pipeline_manager()
+            mgr.save()
+        except Exception:
+            pass
         asyncio.ensure_future(_notify_pm(ctx, step_num, "dispatched"))
     else:
         # R118: 离线重试
