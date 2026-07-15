@@ -2479,6 +2479,18 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                 logger.info("[R115] %s step%d artifacts: %s", round_name, completed_step, _kv)
             # ════════════════════════════════════════════════════════
             asyncio.ensure_future(mgr.advance_step(round_name))
+            # ═══ R120: 标记已完成 step 状态为 done（防止重复派活时误判）═══
+            try:
+                _step_key = f"step{completed_step}"
+                _done_info = next(
+                    (s for s in (ctx.steps or []) if s.get("name") == _step_key), None,
+                )
+                if _done_info and _done_info.get("status") != "done":
+                    _done_info["status"] = "done"
+                    mgr.save()
+            except Exception:
+                pass
+            # ════════════════════════════════════════════════════════════════
             logger.info(
                 "[R106] %s Step %d → %d (auto-advance from completion)",
                 round_name, old_step, old_step + 1,
