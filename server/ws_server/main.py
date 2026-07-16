@@ -3293,7 +3293,21 @@ async def _handle_hash_advance(round_name: str, kv: dict, agent_id: str, ws) -> 
     """处理 ##advance 命令：PM 手动推进管线到下一步。
 
     ##advance##R{N}##step=N
+    仅 PM（PIPELINE_PM_AGENT_ID）可用。
     """
+    # ═══ 权限校验：仅 PM 可用 ═══
+    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
+    if pm_agent_id and agent_id != pm_agent_id:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": "❌ 无权限: ##advance 仅 PM 可用",
+            "ts": time.time(),
+        })
+        return True
+
     step_str = kv.get("step", "")
     if not step_str.isdigit():
         await _send(ws, {
