@@ -527,25 +527,23 @@ async def _pipeline_git_sync_scan():
 
 # ═══ R122: 管线超时告警扫描 ════
 
-_R122_TIMEOUT_SCANNER_TASK: asyncio.Task | None = None
-
-
 def _ensure_timeout_scanner() -> None:
     """在 handler 初始化时调用一次。启动超时扫描定时循环。"""
-    global _R122_TIMEOUT_SCANNER_TASK
     timeout_min = config.PIPELINE_TIMEOUT_ALERT_MINUTES
     scan_interval = config.PIPELINE_TIMEOUT_SCAN_INTERVAL
     if timeout_min <= 0:
         logger.info("[R122] 管线超时告警已禁用（PIPELINE_TIMEOUT_ALERT_MINUTES=%d）", timeout_min)
         return
-    if _R122_TIMEOUT_SCANNER_TASK is None or _R122_TIMEOUT_SCANNER_TASK.done():
-        _R122_TIMEOUT_SCANNER_TASK = asyncio.create_task(
-            _start_timeout_scan_loop(timeout_min, scan_interval)
-        )
-        logger.info(
-            "[R122] 管线超时扫描已启动（timeout=%dmin, interval=%ds）",
-            timeout_min, scan_interval,
-        )
+    if state._TIMEOUT_SCAN_STARTED:
+        return
+    state._TIMEOUT_SCAN_TASK = asyncio.create_task(
+        _start_timeout_scan_loop(timeout_min, scan_interval)
+    )
+    state._TIMEOUT_SCAN_STARTED = True
+    logger.info(
+        "[R122] 管线超时扫描已启动（timeout=%dmin, interval=%ds）",
+        timeout_min, scan_interval,
+    )
 
 
 async def _start_timeout_scan_loop(timeout_min: int, scan_interval: int) -> None:
