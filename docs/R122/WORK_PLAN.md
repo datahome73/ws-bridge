@@ -86,11 +86,18 @@
 **产出格式：** `docs/R122/R122-code-review.md`
 
 ---
+### Step 5 — Dev 部署（小爱）
 
-### Step 5 — Dev 测试（泰虾）
+- 构建 `ws-bridge:r122-dev` 镜像
+- 部署到 dev 测试环境容器（ws-bridge-dev）
+- 健康检查通过（WSS 8765 + Web UI 8766 均可访问）
+- 确认启动日志出现 `[R122] 管线超时扫描已启动`
 
-**任务：**
-在 ws-bridge-dev 环境验证超时告警功能。
+### Step 6 — Dev 测试（泰虾）
+
+产出：`docs/R122/R122-test-report.md`
+
+在 dev 测试环境容器上验证超时告警功能。
 
 **验证项：**
 
@@ -104,17 +111,28 @@
 | ⑥ | `PIPELINE_TIMEOUT_ALERT_MINUTES=0` 启动 | 日志显示已禁用，扫描不运行 |
 | ⑦ | 无 running 管线时扫描不报错 | 正常跳过 |
 
-**产出格式：** `docs/R122/R122-test-report.md`
+**产出格式：** 按 `docs/templates/R-test-report.md` 模板编写。
 
----
+### Step 7 — 上线验证（泰虾 + 小爱）
 
-### Step 6 — 合并部署归档（小爱）
+产出：`docs/R122/R122-release-verification.md`
 
-**任务：**
-1. 合并 `dev` → `main`
-2. 更新生产容器（ws-bridge 镜像）
-3. 创建 `##start##R122V2` 管线验证超时告警在生产环境正常工作
-4. 归档 R122 文档
+- 创建 `##start##R122V2` 管线，在测试环境跑一次全流程
+- 确认超时告警在生产环境正常工作
+- 确认容器重启后 `timeout_alerted` 状态不丢失
+- ✅ 通过 → Step 8 / ❌ 退回对应环节
+
+### Step 8 — 合并 main + 生产部署（小爱）
+
+- 合并 `dev` → `main`
+- 构建 `ws-bridge:r122` 镜像
+- 更新生产环境容器
+- 确认生产环境启动日志正常
+
+### Step 9 — 归档
+
+- 全员 ACK
+- 归档轮次文档
 
 ---
 
