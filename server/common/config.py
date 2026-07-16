@@ -97,14 +97,6 @@ SERVER_INBOX_CHANNEL: str = "_inbox:server"
 # ── R107/R108: 自动派活开关 — R108 永久开启 ─────────────────
 AUTO_DISPATCH_ENABLED: bool = True
 
-# ── R122: 管线超时告警（分钟）— 0 或负数表示关闭 ─────────
-PIPELINE_TIMEOUT_ALERT_MINUTES: int = int(
-    os.environ.get("R122_TIMEOUT_ALERT_MINUTES", "30")
-)
-PIPELINE_TIMEOUT_ALERT_SCAN_INTERVAL: int = int(
-    os.environ.get("R122_TIMEOUT_SCAN_INTERVAL", "300")  # 5 分钟
-)
-
 # ── R102: Dispatch notification target ──────────────────────────
 DISPATCH_SENDER_ID: str = os.environ.get(
     "DISPATCH_SENDER_ID",
