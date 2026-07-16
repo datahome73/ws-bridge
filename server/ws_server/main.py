@@ -491,6 +491,90 @@ def _ensure_git_scan() -> None:
         logger.info("[R65] Git sync watchdog 已启动（interval=%ds）", config.GIT_SYNC_INTERVAL)
 
 
+# ── R122: 管线超时告警扫描 ──────────────────────────────
+
+_PIPELINE_TIMEOUT_TASK: asyncio.Task | None = None
+
+
+def _ensure_timeout_scanner() -> None:
+    """启动管线超时扫描循环（幂等）。"""
+    global _PIPELINE_TIMEOUT_TASK
+    if config.PIPELINE_TIMEOUT_ALERT_MINUTES <= 0:
+        logger.info("[R122] 超时告警已禁用（PIPELINE_TIMEOUT_ALERT_MINUTES=%d）",
+                     config.PIPELINE_TIMEOUT_ALERT_MINUTES)
+        return
+    if _PIPELINE_TIMEOUT_TASK is None or _PIPELINE_TIMEOUT_TASK.done():
+        _PIPELINE_TIMEOUT_TASK = asyncio.create_task(_start_pipeline_timeout_scan_loop())
+        logger.info("[R122] 管线超时扫描已启动（interval=%ds, timeout=%dmin）",
+                     config.PIPELINE_TIMEOUT_ALERT_SCAN_INTERVAL,
+                     config.PIPELINE_TIMEOUT_ALERT_MINUTES)
+
+
+async def _start_pipeline_timeout_scan_loop() -> None:
+    """定时扫描 all running 管线，检查 step 是否超时。"""
+    while True:
+        await asyncio.sleep(config.PIPELINE_TIMEOUT_ALERT_SCAN_INTERVAL)
+        try:
+            await _pipeline_timeout_scan()
+        except Exception as e:
+            logger.warning("[R122] 超时扫描异常: %s", e)
+
+
+async def _pipeline_timeout_scan() -> None:
+    """扫描所有 running 管线，对超时的 in_progress step 发送告警给 PM。"""
+    threshold = config.PIPELINE_TIMEOUT_ALERT_MINUTES * 60
+    mgr = _ensure_pipeline_manager()
+    now = time.time()
+    pm_id = config.PIPELINE_PM_AGENT_ID
+    if not pm_id:
+        return
+
+    for ctx in mgr.get_all_active():
+        if ctx.status != PipelineStatus.RUNNING:
+            continue
+        for step_info in (ctx.steps or []):
+            if step_info.get("status") != "in_progress":
+                continue
+            dispatched_at = step_info.get("dispatched_at", 0)
+            if not dispatched_at:
+                continue
+            elapsed = now - dispatched_at
+            if elapsed < threshold:
+                continue
+            if step_info.get("timeout_alerted"):
+                continue
+
+            # ── 发送告警（每 step 只发一次）──
+            step_key = step_info.get("name", "?")
+            step_num = step_key.replace("step", "")
+            agent_name = step_info.get("agent_name",
+                         step_info.get("agent_id", "?")[:12])
+            elapsed_min = int(elapsed // 60)
+            content = (
+                f"⏰ **{ctx.round_name} 管线超时告警**\n\n"
+                f"Step {step_num}（{agent_name}）已派活超过 {elapsed_min} 分钟，"
+                f"仍未收到完成确认。\n\n"
+                f"状态: {step_info.get('status', '?')}\n"
+                f"派活时间: {time.strftime('%H:%M:%S', time.localtime(dispatched_at))}\n\n"
+                f"请人工排查该 bot 的状态。"
+            )
+            await _send_to_agent(pm_id, {
+                "type": "broadcast",
+                "channel": f"_inbox:{pm_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": content,
+                "ts": time.time(),
+            })
+            step_info["timeout_alerted"] = True
+            try:
+                mgr.save()
+            except Exception:
+                pass
+            logger.info("[R122] 超时告警已发送: %s Step %s (%dmin)",
+                         ctx.round_name, step_num, elapsed_min)
+
+
 async def _start_git_sync_loop():
     """独立的 git 同步定时循环，每 GIT_SYNC_INTERVAL 秒执行一次."""
     while True:
@@ -1347,6 +1431,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     await _restore_pipeline_timers()
     # ── R65 A2: Start git sync loop ──
     _ensure_git_scan()
+    # ── R122: Start pipeline timeout scanner ──
+    _ensure_timeout_scanner()
     # ── R67 B1: Ensure agent cards loaded + watcher running ──
     _ensure_agent_cards_loaded()
     _ensure_card_watcher()
@@ -2769,6 +2855,9 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
     if sent > 0:
         # 标记 step 为进行中，防止重复派活
         next_step_info["status"] = "in_progress"
+        # ── R122: 记录派活时间（超时告警用）──
+        next_step_info["dispatched_at"] = time.time()
+        next_step_info["timeout_alerted"] = False
         try:
             mgr = _ensure_pipeline_manager()
             mgr.save()
