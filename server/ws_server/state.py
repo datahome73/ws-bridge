@@ -60,6 +60,10 @@ _step_ack_states: dict[str, dict] = {}  # "{round}/{step}" -> state info
 # ── R65: Git pipeline sync state ───────────────────────────────
 _GIT_SYNC_TASK: asyncio.Task | None = None
 
+# ── R122 A: Timeout scan state ────────────────────────────────
+_TIMEOUT_SCAN_TASK: asyncio.Task | None = None
+_TIMEOUT_SCAN_STARTED: bool = False
+
 _LOBBY_PAUSED: bool = False
 _LOBBY_PAUSED_ROUND: str = ""
 
