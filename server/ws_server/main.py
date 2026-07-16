@@ -3220,6 +3220,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
     ##start##R{N}##key=value
     ##status##R{N}
     ##stop##R{N}
+    ##advance##R{N}##step=N
     ##help
     """
     parts = content.split("##")
@@ -3234,6 +3235,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
                 "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
                 "`##status##R{N}` — 查询管线状态\n"
                 "`##stop##R{N}` — 停止管线\n"
+                "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
                 "`##help` — 显示本帮助"
             ),
             "ts": time.time(),
@@ -3256,6 +3258,8 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
         return await _handle_hash_status(round_name, agent_id, ws)
     elif cmd == "stop":
         return await _handle_hash_stop(round_name, agent_id, ws)
+    elif cmd == "advance":
+        return await _handle_hash_advance(round_name, kv, agent_id, ws)
     elif cmd == "help":
         await _send(ws, {
             "type": "broadcast",
@@ -3267,6 +3271,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
                 "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
                 "`##status##R{N}` — 查询管线状态\n"
                 "`##stop##R{N}` — 停止管线\n"
+                "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
                 "`##help` — 显示本帮助"
             ),
             "ts": time.time(),
@@ -3278,9 +3283,51 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
         "channel": f"_inbox:{agent_id}",
         "from_name": "系统",
         "from_agent": state.SYSTEM_AGENT_ID,
-        "content": f"❌ 未知 ## 命令: {cmd}，可用: start / status / stop / help",
+        "content": f"❌ 未知 ## 命令: {cmd}，可用: start / status / stop / advance / help",
         "ts": time.time(),
     })
+    return True
+
+
+async def _handle_hash_advance(round_name: str, kv: dict, agent_id: str, ws) -> bool:
+    """处理 ##advance 命令：PM 手动推进管线到下一步。
+
+    ##advance##R{N}##step=N
+    """
+    step_str = kv.get("step", "")
+    if not step_str.isdigit():
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": "❌ 参数错误: 缺少 `step=N` 参数",
+            "ts": time.time(),
+        })
+        return True
+    step_num = int(step_str)
+
+    # 构造完成消息并尝试推进
+    content = f"已完成 ✅ {round_name} Step {step_num}"
+    ok, reason = _try_advance_pipeline(content, agent_id)
+    if ok:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"✅ **{round_name} Step {step_num}** 已手动推进（PM 确认）",
+            "ts": time.time(),
+        })
+    else:
+        await _send(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"⚠️ 推进失败: {reason}",
+            "ts": time.time(),
+        })
     return True
 
 
