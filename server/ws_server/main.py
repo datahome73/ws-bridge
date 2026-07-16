@@ -525,6 +525,102 @@ async def _pipeline_git_sync_scan():
             pstate["_last_git_sync_ts"] = time.time()
 # ── R65 A2: End ──
 
+# ═══ R122: 管线超时告警扫描 ════
+
+_R122_TIMEOUT_SCANNER_TASK: asyncio.Task | None = None
+
+
+def _ensure_timeout_scanner() -> None:
+    """在 handler 初始化时调用一次。启动超时扫描定时循环。"""
+    global _R122_TIMEOUT_SCANNER_TASK
+    timeout_min = config.PIPELINE_TIMEOUT_ALERT_MINUTES
+    scan_interval = config.PIPELINE_TIMEOUT_SCAN_INTERVAL
+    if timeout_min <= 0:
+        logger.info("[R122] 管线超时告警已禁用（PIPELINE_TIMEOUT_ALERT_MINUTES=%d）", timeout_min)
+        return
+    if _R122_TIMEOUT_SCANNER_TASK is None or _R122_TIMEOUT_SCANNER_TASK.done():
+        _R122_TIMEOUT_SCANNER_TASK = asyncio.create_task(
+            _start_timeout_scan_loop(timeout_min, scan_interval)
+        )
+        logger.info(
+            "[R122] 管线超时扫描已启动（timeout=%dmin, interval=%ds）",
+            timeout_min, scan_interval,
+        )
+
+
+async def _start_timeout_scan_loop(timeout_min: int, scan_interval: int) -> None:
+    """独立的超时扫描定时循环，每 scan_interval 秒执行一次。"""
+    while True:
+        await asyncio.sleep(scan_interval)
+        try:
+            await _pipeline_timeout_scan(timeout_min)
+        except Exception as e:
+            logger.warning("[R122] 超时扫描错误: %s", e)
+
+
+async def _pipeline_timeout_scan(timeout_min: int) -> None:
+    """遍历所有 RUNNING 管线，检查 in_progress step 是否超时。
+
+    仅对 dispatched_at 超过 threshold 且 timeout_alerted=False 的 step
+    发送一次告警给 PM。
+    """
+    from .pipeline_context import PipelineStatus as PS
+
+    now = time.time()
+    threshold = timeout_min * 60.0
+    mgr = _ensure_pipeline_manager()
+    alerted = 0
+
+    for ctx in mgr.get_all_active():
+        if ctx.status != PS.RUNNING:
+            continue
+        for step in (ctx.steps or []):
+            if step.get("status") != "in_progress":
+                continue
+            dispatched_at = step.get("dispatched_at")
+            if not dispatched_at:
+                continue
+            if step.get("timeout_alerted"):
+                continue
+            elapsed = now - dispatched_at
+            if elapsed < threshold:
+                continue
+            # 超时 → 发告警
+            step_num = step.get("name", "?")
+            pm_id = config.PIPELINE_PM_AGENT_ID
+            if pm_id:
+                alert_content = (
+                    f"⏰ 管线超时告警\n\n"
+                    f"**{ctx.round_name}** Step {step_num} 已超时 "
+                    f"（{int(elapsed // 60)} 分钟无回复）\n\n"
+                    f"状态: 已派活 → {step.get('agent_name', '?')}\n"
+                    f"请检查 bot 状态或手动处理。"
+                )
+                try:
+                    await _send_to_agent(pm_id, {
+                        "type": "broadcast",
+                        "channel": f"_inbox:{pm_id}",
+                        "from_name": "系统",
+                        "from_agent": state.SYSTEM_AGENT_ID,
+                        "content": alert_content,
+                        "ts": time.time(),
+                    })
+                    logger.info(
+                        "[R122] 超时告警: %s Step %s → PM (%s)",
+                        ctx.round_name, step_num, pm_id[:12],
+                    )
+                except Exception as e:
+                    logger.warning("[R122] 告警发送失败: %s", e)
+            step["timeout_alerted"] = True
+            alerted += 1
+
+    if alerted:
+        try:
+            mgr.save()
+            logger.info("[R122] 超时告警发送完毕（%d 条），状态已持久化", alerted)
+        except Exception:
+            pass
+
 
 async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
     """Git sync 检测到新产出后自动推进状态机.
@@ -1347,6 +1443,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     await _restore_pipeline_timers()
     # ── R65 A2: Start git sync loop ──
     _ensure_git_scan()
+    # ── R122: Start timeout scanner ──
+    _ensure_timeout_scanner()
     # ── R67 B1: Ensure agent cards loaded + watcher running ──
     _ensure_agent_cards_loaded()
     _ensure_card_watcher()
@@ -2769,6 +2867,9 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
     if sent > 0:
         # 标记 step 为进行中，防止重复派活
         next_step_info["status"] = "in_progress"
+        # ═══ R122: 记录派活时间戳，供超时扫描 ═══
+        next_step_info["dispatched_at"] = time.time()
+        next_step_info["timeout_alerted"] = False
         try:
             mgr = _ensure_pipeline_manager()
             mgr.save()
