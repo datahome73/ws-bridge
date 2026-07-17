@@ -44,6 +44,10 @@ from .ws_bridge_protocol import (
     PING_INTERVAL,
 )
 
+# Max retries for auth errors (server restart resilience)
+MAX_AUTH_RETRIES = 6
+AUTH_RETRY_DELAY = 5  # seconds between auth retries
+
 logger = logging.getLogger(__name__)
 
 # ── Credential helpers ──────────────────────────────────────────────
@@ -224,6 +228,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
         self._ws_lock = __import__("asyncio").Lock()
         self._stop_event = __import__("asyncio").Event()
         self._should_reconnect = True
+        self._auth_retries = 0
 
         logger.warning(
             "[WSBridge] Initialized (bot=%s url=%s %s%s)",
@@ -306,6 +311,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
             resp_type = resp.get("type")
             if resp_type == MSG_AUTH_OK:
+                self._auth_retries = 0
                 self._agent_id = resp.get("agent_id", self._agent_id)
                 logger.warning(
                     "[WSBridge] Auth OK — agent_id=%s display_name=%s",
@@ -315,13 +321,23 @@ class WSBridgeAdapter(BasePlatformAdapter):
                 asyncio.create_task(self._reader_loop())
                 return True
             elif resp_type == MSG_AUTH_ERROR:
-                logger.error(
-                    "[WSBridge] Auth error: %s", resp.get("error", "unknown")
+                self._auth_retries += 1
+                if self._auth_retries >= MAX_AUTH_RETRIES:
+                    logger.error(
+                        "[WSBridge] Auth error: %s — gave up after %d retries",
+                        resp.get("error", "unknown"), MAX_AUTH_RETRIES,
+                    )
+                    await self._ws.close()
+                    self._should_reconnect = False
+                    return False
+                logger.warning(
+                    "[WSBridge] Auth error: %s — retry %d/%d in %ds",
+                    resp.get("error", "unknown"),
+                    self._auth_retries, MAX_AUTH_RETRIES, AUTH_RETRY_DELAY,
                 )
                 await self._ws.close()
-                # Don't retry on auth error — credentials are wrong
-                self._should_reconnect = False
-                return False
+                await asyncio.sleep(AUTH_RETRY_DELAY)
+                continue
             else:
                 logger.error("[WSBridge] Unexpected auth response: %s", str(resp)[:200])
                 await self._ws.close()
