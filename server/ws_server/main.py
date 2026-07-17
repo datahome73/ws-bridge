@@ -2585,13 +2585,13 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                             _output[_k] = _kv[_k]
                 _step_info["output"] = _output if _output else None
                 _step_info["result_msg"] = content[:200]
+                _step_info["status"] = "done"
                 try:
                     mgr.save()
                 except Exception:
                     pass
-            # ════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════
             asyncio.ensure_future(mgr.advance_step(round_name))
-            # ═══ R123: status 已在 output/result_msg 块中同步更新 ═══
             logger.info(
                 "[R106] %s Step %d → %d (auto-advance from completion)",
                 round_name, old_step, old_step + 1,
