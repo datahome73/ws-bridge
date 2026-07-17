@@ -2572,20 +2572,26 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                 except Exception:
                     pass
                 logger.info("[R115] %s step%d artifacts: %s", round_name, completed_step, _kv)
+            # ═══ R123: advance 前记录 step output + result_msg ═══
+            _step_idx = completed_step - 1
+            _step_info = ctx.steps[_step_idx] if _step_idx < len(ctx.steps) else None
+            if _step_info:
+                _output = {}
+                if _kv:
+                    for _k in ("sha", "commit_msg", "tech_plan_url", "branch_name",
+                                "test_scope", "test_report_url", "test_summary",
+                                "review_url"):
+                        if _k in _kv:
+                            _output[_k] = _kv[_k]
+                _step_info["output"] = _output if _output else None
+                _step_info["result_msg"] = content[:200]
+                try:
+                    mgr.save()
+                except Exception:
+                    pass
             # ════════════════════════════════════════════════════════
             asyncio.ensure_future(mgr.advance_step(round_name))
-            # ═══ R120: 标记已完成 step 状态为 done（防止重复派活时误判）═══
-            try:
-                _step_key = f"step{completed_step}"
-                _done_info = next(
-                    (s for s in (ctx.steps or []) if s.get("name") == _step_key), None,
-                )
-                if _done_info and _done_info.get("status") != "done":
-                    _done_info["status"] = "done"
-                    mgr.save()
-            except Exception:
-                pass
-            # ════════════════════════════════════════════════════════════════
+            # ═══ R123: status 已在 output/result_msg 块中同步更新 ═══
             logger.info(
                 "[R106] %s Step %d → %d (auto-advance from completion)",
                 round_name, old_step, old_step + 1,
@@ -2746,7 +2752,49 @@ def _render_template(template: str, ctx: PipelineContext, step_num: int) -> str:
     1. ctx.artifacts 中各 step 的产出 KV
     2. ctx.references 中的文档 URL
     3. ctx 基本信息 (round_name, round_title)
+
+    R123 新增 {stepN:field} 变量语法，解析优先级:
+    1. ctx.artifacts["step{N}"].get(field)
+    2. ctx.steps[idx].output.get(field)   (当 output 是 dict 时)
+    3. ctx.steps[idx].get(field)           (agent_name, result_msg 等)
+    4. ctx.references.get(field)
+    5. 空字符串
     """
+    # ═══ R123: 先解析 {stepN:field} 占位符 ═══
+    _step_placeholder_re = re.compile(r"\{step(\d+):(\w+)\}")
+
+    def _resolve_step_var(m: re.Match) -> str:
+        _sn = int(m.group(1))
+        _field = m.group(2)
+        _sk = f"step{_sn}"
+        _idx = _sn - 1
+        # 1. ctx.artifacts["step{N}"].get(field)
+        _art = ctx.artifacts.get(_sk, {})
+        if isinstance(_art, dict) and _field in _art:
+            val = str(_art[_field])
+            return val if val else ""
+        # 2. ctx.steps[idx].output.get(field)
+        if _idx < len(ctx.steps):
+            _step = ctx.steps[_idx]
+            if isinstance(_step, dict):
+                _out = _step.get("output")
+                if isinstance(_out, dict) and _field in _out:
+                    val = str(_out[_field])
+                    return val if val else ""
+                # 3. ctx.steps[idx].get(field)
+                if _field in _step:
+                    val = str(_step[_field])
+                    return val if val else ""
+        # 4. ctx.references.get(field)
+        if isinstance(ctx.references, dict) and _field in ctx.references:
+            val = str(ctx.references[_field])
+            return val if val else ""
+        # 5. 空字符串
+        return ""
+
+    template = _step_placeholder_re.sub(_resolve_step_var, template)
+    # ════════════════════════════════════════════════════════════════
+
     vars = {
         "round": ctx.round_name,
         "round_title": ctx.round_title,
@@ -2760,6 +2808,10 @@ def _render_template(template: str, ctx: PipelineContext, step_num: int) -> str:
     # 填充模板中的 {var} 占位符
     for key, value in vars.items():
         template = template.replace(f"{{{key}}}", str(value))
+    # ═══ R123: 清理空值字段行（##key## \n 残留）═══
+    template = re.sub(r"^##\w+##\s*\n", "", template, flags=re.MULTILINE)
+    template = template.strip()
+    # ══════════════════════════════════════════════════
     return template
 
 
@@ -2770,6 +2822,48 @@ def _get_step_agent_name(ctx: PipelineContext, step_num: int) -> str:
     if info:
         return info.get("agent_name", info.get("agent_id", "?"))
     return "?"
+
+
+# ═══ R123: 前置步骤摘要生成 ═══
+_ROLE_EMOJIS = {1: "📋", 2: "📐", 3: "💻", 4: "👁", 5: "🧪", 6: "🚢"}
+_ROLE_NAMES = {1: "PM", 2: "Arch", 3: "Dev", 4: "Review", 5: "QA", 6: "Ops"}
+_URL_FIELDS = {
+    "tech_plan_url": "技术方案", "review_url": "审查报告",
+    "test_report_url": "测试报告", "test_summary": "测试结果",
+    "requirements_url": "需求文档", "work_plan_url": "工作计划",
+}
+
+
+def _build_step_summary(ctx: PipelineContext, step_num: int) -> str:
+    """为 step_num 构建前序步骤完成摘要。仅显示已完成（status=done）的前置 step。"""
+    lines = ["══════ 前置步骤状态 ══════"]
+    has_prev = False
+    for i, s in enumerate(ctx.steps, 1):
+        if i >= step_num:
+            break
+        if s.get("status") != "done":
+            continue
+        has_prev = True
+        emoji = _ROLE_EMOJIS.get(i, "?")
+        rname = _ROLE_NAMES.get(i, "?")
+        agent = s.get("agent_name", s.get("agent_id", "?")[:12])
+        lines.append(f"\nStep {i} {emoji} {rname}（{agent}）✅")
+        output = s.get("output")
+        if isinstance(output, dict):
+            sha = output.get("sha", "")
+            if sha:
+                lines.append(f"  提交: `{sha}` — {output.get('commit_msg', '')}")
+            for k, label in _URL_FIELDS.items():
+                if output.get(k):
+                    lines.append(f"  产出: [{label}]({output[k]})")
+        result_msg = s.get("result_msg", "")
+        if result_msg:
+            lines.append(f"  结果: {result_msg[:80]}")
+    if not has_prev:
+        return ""
+    lines.append("\n════════════════════\n")
+    return "\n".join(lines)
+# ════════════════════════════════════════════════════════════════
 
 
 async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
@@ -2830,6 +2924,13 @@ async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
             return False
 
     content = _render_template(next_template, ctx, step_num)
+
+    # ═══ R123: Step ≥ 3 时前置步骤摘要注入 ═══
+    if step_num >= 3:
+        _summary = _build_step_summary(ctx, step_num)
+        if _summary:
+            content = _summary + "\n" + content
+    # ══════════════════════════════════════════════════════
 
     payload = {
         "type": "broadcast",
@@ -3159,15 +3260,8 @@ def _resolve_card_key_to_ws_id(card_key: str) -> str:
 def _build_rich_templates(round_name: str, references: dict = None, artifacts: dict = None) -> dict[str, str]:
     """返回 6 步富上下文模板组，引用 references（文档 URL）和 artifacts（前序步产出）."""
     ref = references or {}
-    art = artifacts or {}
     req_url = ref.get("requirements_url", "")
     wp_url = ref.get("work_plan_url", "")
-
-    # 从 artifacts 读取前序步产出（如 Step 2 产出 tech_plan_url）
-    step2_art = art.get("step2", {}) if isinstance(art.get("step2"), dict) else {}
-    step3_art = art.get("step3", {}) if isinstance(art.get("step3"), dict) else {}
-    step4_art = art.get("step4", {}) if isinstance(art.get("step4"), dict) else {}
-    step5_art = art.get("step5", {}) if isinstance(art.get("step5"), dict) else {}
 
     return {
         "step1": "",
@@ -3180,37 +3274,29 @@ def _build_rich_templates(round_name: str, references: dict = None, artifacts: d
         "step3": (
             f"💻 **{round_name} Step 3 — 编码实现**\n\n"
             + (f"##需求文档## {req_url}\n" if req_url else "")
-            + (f"##技术方案## {step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))}\n"
-               if (step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))) else "")
+            + "##技术方案## {step2:tech_plan_url}\n"
             + "\n请完成编码并推 dev，回复：已完成 ✅ {round} Step 3"
         ),
         "step4": (
             f"👁 **{round_name} Step 4 — 代码审查**\n\n"
             + (f"##需求文档## {req_url}\n" if req_url else "")
-            + (f"##技术方案## {step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))}\n"
-               if (step2_art.get('tech_plan_url', ref.get('tech_plan_url', ''))) else "")
+            + "##技术方案## {step2:tech_plan_url}\n"
             + "\n请审查代码并回复审查报告，回复：已完成 ✅ {round} Step 4"
         ),
         "step5": (
             f"🧪 **{round_name} Step 5 — 测试验证**\n\n"
             + (f"##需求文档## {req_url}\n" if req_url else "")
-            + (f"##测试范围## {step3_art.get('test_scope', ref.get('test_scope', ''))}\n"
-               if step3_art.get('test_scope', ref.get('test_scope', '')) else "")
-            + (f"##分支## {step3_art.get('branch_name', ref.get('branch_name', ''))}\n"
-               if step3_art.get('branch_name', ref.get('branch_name', '')) else "")
+            + "##测试范围## {step3:test_scope}\n"
+            + "##分支## {step3:branch_name}\n"
             + "\n请进行测试验证，回复：已完成 ✅ {round} Step 5"
         ),
         "step6": (
             f"🚀 **{round_name} Step 6 — 合并部署归档**\n\n"
-            + (f"##分支## {step5_art.get('branch', step3_art.get('branch_name', ref.get('branch_name', '')))}\n"
-               if (step5_art.get('branch', step3_art.get('branch_name', ref.get('branch_name', '')))) else "")
-            + (f"##commit## {step5_art.get('commit_sha', ref.get('commit_sha', ''))}\n"
-               if step5_art.get('commit_sha', ref.get('commit_sha', '')) else "")
-            + (f"##测试结果## {step5_art.get('test_summary', ref.get('test_summary', ''))}\n"
-               if step5_art.get('test_summary', ref.get('test_summary', '')) else "")
-            + (f"##测试报告## {step5_art.get('test_report_url', ref.get('test_report_url', ''))}\n"
-               if step5_art.get('test_report_url', ref.get('test_report_url', '')) else "")
-            + f"\n请合并部署归档并推送 main，回复：已完成 ✅ {round} Step 6"
+            + "##分支## {step6:branch}\n"
+            + "##commit## {step6:commit_sha}\n"
+            + "##测试结果## {step6:test_summary}\n"
+            + "##测试报告## {step6:test_report_url}\n"
+            + "\n请合并部署归档并推送 main，回复：已完成 ✅ {round} Step 6"
         ),
     }
 
