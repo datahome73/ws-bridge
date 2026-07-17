@@ -3292,10 +3292,10 @@ def _build_rich_templates(round_name: str, references: dict = None, artifacts: d
         ),
         "step6": (
             f"🚀 **{round_name} Step 6 — 合并部署归档**\n\n"
-            + "##分支## {step6:branch}\n"
-            + "##commit## {step6:commit_sha}\n"
-            + "##测试结果## {step6:test_summary}\n"
-            + "##测试报告## {step6:test_report_url}\n"
+            + "##分支## {step5:branch}\n"
+            + "##commit## {step5:commit_sha}\n"
+            + "##测试结果## {step5:test_summary}\n"
+            + "##测试报告## {step5:test_report_url}\n"
             + "\n请合并部署归档并推送 main，回复：已完成 ✅ {round} Step 6"
         ),
     }
