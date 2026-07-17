@@ -3446,6 +3446,21 @@ async def _archive_pipeline(ctx, round_name: str) -> None:
         logger.warning("[R124] 归档异常: %s", e)
 
 
+def _find_archive(round_name: str) -> dict | None:
+    """从归档文件查找指定轮次的记录。"""
+    archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
+    if not archive_path.exists():
+        return None
+    try:
+        existing = json.loads(archive_path.read_text(encoding="utf-8"))
+        for entry in existing:
+            if entry.get("round_name") == round_name:
+                return entry
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
 # ═══ R124: 超时重发派活 ═══
 
 
