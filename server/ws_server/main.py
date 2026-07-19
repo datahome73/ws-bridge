@@ -4711,6 +4711,11 @@ async def _sm_handle_hash(ws, agent_id: str, msg: dict, matched) -> bool:
     return await _sm.handle_hash_cmd(ws, agent_id, msg, matched)
 
 
+async def _sm_handle_query(ws, agent_id: str, msg: dict, matched) -> bool:
+    """Rule 25: ##query commands → scenario_matcher.handle_query."""
+    return await _sm.handle_query(ws, agent_id, msg, matched)
+
+
 async def _sm_handle_pm_guard(ws, agent_id: str, msg: dict, matched) -> bool:
     """Rule 35: PM safety guard."""
     await _send(ws, {
@@ -4865,6 +4870,14 @@ _sm.register_rule(_sm.HandlerRule(
     priority=20,
     name="to_agent派活路由",
     protocol_ref="§7.2",
+))
+# ── R131: ##query commands (rule 25) ──
+_sm.register_rule(_sm.HandlerRule(
+    match=_sm.match_query,
+    handle=_sm_handle_query,
+    priority=25,
+    name="##query命令",
+    protocol_ref="§R131",
 ))
 _sm.register_rule(_sm.HandlerRule(
     match=_sm.match_hash_cmd,

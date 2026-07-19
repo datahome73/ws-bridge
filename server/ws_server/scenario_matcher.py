@@ -220,8 +220,191 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     )
     return True
 
-# ── Moved from main.py: _classify_lobby_message ──────────────────────
 
+# ── R131: ##query commands (rule 25) ────────────────────────────────
+
+def match_query(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 25: ##query commands.
+    Priority 25 — intercepts before generic ## handler (30).
+    """
+    if content.startswith("##query"):
+        return content
+    return False
+
+
+async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
+    """Handle ##query sub-commands — rule 25 handler.
+
+    Format: ##query##<sub_cmd>[##<params>]
+    Sub-commands: whoami, agents, status, agent_info, audit, help
+    """
+    content = matched
+    parts = content.split("##")
+    if len(parts) < 3:
+        await _send_reply(ws, agent_id,
+            "📋 **##query 命令**\\n\\n"
+            "`##whoami` — 查看自己信息\\n"
+            "`##agents` — 列出所有 bot\\n"
+            "`##status [R{N}]` — 查询管线状态\\n"
+            "`##agent_info <agent_id>` — 查询 bot 详情\\n"
+            "`##audit [--limit N]` — 审计日志 (L4+)\\n"
+            "`##help` — 显示本帮助"
+        )
+        return True
+
+    sub_cmd = parts[2].lower()
+    params = parts[3] if len(parts) > 3 else ""
+
+    # 权限检查
+    level = _get_agent_level(agent_id)
+    if level < 1:
+        await _send_reply(ws, agent_id, "❌ 权限不足：未注册 bot")
+        return True
+    if level == 1 and sub_cmd not in ("whoami", "help"):
+        await _send_reply(ws, agent_id, "❌ 权限不足：L1 仅允许 ##whoami 和 ##help")
+        return True
+    if level < 4 and sub_cmd == "audit":
+        await _send_reply(ws, agent_id, "❌ 权限不足：##audit 需要 L4")
+        return True
+
+    # 6 个子命令路由（复用 main.py 函数）
+    from . import main as _main
+
+    if sub_cmd == "whoami":
+        from server.common import auth as _auth
+        users = _auth.get_users()
+        info = users.get(agent_id, {})
+        name = info.get("name", agent_id[:12])
+        await _send_reply(ws, agent_id,
+            f"🆔 agent_id: `{agent_id}`\\n"
+            f"📛 名称: {name}\\n"
+            f"🎚️ 级别: L{level}")
+    elif sub_cmd == "status":
+        reply = await _format_pipeline_status(params, _main)
+        await _send_reply(ws, agent_id, reply)
+    elif sub_cmd == "agents":
+        reply = _format_agent_list()
+        await _send_reply(ws, agent_id, reply)
+    elif sub_cmd == "agent_info":
+        reply = _format_agent_info(params)
+        await _send_reply(ws, agent_id, reply)
+    elif sub_cmd == "audit":
+        reply = _format_audit_log(params)
+        await _send_reply(ws, agent_id, reply)
+    elif sub_cmd == "help":
+        await _send_reply(ws, agent_id,
+            "📋 **##query 命令**\\n\\n"
+            "`##whoami` — 查看自己信息\\n"
+            "`##agents` — 列出所有 bot\\n"
+            "`##status [R{N}]` — 查询管线状态\\n"
+            "`##agent_info <agent_id>` — 查询 bot 详情\\n"
+            "`##audit [--limit N]` — 审计日志 (L4+)\\n"
+            "`##help` — 显示本帮助")
+    else:
+        await _send_reply(ws, agent_id,
+            f"❌ 未知子命令: {sub_cmd}，可用: whoami / agents / status / agent_info / audit / help")
+
+    return True
+
+
+# ── R131: helper functions ──────────────────────────────────────────
+
+def _get_agent_level(agent_id: str) -> int:
+    """获取 agent 权限级别 (1-4)，默认 1。"""
+    from server.common import persistence as _p
+    users = _p.get_approved_users()
+    info = users.get(agent_id, {})
+    return info.get("level", 1)
+
+
+async def _format_pipeline_status(round_name: str, main_mod) -> str:
+    """Return pipeline status text."""
+    mgr = main_mod._ensure_pipeline_manager()
+    if round_name:
+        ctx = mgr.get(round_name)
+        if ctx:
+            engine = main_mod._ensure_engine()
+            return engine.format_context(ctx)
+        return f"❌ 管线 {round_name} 不存在"
+    active = mgr.get_all_active()
+    if active:
+        lines = ["📋 活跃管线:"]
+        for ctx in sorted(active, key=lambda c: c.round_name):
+            lines.append(
+                f"  {ctx.round_name} [{ctx.task_kind.value}] "
+                f"{ctx.status.value} step={ctx.current_step}/{ctx.total_steps}"
+            )
+        return "\\n".join(lines)
+    return "📋 当前无活跃管线"
+
+
+def _format_agent_list() -> str:
+    """Return agent list text."""
+    from server.common import auth as _auth
+    from . import agent_card as _ac
+    from . import state as _st
+    users = _auth.get_users()
+    cards = _ac.get_all_cards()
+    lines = ["📇 Agents:"]
+    seen = set()
+    for aid, info in sorted(users.items()):
+        name = info.get("name", aid[:12])
+        role = info.get("role", "member")
+        online = "🟢" if aid in _st._connections else "🔴"
+        card = cards.get(aid, {})
+        roles = ", ".join(card.get("pipeline_roles", []))
+        roles_str = f" [{roles}]" if roles else ""
+        lines.append(f"  {online} {name} ({aid[:12]}...) L{info.get('level', 1)}{roles_str}")
+        seen.add(aid)
+    return "\\n".join(lines)
+
+
+def _format_agent_info(agent_id: str) -> str:
+    """Return single agent info text."""
+    from server.common import auth as _auth
+    from . import agent_card as _ac
+    from . import state as _st
+    users = _auth.get_users()
+    info = users.get(agent_id, {})
+    if not info:
+        return f"❌ Agent {agent_id} 未找到"
+    name = info.get("name", agent_id[:12])
+    role = info.get("role", "member")
+    level = info.get("level", 1)
+    online = "🟢 在线" if agent_id in _st._connections else "🔴 离线"
+    card = _ac.get_agent_card(agent_id)
+    card_info = ""
+    if card:
+        card_info = (
+            f"\\n  📇 display_name: {card.get('display_name', '')}"
+            f"\\n  🎭 角色: {', '.join(card.get('pipeline_roles', []))}"
+        )
+    return (
+        f"📋 Agent 信息: {name}\\n"
+        f"  🆔 agent_id: `{agent_id}`\\n"
+        f"  🎚️ 级别: L{level} / 角色: {role}\\n"
+        f"  📡 状态: {online}"
+        f"{card_info}"
+    )
+
+
+def _format_audit_log(limit_str: str) -> str:
+    """Return audit log tail."""
+    from .audit import AuditLogger
+    from server.common.config import DATA_DIR as _dd
+    limit = 20
+    if limit_str and limit_str.isdigit():
+        limit = min(int(limit_str), 100)
+    auditor = AuditLogger(_dd)
+    lines = auditor.tail(limit)
+    if not lines:
+        return "📋 审计日志为空"
+    return "📋 最近审计日志:\\n" + "\\n".join(
+        f"  {l}" for l in lines[-limit:]
+    )
+
+
+# ── Moved from main.py: _classify_lobby_message ──────────────────────
 def classify_lobby_message(content: str) -> tuple[str, list[str]]:
     """Classify lobby message by prefix.
     Returns (type, extracted_names).
