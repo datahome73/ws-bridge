@@ -2532,18 +2532,24 @@ async def _send_to_agent(target_agent_id: str, payload: dict) -> int:
             "[R117] _send_to_agent(%s): 无目标连接 (sent=0)",
             target_agent_id[:20],
         )
-    # 同时持久化到 DB
+    # 同时持久化到 DB（R129 B-6: 去重 — 同 channel 同 content 在 1s 内不重复存）
     try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="broadcast",
-            from_agent=state.SYSTEM_AGENT_ID,
-            from_name="系统",
-            content=payload.get("content", ""),
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
+        if not ms.is_duplicate(
             channel=payload.get("channel", ""),
-        )
+            content=payload.get("content", ""),
+            window_sec=1.0,
+            data_dir=config.DATA_DIR,
+        ):
+            ms.save_message(
+                msg_id=str(uuid.uuid4()),
+                msg_type="broadcast",
+                from_agent=state.SYSTEM_AGENT_ID,
+                from_name="系统",
+                content=payload.get("content", ""),
+                ts=time.time(),
+                data_dir=config.DATA_DIR,
+                channel=payload.get("channel", ""),
+            )
     except Exception:
         pass
     return sent
