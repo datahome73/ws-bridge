@@ -29,7 +29,7 @@
 - [ ] 删除 `server/ws_server/pipeline_auto_starter.py`
 - [ ] `__main__.py` 去掉 import + PAS init 块 + `PAS_ENABLED` 读取
 - [ ] `pipeline_context.py` 删除 `from_work_plan()` 方法和相关代码
-- [ ] 清理 docs 引用 (`R119/*.md`, `inbox-message-protocol.md`, `TODO.md`)
+- [ ] 清理 docs 引用 (`inbox-message-protocol.md`, `TODO.md`)
 - [ ] 每次改动后 `py_compile` 验证
 
 ### Step 4 — Review (小周)
@@ -55,5 +55,5 @@
 | 🗑️ 删除 | `pipeline_auto_starter.py` | -211 |
 | ✂️ 修改 | `__main__.py` | -35 |
 | ✂️ 修改 | `pipeline_context.py` | -70 |
-| ✂️ 修改 | 文档 | -20 |
-| **总计** | | **-336 行** |
+| ✂️ 修改 | 文档 | -10 |
+| **总计** | | **-326 行** |

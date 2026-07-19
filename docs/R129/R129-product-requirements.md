@@ -50,13 +50,14 @@
 | `server/ws_server/__main__.py` | 删除 import（L18）+ PAS init 块（L796-835）+ `PAS_ENABLED` 读取 | **-35** |
 | `server/ws_server/pipeline_context.py` | 删除 `from_work_plan()` 方法（L647-715）和模块级入口（L433） | **-70** |
 
-### 2.3 文档清理
+### 文档清理
 
 | 文件 | 改动 |
 |:-----|:------|
-| `docs/R119/*.md` | 移除 PAS_ENABLED=0 部署要求 |
 | `docs/inbox-message-protocol.md` | 移除 PAS 相关引用 |
 | `docs/TODO.md` | 移除 PAS 相关待办 |
+
+> **历史轮次文档不碰** — `docs/R119/*.md` 等已归档轮次保留原样，不进 git 修改历史。
 
 ### 2.4 不删除
 
@@ -73,10 +74,10 @@
 | 🗑️ 删除 | `server/ws_server/pipeline_auto_starter.py` | -211 |
 | ✂️ 修改 | `server/ws_server/__main__.py` | -35 |
 | ✂️ 修改 | `server/ws_server/pipeline_context.py` | -70 |
-| ✂️ 修改 | 文档文件 (docs/R119/*.md, inbox-protocol, TODO.md) | ~-20 |
-| **合计** | | **~-336 行** |
+| ✂️ 修改 | 文档（inbox-protocol.md, TODO.md） | ~-10 |
+| **合计** | | **~-326 行** |
 
-> 净删 ~336 行，零新增。纯清理轮。
+> 净删 ~326 行，零新增。纯清理轮。
 
 ---
 
@@ -105,9 +106,9 @@
 
 | 编号 | 描述 | 类型 |
 |:----|:-----|:----:|
-| DO-1 | `docs/R119/*.md` 中 PAS_ENABLED 部署要求已移除 | 文档 |
-| DO-2 | `docs/inbox-message-protocol.md` 中 PAS 引用已移除 | 文档 |
-| DO-3 | `docs/TODO.md` 中 PAS 相关项已清理 | 文档 |
+| DO-1 | `docs/inbox-message-protocol.md` 中 PAS 引用已移除 | 文档 |
+| DO-2 | `docs/TODO.md` 中 PAS 相关项已清理 | 文档 |
+| DO-3 | 无 PAS 相关环境变量残留文档（`PAS_ENABLED` 不再需要配置） | 文档 |
 
 ---
 
@@ -131,8 +132,8 @@
 | 🗑️ 删除 | `server/ws_server/pipeline_auto_starter.py` | -211 |
 | ✂️ 修改 | `server/ws_server/__main__.py` | -35 |
 | ✂️ 修改 | `server/ws_server/pipeline_context.py` | -70 |
-| ✂️ 修改 | 文档文件 | ~-20 |
-| **合计** | | **~-336 行** |
+| ✂️ 修改 | 文档（inbox-protocol.md, TODO.md） | ~-10 |
+| **合计** | | **~-326 行** |
 
 ### 验收计数
 
