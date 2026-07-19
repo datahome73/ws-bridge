@@ -311,8 +311,11 @@ class PipelineEngine:
         Returns:
             (True, "round_name") on success, (False, reason) on skip.
         """
-        m = re.match(r"已完成 ✅ R(\d+) Step (\d+)", content)
+        m = re.search(r"(?:已完成|完成)\s*[✅✔️]\s*R(\d+)\s*[Ss]tep\s*(\d+)", content)
+
+        # ── R128 B-4: 容错匹配，不匹配的透传但不报错 ──
         if not m:
+            # 不记录 warning（正常流量）
             return False, "no match"
         round_name = f"R{m.group(1)}"
         completed_step = int(m.group(2))
@@ -1000,7 +1003,7 @@ class PipelineEngine:
                     round_name, step_num, sender_agent_id[:12], reason)
 
     def enqueue_retry(self, ctx: PipelineContext, step_num: int) -> None:
-        """将失败的自动派活加入重试队列。"""
+        """将失败的自动派活加入重试队列。R128 B-2: 15s 首轮间隔 + 退避。"""
         round_name = ctx.round_name
         if round_name in self._pending_retries:
             return
@@ -1008,13 +1011,14 @@ class PipelineEngine:
             "ctx": ctx,
             "step_num": step_num,
             "retry_count": 0,
-            "next_retry_at": time.time() + 60,
+            "next_retry_at": time.time() + 15,  # R128 B-2: 15s 首轮
             "notify_sent": False,
+            "pm_notified_3": False,
         }
-        logger.info("[R118] 入重试队列: %s step%d", round_name, step_num)
+        logger.info("[R128] 入重试队列: %s step%d（首轮 15s）", round_name, step_num)
 
     async def _retry_loop(self) -> None:
-        """后台循环，每 30s 扫描待重试队列。最多重试 5 次。"""
+        """后台循环，每 15s 扫描待重试队列。R128 B-2: 退避 + PM 通知。"""
         while True:
             now = time.time()
             for round_name in list(self._pending_retries.keys()):
@@ -1024,31 +1028,41 @@ class PipelineEngine:
                 ctx = entry["ctx"]
                 step_num = entry["step_num"]
                 entry["retry_count"] += 1
-                logger.info("[R118] 重试派活 %s step%d (尝试 %d/5)",
-                            round_name, step_num, entry["retry_count"])
+                attempt = entry["retry_count"]
+                logger.info("[R128] 重试派活 %s step%d (尝试 %d/5)",
+                            round_name, step_num, attempt)
                 result = await self.auto_dispatch(ctx, step_num)
                 if result:
                     del self._pending_retries[round_name]
-                    logger.info("[R118] 重试成功: %s step%d", round_name, step_num)
-                elif entry["retry_count"] >= 5:
+                    logger.info("[R128] 重试成功: %s step%d", round_name, step_num)
+                elif attempt >= 5:
                     del self._pending_retries[round_name]
                     asyncio.ensure_future(
-                        self.notify_pm(ctx, step_num, "failed",
-                                       "5 次重试均失败，目标 bot 持续离线")
+                        self.notify_pm(ctx, step_num, "stuck",
+                                       f"重试 5 次均失败，目标 bot 持续离线。管线已标记为卡死。")
                     )
-                    logger.warning("[R118] 重试耗尽: %s step%d 5/5 失败",
+                    logger.warning("[R128] 重试耗尽: %s step%d 5/5 失败，标记卡死",
                                    round_name, step_num)
                 else:
-                    entry["next_retry_at"] = time.time() + 60
+                    # 退避: 15s → 30s → 60s → 120s → 180s
+                    backoff = min(15 * (2 ** (attempt - 1)), 180)
+                    entry["next_retry_at"] = time.time() + backoff
+                    # 3 次后通知 PM
+                    if attempt >= 3 and not entry.get("pm_notified_3"):
+                        entry["pm_notified_3"] = True
+                        asyncio.ensure_future(
+                            self.notify_pm(ctx, step_num, "stuck",
+                                           f"重试 {attempt}/5 次失败，目标 bot 离线。")
+                        )
                     if not entry.get("notify_sent"):
                         entry["notify_sent"] = True
                         asyncio.ensure_future(
                             self.notify_pm(ctx, step_num, "retrying",
-                                           f"尝试 {entry['retry_count']+1}/5")
+                                           f"尝试 {attempt+1}/5，退避 {backoff}s")
                         )
-                    logger.info("[R118] 重试排队: %s step%d 等待 60s",
-                                round_name, step_num)
-            await asyncio.sleep(30)
+                    logger.info("[R128] 重试排队: %s step%d 等待 %ds",
+                                round_name, step_num, backoff)
+            await asyncio.sleep(15)
 
     # ════════════════════════════════════════════════════════════════
     # 🅵 后台扫描

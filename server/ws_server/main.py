@@ -63,7 +63,7 @@ def _ensure_engine() -> PipelineEngine:
         )
         # ── 注入 engine 引用到 scenario_matcher ──
         from . import scenario_matcher as _sm
-        _sm._engine = engine
+        _sm._engine = _ensure_engine()
     return engine
 def _ensure_pipeline_manager() -> PipelineContextManager:
     """惰性初始化 PipelineContextManager."""
