@@ -656,6 +656,7 @@ async def _get_users():
 async def _api_status(request: web.Request) -> web.Response:
     """Return online/offline status for all approved agents."""
     from server.common.config import HIDDEN_AGENTS as _hidden
+    from server.common.config import AGENT_WHITELIST as _whitelist
     from server.common.persistence import get_web_sessions as _gws  # noqa: F811
     users = _get_approved_users()
     from server.common.persistence import get_api_keys as _get_api_keys
@@ -667,12 +668,15 @@ async def _api_status(request: web.Request) -> web.Response:
         if agent_id in _hidden:
             continue
         info = users.get(agent_id, {})
-        # R73: fallback to api_keys.display_name for R72-registered agents
         if not info:
             key_info = api_keys.get(agent_id, {})
             name = key_info.get("display_name", agent_id[:12])
         else:
             name = info.get("name", agent_id[:12])
+        # R130: skip agents not in whitelist
+        if name not in _whitelist:
+            seen.add(agent_id)
+            continue
         connected_at = min(
             (getattr(c, "_connected_at", now) for c in list(conns)),
             default=now,
@@ -687,18 +691,24 @@ async def _api_status(request: web.Request) -> web.Response:
         seen.add(agent_id)
     for agent_id, info in users.items():
         if agent_id not in seen and agent_id not in _hidden:
+            name = info.get("name", agent_id[:12])
+            if name not in _whitelist:
+                continue
             agents_list.append({
                 "id": agent_id[:16],
-                "name": info.get("name", agent_id[:12]),
+                "name": name,
                 "online": False,
                 "connections": 0,
             })
     # R73: also list R72-registered agents that are offline
     for agent_id, key_info in api_keys.items():
         if agent_id not in seen and agent_id not in _hidden:
+            name = key_info.get("display_name", agent_id[:12])
+            if name not in _whitelist:
+                continue
             agents_list.append({
                 "id": agent_id[:16],
-                "name": key_info.get("display_name", agent_id[:12]),
+                "name": name,
                 "online": False,
                 "connections": 0,
             })
