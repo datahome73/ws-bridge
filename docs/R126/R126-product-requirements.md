@@ -1,342 +1,268 @@
-# R126 产品需求文档（Product Requirements）
+# R126 需求文档 — 场景匹配规则提取（场景匹配规则模块化）
 
-> **起草人：** 📋 PM（小谷）
-> **状态：** 📝 草稿
+> **轮次：** R126
+> **类型：** 代码重构轮（细粒度提取）
 > **版本：** v1.0
+> **日期：** 2026-07-19
+> **状态：** 📝 草稿待审
 
 ---
 
-## 1. 背景与目标
+## §1 背景与问题
 
-当前 ws-bridge 管线已实现全自动流转（R88 AutoRouter + R124 驳回回退/归档），但 bot 间交接仍依赖**纯自然语言消息**，缺乏标准化工件格式，导致以下痛点：
+### 现状
 
-| # | 问题 | 场景 | 影响 |
-|:-:|:-----|:------|:------|
-| P1 | 🎯 **需求理解偏差** | PM 派活→bot 接活，自然语言描述→产出偏离预期 | 驳回循环，每轮浪费 30min+ |
-| P2 | 📋 **产出上下文丢失** | Step N 的产出格式不统一，后续步骤无法自动解析 | 人工复制粘贴，易遗漏 |
-| P3 | 🔄 **交接信息衰减** | Step 3→Step 4，产出要人工摘要才能传给下一步 | 信息损耗，审查不充分 |
-| P4 | 📊 **可追溯性差** | 管线归档后，各步骤产出散落在聊天消息中 | 无法结构化查询 |
-| P5 | ❌ **驳回无结构化依据** | Review/QA 驳回时附纯文字原因 | dev 无法精确定位缺陷 |
-| P6 | 🔁 **重做无上下文** | dev 修复后再次提交，不记得上次驳回的具体点 | 重复返工 |
-| P7 | 🧪 **验收标准模糊** | 各 Step 验收标准在需求文档中，bot 不直接可见 | 产出偏离预期 |
+`main.py` 当前 **4934 行 / 97 个函数**，是 ws-bridge 项目中最大的文件。经历了 R82→R125 的功能叠加后，main.py 承担了三种不同的职责：
 
-R126 定位为 **Phase 2 核心基础设施补齐轮**——引入 **结构化 Task Card** 作为 bot 间交接的标准化工件载体，消除自然语言歧义，为 Phase 3（Coder Agent）铺垫管线级数据通道。
+| 职责 | 行数估算 | 函数数 |
+|:-----|:--------:|:------:|
+| 🔌 WebSocket 连接管理（handler/注册/认证） | ~800 行 | ~12 |
+| 📡 **场景匹配 + 路由规则（本轮目标）** | **~600 行** | **~20** |
+| 🛠️ 管线状态机 + 工具函数 | ~3500 行 | ~65 |
 
-### 1.1 R126 目标
+其中 **场景匹配与路由规则** 是最适合独立和维护性收益最高的部分——因为它本质上是**声明式规则**（满足什么条件→做什么事），天然适合以「规则表」形式存在。
 
-| 维度 | 当前 | 目标（R126） |
-|:-----|:-----|:-------------|
-| 消息格式 | 纯自然语言，无标准 schema | 每步派活携带 Task Card（JSON code block），产出也填回 Card |
-| 上下文传递 | 人工摘要 + 复制粘贴 | Task Card 自动积累前序 artifacts |
-| 驳回效率 | 驳回后重新自然语言沟通 | Review/QA 可在 Card 上标注具体缺陷项 |
-| 归档查询 | 归档后只能翻聊天记录 | 归档含结构化 Task Card，可程序化查询 |
+### 痛点
+
+| 痛点 | 描述 | 影响 |
+|:----|:-----|:------|
+| **P1** | 当前有 7 条 inbox 中继规则（`收到 ✅`/`已完成 ✅`/`退回 🔄`/`失败 ❌`/`##命令`/`!命令`/`test ✅`）分散嵌入在 `_handle_server_relay()` 的 if/elif 链中，**增加一条规则需要全文理解 240 行连续逻辑** | 新规则难以添加，容易破坏现有规则的优先级 |
+| **P2** | 大厅前缀分类（📢/📋/🆘/@mention/普通文本）实现在 `_classify_lobby_message()` + `handle_broadcast()` 的两个独立代码段中，**分类逻辑和路由动作未分离** | 修改大厅路由需要同时修改两处 |
+| **P3** | `##` 命令的解析和路由（`_handle_hash_cmd` + 6 个子 handler）与 `inbox-message-protocol.md` §7 中的协议文档**格式不一致**——文档写的是协议规范，代码写的是实现细节，两者维护不同步 | 添加新 `##` 命令时文档和代码容易脱节 |
+| **P4** | 每条规则的**优先级排序**（`_handle_server_relay` 中 test ✅ > to_agent > ## > PM 守卫 > 收到 ✅ > 已完成 ✅ > 退回 🔄 > 失败 ❌ > ! > 无匹配）没有显式声明，靠代码的顺序隐式表达 | 阅读者需要逐行阅读才能理解整个处理优先级 |
+
+### 目标
+
+```
+当前                        →  目标
+main.py (4934 行)              main.py (~4300 行)
+├── WS 连接管理                  ├── WS 连接管理
+├── 🔴 场景匹配规则 (~600 行)    ├── (调用规则引擎)
+├── 管线状态机                   ├── 管线状态机
+└── 工具函数                     └── 工具函数
+                               +
+                               scenario_matcher.py (~400 行)
+                               ├── 规则表（显式声明优先级）
+                               ├── 7 条 inbox 中继规则
+                               ├── 4 条大厅前缀规则
+                               └── 6 条 ## 命令规则
+```
 
 ---
 
-## 2. Task Card 定义
+## §2 核心设计：HandlerRule Schema
 
-### 2.1 Task Card Schema
+### 2.1 规则定义
 
-**派活侧卡片（派活时生成，随消息发送）：**
+```python
+@dataclass
+class HandlerRule:
+    """一条场景匹配规则。
 
-```json
-{
-  "tc_version": "1.0",
-  "round": "R126",
-  "step": 3,
-  "role": "dev",
-  "title": "编码实现结构化 Task Card",
-  "requirements_url": "https://raw.githubusercontent.com/datahome73/ws-bridge/dev/docs/R126/R126-product-requirements.md",
-  "inputs": [
-    { "name": "技术方案", "type": "doc_url", "value": "https://...", "from_step": 2 }
-  ],
-  "acceptance_criteria": [
-    { "id": "AC-1", "desc": "Task Card Schema 文档定稿", "status": "pending" },
-    { "id": "AC-2", "desc": "派活时 Card 随消息发送", "status": "pending" }
-  ],
-  "outputs": [],
-  "reject_items": [],
-  "references": [
-    "docs/R126/R126-product-requirements.md"
-  ],
-  "meta": {
-    "assigned_agent": "爱泰",
-    "dispatched_at": null,
-    "dispatched_by": "小谷",
-    "started_at": null,
-    "completed_at": null
-  }
-}
+    - match: 匹配函数 (content, msg, agent_id) → bool
+    - handle: 处理函数 (ws, agent_id, msg, matched_info) → bool
+    - priority: 优先级（数字越小越优先）
+    - name: 规则名称（用于日志和调试）
+    - protocol_ref: 对应的协议文档章节（可选）
+    """
+    match: Callable[[str, dict, str], bool | Any]
+    handle: Callable[[Any, str, dict, Any], Awaitable[bool]]
+    priority: int
+    name: str
+    protocol_ref: str = ""
 ```
 
-**回复侧产出卡片（bot 完成时填充）：**
+### 2.2 规则表（规则表定义）
 
-```json
-{
-  "tc_version": "1.0",
-  "round": "R126",
-  "step": 3,
-  "outputs": [
-    { "name": "实现 Commit", "type": "commit_sha", "value": "abc1234" },
-    { "name": "产出文档", "type": "doc_url", "value": "https://..." },
-    { "name": "核心文件", "type": "string[]", "value": ["server/pipeline_context.py", "server/auto_router.py"] }
-  ],
-  "acceptance_criteria": [
-    { "id": "AC-1", "desc": "Task Card Schema 文档定稿", "status": "done" },
-    { "id": "AC-2", "desc": "派活时 Card 随消息发送", "status": "done" }
-  ],
-  "reject_items": [],
-  "result_summary": "实现了 Task Card 的 schema 定义和派活集成",
-  "result_url": "https://github.com/datahome73/ws-bridge/commit/abc1234",
-  "meta": {
-    "assigned_agent": "爱泰",
-    "started_at": 1784300000.0,
-    "completed_at": 1784303600.0
-  }
-}
-```
+所有规则在模块加载时注册到 `_RULES: list[HandlerRule]` 列表，按 `priority` 升序排序。
 
-### 2.2 核心字段说明
+### 2.3 现有规则的优先级映射
 
-| 字段 | 类型 | 出现位置 | 必填 | 说明 |
-|:-----|:------|:-------:|:----:|:------|
-| `tc_version` | string | 两者 | ✅ | Schema 版本（当前 "1.0"） |
-| `round` | string | 两者 | ✅ | 轮次号 |
-| `step` | int | 两者 | ✅ | 步骤号 |
-| `role` | string | 派活侧 | ✅ | 当前角色 |
-| `title` | string | 派活侧 | ✅ | 本步骤任务标题 |
-| `requirements_url` | string | 派活侧 | ✅ | 本轮需求文档 |
-| `inputs` | object[] | 派活侧 | ✅ | 前序步骤产出物，每项含 name/type/value/from_step |
-| `acceptance_criteria` | object[] | 两者 | ✅ | 验收标准清单含 id/desc/status |
-| `outputs` | object[] | 回复侧 | ✅ | 本步骤产出物（bot 填充），每项仅允许 `string`/`string[]`/`number`/`commit_sha`/`doc_url` 五类 type |
-| `reject_items` | object[] | 回复侧 | ✅ | 驳回缺陷项列表（review/qa 填充） |
-| `references` | string[] | 派活侧 | ✅ | 参考文件路径 |
-| `result_summary` | string | 回复侧 | | 完成结果摘要 |
-| `result_url` | string | 回复侧 | | 产出链接 |
-| `meta` | object | 两者 | ✅ | 元信息（assigned_agent/dispatched_at/started_at/completed_at） |
+| 优先级 | 当前顺序 | 规则 | 协议文档 |
+|:------:|:---------|:-----|:---------|
+| 10 | 1st | `test ✅` 回路测试 | §7.1 |
+| 20 | 2nd | `to_agent` 派活路由 | §7.2 |
+| 30 | 3rd | `##` 命令 | §7.3 |
+| 35 | — | PM 安全守卫（拒绝 PM 本人发 `_inbox:server`） | §7.4 |
+| 40 | 4th | `收到 ✅` / `ACK ✅` PM 通知 | §7.5 |
+| 50 | 5th | `已完成 ✅` / `✅ 完成` 自动确认 | §7.6 |
+| 60 | 6th | `退回 🔄` 驳回回退 | §7.7 |
+| 70 | 7th | `失败 ❌` 告警通知 | §7.8 |
+| 80 | 8th | `!` 命令透传 | §7.9 |
+| 90 | 9th | 无匹配 → 入库留痕 | §7.10 |
 
-### 2.3 字段 type 枚举约束
+### 2.4 `##` 命令子规则（在 `##` 规则内部路由）
 
-`inputs[].type` 和 `outputs[].type` 字段仅允许以下枚举值：
+| 子命令 | 去往 | 协议文档 |
+|:-------|:-----|:---------|
+| `##start##R{N}` | `_handle_hash_start` | §7.3.1 |
+| `##status##R{N}` | `_handle_hash_status` | §7.3.2 |
+| `##stop##R{N}` | `_handle_hash_stop` | §7.3.3 |
+| `##advance##R{N}` | `_handle_hash_advance` | §7.3.4 |
+| `##archive##R{N}` | `_handle_hash_archive` | §7.3.5 |
+| `##help` | 显示帮助 | §7.3.6 |
 
-| type 值 | 说明 | 示例 |
-|:--------|:-----|:------|
-| `doc_url` | 文档 URL | `https://raw.githubusercontent.com/...` |
-| `commit_sha` | Git commit SHA | `abc1234` |
-| `string` | 单行文本 | `"审核通过"` |
-| `string[]` | 字符串数组 | `["file1.py", "file2.py"]` |
-| `number` | 数字 | `42` |
-| `test_result` | 测试结果摘要 | `"38/41 🟢 通过"` |
+### 2.5 大厅前缀规则
+
+| 优先级 | 前缀 | 动作 |
+|:------:|:-----|:-----|
+| 100 | `📢` 公告 | admin-only 广播 |
+| 110 | `📋` 点名 | admin/ws-admin 可发 |
+| 120 | `🆘` 求助 | admin-only |
+| 130 | `@mention` | 定向发送 + admin 副本 |
+| 140 | 普通文本 | 拒绝（拦截） |
 
 ---
 
-## 3. 集成方案
+## §3 集成方案
 
-### 3.1 PipelineContext 扩展
+### 3.1 改动点
 
-**文件：** `server/pipeline_context.py` +~55 行
+| 文件 | 操作 | 说明 |
+|:-----|:------|:------|
+| `server/ws_server/**scenario_matcher.py**` | **新建** | 规则表 + 调度引擎 ~400 行 |
+| `server/ws_server/main.py` | 修改 | 替换 `_handle_server_relay` 为 `scenario_matcher.dispatch()` |
+| `server/ws_server/main.py` | 删除 | 移除 `_handle_server_relay()` / `_handle_hash_cmd()` / `_classify_lobby_message()` 中的硬编码规则体 |
+| `server/ws_server/main.py` | 保留存根 | 保留 `_handle_hash_start()` / `_handle_hash_advance()` / `_handle_hash_archive()` / `_handle_hash_status()` / `_handle_hash_stop()` / `_handle_reject()` 等**具体处理函数**（这些是业务逻辑，不是规则） |
+| `docs/inbox-message-protocol.md` | 同步 | §7 规则表链接到 scenario_matcher.py 的规则定义 |
+| `docs/R126/WORK_PLAN.md` | 新建 | Step 分派计划 |
 
-在 `PipelineContext` 中新增：
-- `task_cards: dict[int, dict]` — key 为 step 号，value 为 Task Card
-- `_build_task_card(step_num) -> dict` — 自动从 context 生成派活侧卡片
-- `_fill_output_card(step_num, kv: dict) -> None` — 从完成消息的 kv 回填产出
-- `_add_reject_items(step_num, items: list) -> None` — 将驳回缺陷写入卡片
-
-### 3.2 派活时附加 Task Card
-
-**文件：** `server/auto_router.py` (或 `_auto_dispatch`) +~15 行
-
-`_auto_dispatch()` 在构建派活 payload 时，调用 `_build_task_card(step_num)` 生成 JSON，然后：
+### 3.2 集成步骤
 
 ```
-##task_card=<base64(json)>
+Step 1: PM 审核本需求文档 → 推 dev
+Step 2: Arch 编写 scenario_matcher.py 的规则表架构
+Step 3: Dev 将现有规则逐一搬入 scenario_matcher.py + 验证无退化
+Step 4: Review 审查代码结构
+Step 5: QA 验收 + 双向通信测试
+Step 6: Ops 合入 main 部署
 ```
 
-格式说明：
-- `##task_card` 为新增 artifact key
-- 值为 `base64.urlsafe_b64encode(json.dumps(card).encode()).decode()`
-- 兼容性：旧 bot 忽略未知 `##key=value`，不会报错
-- 派活消息内容保持不变，Task Card 仅是附加数据
+### 3.3 向前兼容保证
 
-### 3.3 完成时回填产出
-
-**文件：** `server/ws_server/main.py` +~35 行
-
-bot 完成消息格式：
-
-```
-已完成 ✅ R126 Step 3##commit=abc1234##output_url=https://...##output_summary=实现了Task Card
-```
-
-`_try_advance_pipeline()` 在解析完成消息时：
-1. 提取 `##commit` / `##output_url` / `##output_summary` 等 kv
-2. 调用 `_fill_output_card(step_num, kv)` 将产出写入当前 step 的 Task Card
-3. `inputs` 自动继承：Step N 的 `outputs` 自动成为 Step N+1 的 `inputs`
-4. `acceptance_criteria` 状态继承：若前序步骤全部 AC 标记 done，则当前步骤的 inputs 含此信息
-
-### 3.4 驳回缺陷标注
-
-**文件：** `server/ws_server/main.py` +~15 行
-
-Review/QA bot 驳回时可附加结构化缺陷信息：
-
-```
-退回 🔄 R126 Step 3 — 编码实现不符合预期##reject_items=<base64([{"ac_id":"AC-2","severity":"critical","desc":"派活时未附带Card"}])>
-```
-
-Server 处理：
-1. 解析 `##reject_items` 参数为 JSON 数组
-2. 写入对应 step 的 Task Card 的 `reject_items` 字段
-3. 解析失败时：仅 log warning，不阻断退回流程
-
-### 3.4.1 驳回二次流转
-
-驳回→修复→归档的全周期行为规则：
-
-| 阶段 | 行为 |
+| 保证 | 说明 |
 |:-----|:------|
-| ① 初始派活 | Server 生成 Task Card（`reject_items: []`，AC 全部 `pending`） |
-| ② 首次完成 | bot 填回 Output Card，`acceptance_criteria` 标记通过/失败 |
-| ③ 驳回 | review/qa 填入 `reject_items`，AC 状态恢复 `pending`（涉及项重置） |
-| ④ 重做 | dev 清除 `reject_items`（旧值归档到历史快照），修复后重新填充 outputs |
-| ⑤ 再次完成 | 新 outputs 覆盖旧 outputs，但旧 outputs 在归档中作为 `outputs_history` 保留 |
-| ⑥ 最终归档 | 完整快照含 `reject_items_history` 和 `outputs_history`，供事后追溯 |
+| **消息格式零变更** | 每条规则处理的 content 格式不变，`to_agent` 字段不变，所有协议不变 |
+| **优先级零变更** | 规则表显式声明优先级，与现有代码顺序完全一致 |
+| **handler 签名零变更** | `_handle_server_relay` 的调用方（`handler()` 和 `ws_handler()`）只改调用名，不改签名 |
+| **双入口同步** | `handler()` 和 `ws_handler()` 两处都改为调用 `scenario_matcher.dispatch()`，不再需要维护两份 `_handle_server_relay` 副本 |
 
-> 关键设计：**reject_items 重做清除，历史快照保留**。确保重做 bot 不受旧数据干扰，同时归档可追溯完整生命周期。
+### 3.4 双入口同步（关键）
 
-### 3.5 ##status 展示 Task Card 摘要
+当前 `_handle_server_relay` 在 `main.py` 中有**两份完全相同的副本**（L3179 和未知位置）。R126 提取后：
 
-**文件：** `server/ws_server/main.py` +~15 行
-
-`##status##R{N}` 对已完成步骤显示：
-
-```
-📊 R126 管线状态
-
-Step 3 (dev) ✅ 已完成
-  📎 产出: abc1234 (commit) — 实现了Task Card
-  ✅ AC-1 通过 | ✅ AC-2 通过
-
-Step 4 (review) 🔄 进行中...
+```python
+# main.py handler() 和 ws_handler() 两处统一调用：
+if await scenario_matcher.dispatch(ws, agent_id, msg):
+    continue
 ```
 
----
-
-## 4. 改动范围估算
-
-| 文件 | 改动 | 估算 |
-|:-----|:------|:-----|
-| `docs/R126/task-card-schema.md` | **新增** - Schema 定义文档 + 完整示例 | ~80 行 |
-| `server/pipeline_context.py` | 新增 `task_cards` 字段 + `_build_task_card()`/`_fill_output_card()`/`_add_reject_items()` | +~55 行 |
-| `server/auto_router.py` | `_auto_dispatch()` 派活时附加 `##task_card=<b64>` | +~15 行 |
-| `server/ws_server/main.py` | `_try_advance_pipeline()` 解析 `##output_xxx` 回填；`_handle_reject()` 解析 `##reject_items`；`_handle_hash_status()` 展示卡片摘要 | +~55 行 |
-| `docs/inbox-message-protocol.md` | 补充 Task Card / output / reject kv 说明；版本号 v3.1→v3.2 | ~10 行 |
-| `docs/TODO.md` | 版本号 v2.73→v2.74 + R126 闭环记录 | ~5 行 |
-
-**合计：** 1 新增 + 5 修改文件，**净增 ~+110–140 行**
+**不再需要维护两份副本。** 这是本次提取的核心收益之一。
 
 ---
 
-## 5. 验收标准
+## §4 改动范围估算
 
-### TC — Task Card Schema（§2）
+| 文件 | 新增 | 删除 | 修改 | 净变化 |
+|:-----|:----:|:----:|:----:|:------:|
+| `scenario_matcher.py` | ~400 行 | — | — | +400 |
+| `main.py` | 调用 ~5 行 | `_handle_server_relay` ~240 行 | ~10 行 | **-225 行** |
+| `docs/inbox-message-protocol.md` | §7 映射表 ~30 行 | — | 小幅更新 | ~+30 |
+| **合计** | **~435** | **~240** | **~40** | **~+235 净增** |
 
-| # | 验收项 | 优先级 |
-|:-:|:-------|:------:|
-| TC-1 | Task Card Schema 文档定稿于 `docs/R126/task-card-schema.md` | 🟢 P0 |
-| TC-2 | tc_version 标记为 "1.0" | 🔵 P2 |
-| TC-3 | 派活侧卡片字段完整（title/requirements_url/inputs/acceptance_criteria/meta） | 🟢 P0 |
-| TC-4 | 回复侧卡片字段完整（outputs/acceptance_criteria/reject_items/result_summary/meta） | 🟢 P0 |
-| TC-5 | 文档含 1 个完整示例（从派活到归档全过程） | 🟡 P1 |
-| TC-6 | `outputs[].type` 仅允许 `string`/`string[]`/`number`/`commit_sha`/`doc_url` 五类枚举值 | 🟡 P1 |
-
-### OC — 产出回填（§3.2–3.3）
-
-| # | 验收项 | 优先级 |
-|:-:|:-------|:------:|
-| OC-1 | `_auto_dispatch()` 派活时包含 `##task_card=<b64>` | 🟢 P0 |
-| OC-2 | 完成消息中 `##commit/output_url/output_summary` 回填到 Task Card outputs | 🟢 P0 |
-| OC-3 | Step N 的 outputs 自动成为 Step N+1 的 inputs（输入输出契约） | 🟢 P0 |
-| OC-4 | 旧 bot 不加 `##output_xxx` 不影响已有流程（向后兼容） | 🟢 P0 |
-
-### RJ — 驳回标注（§3.4）
-
-| # | 验收项 | 优先级 |
-|:-:|:-------|:------:|
-| RJ-1 | 退回消息支持 `##reject_items=<b64_json>` 参数 | 🟡 P1 |
-| RJ-2 | reject_items 解析失败时仅 log warning，不阻断退回 | 🟡 P1 |
-
-### CT — 上下文传递（§3.3 + §3.5）
-
-| # | 验收项 | 优先级 |
-|:-:|:-------|:------:|
-| CT-1 | `##status##R{N}` 对已完成步骤显示产出摘要 | 🟡 P1 |
-| CT-2 | 未完成步骤的 Task Card 不展示产出 | 🔵 P2 |
-| CT-3 | 无 Task Card 的旧管线执行 `##status` 不报错 | 🟢 P0 |
-
-### RV — 归档与兼容（§3.4.1）
-
-| # | 验收项 | 优先级 |
-|:-:|:-------|:------:|
-| RV-1 | 归档时 steps 中包含 Task Card 完整快照 | 🟡 P1 |
-| RV-2 | reject_items 重做清除，旧数据在 `reject_items_history` 归档 | 🟡 P1 |
-| RV-3 | 旧管线 pipeline_archive.json 加载不报错（无 task_card 字段） | 🟢 P0 |
+> 净增 235 行主要来自规则表的结构化定义、文档和注释。每新增一条规则只需在表中加一行，不需要理解 240 行 if/elif 链。
 
 ---
 
-## 6. 不做事项（明确排除）
+## §5 验收标准
 
-| 排除项 | 理由 |
-|:-------|:------|
-| ❌ **bot 端 Task Card 解析器实现** | 属于各 bot 适配层，非 server 端范围；R126 仅定义 schema 和 server 端派活/收集机制 |
-| ❌ **Phase 3 Coder Agent 集成** | Task Card 为 Coder Agent 铺垫基础，但 Coder Agent 本身非本次范围 |
-| ❌ **Web UI Task Card 可视化** | 纯前端工作，排后续轮次 |
-| ❌ **Task Card 版本兼容升级（v2 schema）** | 首次落地，v1.0 已够用 |
-| ❌ **全量历史管线 Task Card 回溯** | 旧管线无 Task Card 数据，不做追溯 |
-| ❌ **多 bot 并行派活** | Task Card Schema 天然支持并行（各 bot 各自填充 outputs），但 R126 仅串行管线场景，并行排后续轮次 |
-| ❌ **自动 AC 引擎** | 不自动判断验收标准是否满足，仅做结构化记录 |
+### SC-N: 场景匹配规则提取（P0）
 
----
+| 编号 | 描述 | 类型 | 优先级 |
+|:----|:-----|:----:|:------:|
+| SC-1 | `scenario_matcher.py` 存在且可导入，`from .. import scenario_matcher` 无 ImportError | 功能 | P0 |
+| SC-2 | 规则表 `_RULES` 按 priority 升序排序，遍历时按顺序检查匹配 | 功能 | P0 |
+| SC-3 | `test ✅` 回路测试：向 `_inbox:server` 发 `test ✅`，收到回路确认 | 功能 | P0 |
+| SC-4 | `to_agent` 派活：向 `_inbox:server` 发带 `to_agent` 的消息，目标 agent 收到 | 功能 | P0 |
+| SC-5 | `##` 命令：`##status##R125` 返回管线状态 | 功能 | P0 |
+| SC-6 | `##start##R126##task=xxx` 创建管线并派活 Step 1 | 功能 | P0 |
+| SC-7 | `##archive##R125` 归档已完成管线 | 功能 | P0 |
+| SC-8 | `收到 ✅` / `ACK ✅` 转发 PM | 功能 | P0 |
+| SC-9 | `已完成 ✅` / `✅ 完成` 推进管线 step | 功能 | P0 |
+| SC-10 | `退回 🔄` 触发状态回退 | 功能 | P0 |
+| SC-11 | `失败 ❌` 转发 PM | 功能 | P0 |
 
-## 7. 验收检查表
+### LO-N: 大厅前缀（P0）
 
-| # | 验收项 | 类型 | 优先级 |
-|:-:|:------|:----:|:-----:|
-| TC-1 | Task Card Schema 文档定稿 | 规范 | 🔴 P0 |
-| TC-2 | tc_version v1.0 | 规范 | 🔵 P2 |
-| TC-3 | 派活侧卡片字段完整 | 规范 | 🟢 P0 |
-| TC-4 | 回复侧卡片字段完整 | 规范 | 🟢 P0 |
-| TC-5 | 文档含完整示例 | 规范 | 🟡 P1 |
-| TC-6 | `outputs[].type` 枚举约束 | 规范 | 🟡 P1 |
-| OC-1 | 派活时附加 `##task_card` | 代码 | 🟢 P0 |
-| OC-2 | `##output_xxx` 回填 outputs | 代码 | 🟢 P0 |
-| OC-3 | Step N outputs → Step N+1 inputs | 代码 | 🟢 P0 |
-| OC-4 | 旧 bot 不加 kv 不影响 | 回归 | 🟢 P0 |
-| RJ-1 | 退回消息支持 `##reject_items` | 代码 | 🟡 P1 |
-| RJ-2 | reject_items 解析容错 | 代码 | 🟡 P1 |
-| CT-1 | `##status` 展示产出摘要 | 代码 | 🟡 P1 |
-| CT-2 | 未完成步骤不展示产出 | 代码 | 🔵 P2 |
-| CT-3 | 旧管线不报错 | 回归 | 🟢 P0 |
-| RV-1 | 归档含 Task Card 快照 | 代码 | 🟡 P1 |
-| RV-2 | reject_items 重做清除 / 历史归档 | 代码 | 🟡 P1 |
-| RV-3 | 旧 archive.json 不报错 | 回归 | 🟢 P0 |
+| 编号 | 描述 | 类型 | 优先级 |
+|:----|:-----|:----:|:------:|
+| LO-1 | `📢` 公告：admin 可发，member 拒绝 | 功能 | P0 |
+| LO-2 | `📋` 点名：admin/ws-admin 可发 | 功能 | P0 |
+| LO-3 | `🆘` 求助：admin-only | 功能 | P0 |
+| LO-4 | `@mention`：定向发送 | 功能 | P0 |
+| LO-5 | 普通文本：拒绝（"需要明确类型"） | 功能 | P0 |
 
----
+### RV-N: 回归验证（P0）
 
-## 8. 向后兼容性说明
+| 编号 | 描述 | 类型 | 优先级 |
+|:----|:-----|:----:|:------:|
+| RV-1 | `handler()` 入口（legacy websockets）和 `ws_handler()` 入口（aiohttp 生产）都走 scenario_matcher.dispatch()，不再维护两份 `_handle_server_relay` | 校验 | P0 |
+| RV-2 | 所有 10 条规则的 **返回语义不变**：`True` = 已处理（continue），`False` = 未匹配（继续路由） | 验收 | P0 |
+| RV-3 | PM 安全守卫：PM 本人（agent_id == DISPATCH_SENDER_ID）发普通消息到 `_inbox:server` 时返回错误 | 功能 | P0 |
 
-| 场景 | 旧行为 | R126 后行为 | 兼容性 |
-|:-----|:-------|:-----------|:------:|
-| 旧 bot 不加 `##output_xxx` | 正常完成 | 正常完成，outputs 为空 | ✅ |
-| 旧 bot 忽略 `##task_card` | — | `##task_card` 作为未知 kv 被忽略 | ✅ |
-| 旧管线已归档 | 正常查询 | 正常查询，steps 中无 task_card | ✅ |
-| `##status` 无 task_card 管线 | 正常显示 | 正常显示，不展示卡片摘要 | ✅ |
+### DO-N: 文档同步（P1）
+
+| 编号 | 描述 | 类型 | 优先级 |
+|:----|:-----|:----:|:------:|
+| DO-1 | `inbox-message-protocol.md` §7 新增规则优先级表 | 文档 | P1 |
+| DO-2 | 每条规则的 `protocol_ref` 字段指向协议文档对应章节 | 代码+文档 | P1 |
+| DO-3 | `scenario_matcher.py` 模块 docstring 含「协议文档见 docs/inbox-message-protocol.md」指引 | 文档 | P1 |
 
 ---
 
-> **审核记录：**
-> - v1.0 提交审核：✅ PM 审核通过
-> - §2.3 补充 type 枚举约束 — 审阅建议 #3
-> - §3.4.1 补充驳回二次流转规则 — 审阅建议 #1
-> - §6 排除清单补充「多 bot 并行派活」— 审阅建议 #2
-> - 项目负责人审核意见：待定
+## §6 不做事项（不做事项）
+
+| # | 事项 | 理由 |
+|:-:|:-----|:------|
+| ❌ | **不搬业务逻辑函数** | `_handle_hash_start()`、`_handle_reject()`、`_try_advance_pipeline()` 等业务执行函数继续留在 `main.py`（或后续搬入 `commands/`）。本轮只搬**匹配规则 + 调度引擎** |
+| ❌ | **不改变 handler() 整体结构** | `handle_broadcast()` 中的大厅路由（📢📋🆘@）暂不提取。原因是这些规则依赖 handle_broadcast 的局部变量（`users`、`admin_ids`、`_connections`），提取收益不如 inbox 中继规则高。留待 R127+ 处理 |
+| ❌ | **不引入插件机制** | 暂不做热加载 / 动态注册 / 插件发现。规则表在模块初始化时静态构建即可 |
+| ❌ | **不重构大厅前缀分类** | `_classify_lobby_message()` 和 `handle_broadcast` 的大厅路由段逻辑提取后移 |
+| ❌ | **不改 inbox-message-protocol.md 的协议定义** | 只加规则映射表，不改已有的协议格式（§1-§6、§8 不动） |
+| ❌ | **不在 scenario_matcher 中新增规则** | 只搬现有规则，不新增。新增规则（如 `##resume` / `##skip`）是另一轮的事 |
+| ❌ | **不改变 `_handle_server_query`（!命令）** | `!` 命令在 `_handle_server_relay` 中只做了透传（return False），不解处理。实际处理在 `handle_broadcast` 的 `_handle_server_query` 中，不在本轮范围 |
+
+---
+
+## §7 验收检查表（汇总）
+
+### 提取前 → 提取后对比
+
+| 维度 | 提取前 | 提取后 |
+|:-----|:-------|:-------|
+| `main.py` 行数 | 4934 行 | ~4300 行（-225 规则代码 + ~50 调用/导入） |
+| 规则新增难度 | 理解 240 行 if/elif 链 | 在表中加一行 `HandlerRule(...)` |
+| 规则优先级 | 靠代码顺序隐式表达 | `priority` 字段显式声明 |
+| 文档同步 | 手动维护 | `protocol_ref` 字段链接到协议文档 |
+| 双入口维护 | 两份 `_handle_server_relay` 副本 | 一份 `scenario_matcher.dispatch()` |
+| 协议文档版本 | v3.1 | v3.2（+ 规则优先级映射表） |
+
+### 文件改动清单
+
+| 操作 | 文件 | 估算行数 |
+|:-----|:-----|:--------:|
+| ✅ 新建 | `server/ws_server/scenario_matcher.py` | ~400 行 |
+| ✅ 修改 | `server/ws_server/main.py` | ~15 行（替换调用 + 清理） |
+| ✅ 修改 | `docs/inbox-message-protocol.md` | ~+30 行 |
+| ✅ 新建 | `docs/R126/WORK_PLAN.md` | — |
+| ❌ 不碰 | `server/ws_server/handler.py`（已不存在） | — |
+
+### 验收计数
+
+| 分组 | P0 项 | P1 项 | 合计 |
+|:-----|:-----:|:-----:|:----:|
+| SC 规则提取 | 11 | 0 | 11 |
+| LO 大厅前缀 | 5 | 0 | 5 |
+| RV 回归验证 | 3 | 0 | 3 |
+| DO 文档同步 | 0 | 3 | 3 |
+| **合计** | **19** | **3** | **22** |
