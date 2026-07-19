@@ -71,6 +71,8 @@
 |:-:|:----|:-----:|:----:|:----:|
 | B-1 | **派活消息在 Web 端显示两条（经理+系统）** — `_auto_dispatch()` L3118-3131 额外保存了一条 `from_name="小谷"` 的 DB 记录，与 `_send_to_agent()` 内 `from_name="系统"` 的 DB 记录重复。修复：去掉 `_auto_dispatch` 中的冗余 `ms.save_message`，保留 `_send_to_agent` 的系统身份持久化 | 🔴 P1 | 待分配 | ⬜ 待修复 |
 | B-2 | **离线 bot 派活丢失，重试队列不够可靠** — `_auto_dispatch` 调用 `_send_to_agent` 时目标 bot 无 WS 连接 → sent=0 → `_enqueue_retry` 入队（60s 后重试）。但如果 bot 持续离线，`_pending_retries` 无超限淘汰/降级机制，消息可能永久遗失。修复建议：重试队列增加超限后通知 PM 机制 + 缩短首轮重试间隔（60s→15s） | 🟡 P2 | 待分配 | ⬜ 待修复 |
+| B-3 | **`##status` 显示 bug：`in_progress` 状态无对应图标** — `_auto_dispatch` 将 step 状态设为 `"in_progress"`，但 `_handle_hash_status` 的 `status_icons` 映射表缺少 `"in_progress"` key，导致已派活的 step 仍显示 `⬜`（与 pending 混淆）。修复：`status_icons["in_progress"] = "🔄"` 一行 | 🟡 P2 | 待分配 | ⬜ 待修复 |
+| B-4 | **Bot 完成消息格式容错不足** — `_try_advance_pipeline` 以严格正则 `r"已完成 ✅ R(\d+) Step (\d+)"` 匹配完成消息，bot 格式稍有偏差（标点/空格/前缀差异）即静默忽略，不推进、不报错、不通知。修复建议：增加模糊匹配（re.search + 容差），不匹配时提示 bot 正确格式 | 🟡 P2 | 待分配 | ⬜ 待修复 |
 
 ---
 
