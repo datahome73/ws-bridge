@@ -223,12 +223,18 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 
 # ── R131: ##query commands (rule 25) ────────────────────────────────
 
+_QUERY_SHORTCUTS = ("##whoami", "##agents", "##status", "##agent_info", "##audit", "##help")
+
 def match_query(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 25: ##query commands.
+    """Rule 25: ##query commands (+ shortcuts).
     Priority 25 — intercepts before generic ## handler (30).
+    Supports both ##query##<sub_cmd> and direct ##whoami etc.
     """
     if content.startswith("##query"):
         return content
+    for prefix in _QUERY_SHORTCUTS:
+        if content.startswith(prefix):
+            return content.replace("##", "##query##", 1)
     return False
 
 
@@ -242,12 +248,12 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     parts = content.split("##")
     if len(parts) < 3:
         await _send_reply(ws, agent_id,
-            "📋 **##query 命令**\\n\\n"
-            "`##whoami` — 查看自己信息\\n"
-            "`##agents` — 列出所有 bot\\n"
-            "`##status [R{N}]` — 查询管线状态\\n"
-            "`##agent_info <agent_id>` — 查询 bot 详情\\n"
-            "`##audit [--limit N]` — 审计日志 (L4+)\\n"
+            "📋 **##query 命令**\n\n"
+            "`##whoami` — 查看自己信息\n"
+            "`##agents` — 列出所有 bot\n"
+            "`##status [R{N}]` — 查询管线状态\n"
+            "`##agent_info <agent_id>` — 查询 bot 详情\n"
+            "`##audit [--limit N]` — 审计日志 (L4+)\n"
             "`##help` — 显示本帮助"
         )
         return True
@@ -276,8 +282,8 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         info = users.get(agent_id, {})
         name = info.get("name", agent_id[:12])
         await _send_reply(ws, agent_id,
-            f"🆔 agent_id: `{agent_id}`\\n"
-            f"📛 名称: {name}\\n"
+            f"🆔 agent_id: `{agent_id}`\n"
+            f"📛 名称: {name}\n"
             f"🎚️ 级别: L{level}")
     elif sub_cmd == "status":
         reply = await _format_pipeline_status(params, _main)
@@ -293,12 +299,12 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         await _send_reply(ws, agent_id, reply)
     elif sub_cmd == "help":
         await _send_reply(ws, agent_id,
-            "📋 **##query 命令**\\n\\n"
-            "`##whoami` — 查看自己信息\\n"
-            "`##agents` — 列出所有 bot\\n"
-            "`##status [R{N}]` — 查询管线状态\\n"
-            "`##agent_info <agent_id>` — 查询 bot 详情\\n"
-            "`##audit [--limit N]` — 审计日志 (L4+)\\n"
+            "📋 **##query 命令**\n\n"
+            "`##whoami` — 查看自己信息\n"
+            "`##agents` — 列出所有 bot\n"
+            "`##status [R{N}]` — 查询管线状态\n"
+            "`##agent_info <agent_id>` — 查询 bot 详情\n"
+            "`##audit [--limit N]` — 审计日志 (L4+)\n"
             "`##help` — 显示本帮助")
     else:
         await _send_reply(ws, agent_id,
@@ -334,7 +340,7 @@ async def _format_pipeline_status(round_name: str, main_mod) -> str:
                 f"  {ctx.round_name} [{ctx.task_kind.value}] "
                 f"{ctx.status.value} step={ctx.current_step}/{ctx.total_steps}"
             )
-        return "\\n".join(lines)
+        return "\n".join(lines)
     return "📋 当前无活跃管线"
 
 
@@ -356,7 +362,7 @@ def _format_agent_list() -> str:
         roles_str = f" [{roles}]" if roles else ""
         lines.append(f"  {online} {name} ({aid[:12]}...) L{info.get('level', 1)}{roles_str}")
         seen.add(aid)
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def _format_agent_info(agent_id: str) -> str:
@@ -376,13 +382,13 @@ def _format_agent_info(agent_id: str) -> str:
     card_info = ""
     if card:
         card_info = (
-            f"\\n  📇 display_name: {card.get('display_name', '')}"
-            f"\\n  🎭 角色: {', '.join(card.get('pipeline_roles', []))}"
+            f"\n  📇 display_name: {card.get('display_name', '')}"
+            f"\n  🎭 角色: {', '.join(card.get('pipeline_roles', []))}"
         )
     return (
-        f"📋 Agent 信息: {name}\\n"
-        f"  🆔 agent_id: `{agent_id}`\\n"
-        f"  🎚️ 级别: L{level} / 角色: {role}\\n"
+        f"📋 Agent 信息: {name}\n"
+        f"  🆔 agent_id: `{agent_id}`\n"
+        f"  🎚️ 级别: L{level} / 角色: {role}\n"
         f"  📡 状态: {online}"
         f"{card_info}"
     )
@@ -399,7 +405,7 @@ def _format_audit_log(limit_str: str) -> str:
     lines = auditor.tail(limit)
     if not lines:
         return "📋 审计日志为空"
-    return "📋 最近审计日志:\\n" + "\\n".join(
+    return "📋 最近审计日志:\n" + "\n".join(
         f"  {l}" for l in lines[-limit:]
     )
 
