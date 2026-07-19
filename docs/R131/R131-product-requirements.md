@@ -69,7 +69,7 @@ Bot ──!command──→ handle_broadcast()
 | `##agents` | `!agent_card list` + `!list_agents` | 列出所有已注册 bot（ID / name / role / online） | **L3** |
 | `##agent_info <agent_id>` | `!agent_card get` + `!agent_status` | 查询单个 bot 详情（Agent Card + 在线状态 + 级别） | **L3** |
 | `##whoami` | `!my_id` | 返回自己的 agent_id、display_name、级别 | L1 |
-| `##audit [--limit N]` | `!audit_log` | 查看审计日志 | **L3** |
+| `##audit [--limit N]` | `!audit_log` | 查看审计日志 | **L4** |
 | `##help` | `!help` | 显示可用 ##query 命令列表 | L1 |
 
 ### 2.3 权限模型
@@ -80,8 +80,8 @@ Bot ──!command──→ handle_broadcast()
 |:----:|:-----|:-------------------|
 | **L1** | 普通 bot | `##whoami`（仅查自己 ID） |
 | **L2** | 已注册 bot | 全部 L1 |
-| **L3** | 管理员 | `##status`、`##agents`、`##agent_info`、`##whoami`、`##audit`、`##help` |
-| **L4** | 全局管理员 | 全部 L3 |
+| **L3** | 管理员 | 查询类：`##status`、`##agents`、`##agent_info`、`##whoami`、`##help` |
+| **L4** | 全局管理员 | 全部 L3 + `##audit`（含未来写权限命令） |
 
 ### 2.4 规则表集成
 
@@ -107,6 +107,8 @@ handle_query(ws, agent_id, msg, matched)
   │
   ├─ 查级别: get_agent_level(agent_id)
   │     ├─ L1 → 仅允许 ##whoami
+  │     ├─ L3 → 查询类命令
+  │     ├─ L4 → 全部命令（含 ##audit）
   │     └─ 级别不足 → 回复「权限不足」到 inbox
   │
   ├─ 执行查询: 调用对应的数据获取函数
@@ -140,7 +142,7 @@ async def _send_reply(ws, agent_id: str, content: str) -> None:
 | 查管线 | `##status` | 活跃管线: R130 running step=6/6 |
 | 查管线 | `##status##R130` | 📊 R130: Step 6/6, 小爱(ops) 执行中 |
 | 查 bot | `##agents` | 📇 Agents (7): 小爱🟢 小谷🟢 小开🟢 爱泰🟢 小周🟢 泰虾🟢 经理🟢 |
-| 查审计 | `##audit` | 📋 最近 20 条审计日志（仅 L3+） |
+| 查审计 | `##audit` | 📋 最近 20 条审计日志（仅 L4+） |
 
 ---
 
@@ -176,7 +178,7 @@ async def _send_reply(ws, agent_id: str, content: str) -> None:
 | F3 | 向 `_inbox:server` 发 `##status`，收到活跃管线列表 | 发送 `##status` → 检查回复 |
 | F4 | 向 `_inbox:server` 发 `##status##R{N}`，收到指定管线详情 | 发送 `##status##R130` → 检查 |
 | F5 | 向 `_inbox:server` 发 `##agent_info ws_xxx`，收到 bot 详情 | 发送 `##agent_info ws_f26e585f6479` → 检查 |
-| F6 | 向 `_inbox:server` 发 `##audit`，L3+ 收到审计日志，L1 收到权限拒绝 | 分别用 L3 和 L1 bot 测试 |
+| F6 | 向 `_inbox:server` 发 `##audit`，L4 收到审计日志，L3 收到权限拒绝 | 分别用 L4 和 L3 bot 测试 |
 
 ### 4.2 回归验证
 
