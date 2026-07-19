@@ -69,7 +69,7 @@
 
 | # | 事项 | 严重度 | 轮次 | 状态 |
 |:-:|:----|:-----:|:----:|:----:|
-| B-1 | **派活消息在 Web 端显示两条（经理+系统）** — `_send_to_agent()` 内部多写了一条 `from_name="系统"` 的 DB 记录（L2505-2516），与 `_auto_dispatch` 已保存的 `from_name="小谷"` 记录重复。导致 Web 端每个 dispatch 显示 2 条消息。修复：去掉 `_send_to_agent` 中冗余的 `ms.save_message`，给缺少持久化的调用方(`_auto_re_notify` 等)补上显式保存 | 🔴 P1 | 待分配 | ⬜ 待修复 |
+| B-1 | **派活消息在 Web 端显示两条（经理+系统）** — `_auto_dispatch()` L3118-3131 额外保存了一条 `from_name="小谷"` 的 DB 记录，与 `_send_to_agent()` 内 `from_name="系统"` 的 DB 记录重复。修复：去掉 `_auto_dispatch` 中的冗余 `ms.save_message`，保留 `_send_to_agent` 的系统身份持久化 | 🔴 P1 | 待分配 | ⬜ 待修复 |
 
 ---
 
