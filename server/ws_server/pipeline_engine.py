@@ -213,6 +213,7 @@ class PipelineEngine:
         replacements = {
             "{round_name}": ctx.round_name,
             "{round_title}": getattr(ctx, "round_title", ctx.round_name) or ctx.round_name,
+            "{round}": ctx.round_name,  # R129 B-5: 旧模板用 {round}
             "{step_num}": str(step_num),
             "{num_steps}": str(ctx.total_steps),
         }

@@ -167,6 +167,25 @@ def clear_messages_by_channel(channel: str, data_dir: Path):
     conn.commit()
 
 
+def is_duplicate(channel: str, content: str, window_sec: float, data_dir: Path) -> bool:
+    """R129 B-6: 检查同 channel 最近 window_sec 秒内是否有相同 content 的消息。"""
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return False
+    cutoff = time.time() - window_sec
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM messages WHERE channel = ? AND content = ? AND ts > ? LIMIT 1",
+            (channel, content, cutoff),
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
 # ── R76: LIKE pattern query ──────────────────────────────────────────
 
 
