@@ -15,7 +15,6 @@ from server.common.config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SE
 from .main import handle_auth, handle_broadcast, handle_register, _connections  # R87
 from . import scenario_matcher as _sm  # R126
 from .message_store import init_db, search_messages as _search_messages
-from .pipeline_auto_starter import PipelineAutoStarter  # R110
 from server.common.persistence import get_approved_users as _get_approved_users
 from . import workspace as ws_mod
 from server.common.persistence import (
@@ -792,47 +791,6 @@ def main():
     logger.info("Admin agents: %s", ADMIN_AGENTS or "none")
 
     app = web.Application()
-
-    # ── R110: PipelineAutoStarter — Git 感知管线自动启动 ──
-    _pas_enabled = os.environ.get("PAS_ENABLED", "1") == "1"
-    if _pas_enabled:
-        _pas = PipelineAutoStarter(
-            repo_path=os.environ.get("REPO_PATH", "/opt/data/ws-bridge"),
-            data_dir=str(DATA_DIR),
-            pm_agent_id=DISPATCH_SENDER_ID or "",
-            context_mgr=None,  # 启动时注入
-            dispatch_fn=None,  # 启动时注入
-        )
-
-        async def _start_pas(app):
-            """启动时注入 context_mgr + dispatch_fn，然后启动 PAS。"""
-            from .main import _ensure_pipeline_manager, engine
-            _pas._ctx_mgr = _ensure_pipeline_manager()
-
-            # 包装 engine.auto_dispatch 适配 PAS dispatch 签名
-            async def _pas_dispatch(round_name: str, agent_id: str, content: str):
-                ctx = _pas._ctx_mgr.get(round_name)
-                if ctx and content:
-                    from .main import _send_to_agent
-                    await _send_to_agent(agent_id, {
-                        "type": "message",
-                        "channel": f"_inbox:{agent_id}",
-                        "content": content,
-                        "from_name": "系统",
-                        "from_agent": "system",
-                    })
-                # 推进到 RUNNING + step1
-                if ctx:
-                    await engine.auto_dispatch(ctx, 1)
-
-            _pas._dispatch = _pas_dispatch
-            asyncio.create_task(_pas.start())
-
-        app.on_startup.append(_start_pas)
-        app.on_shutdown.append(lambda _: _pas.stop())
-        logger.info("[PAS] enabled, poll_interval=60s")
-    else:
-        logger.info("[PAS] disabled (PAS_ENABLED=0)")
 
     # ── R118: 启动离线重试循环（通过 PipelineEngine）──
     async def _start_retry_loop(app):
