@@ -2948,6 +2948,7 @@ def _build_step_summary(ctx: PipelineContext, step_num: int) -> str:
 
 
 
+
 def _find_archive(round_name: str) -> dict | None:
     """从 pipeline_archive.json 查找已归档轮次。"""
     from pathlib import Path
