@@ -836,16 +836,16 @@ def main():
 
     # ── R118: 启动离线重试循环（通过 PipelineEngine）──
     async def _start_retry_loop(app):
-        from .main import engine
-        asyncio.create_task(engine._retry_loop())
+        from .main import _ensure_engine
+        asyncio.create_task(_ensure_engine()._retry_loop())
         logger.info("[R118] retry loop started")
 
     app.on_startup.append(_start_retry_loop)
 
     # ── R119: 启动时恢复活跃管线的自动派活（通过 PipelineEngine）──
     async def _restore_dispatches(app):
-        from .main import engine
-        await engine.restore_pipeline_dispatches()
+        from .main import _ensure_engine
+        await _ensure_engine().restore_pipeline_dispatches()
         logger.info("[R119] pipeline dispatch restoration completed")
 
     app.on_startup.append(_restore_dispatches)
