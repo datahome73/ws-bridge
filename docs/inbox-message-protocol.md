@@ -1,9 +1,9 @@
 # ws-bridge Inbox 消息处理协议
 
-> **版本：** v3.0
-> **状态：** ✅ 定稿（R116 重写）
-> **日期：** 2026-07-15
-> **基线：** R111→R115（relay 协议 + `##key=value` + artifacts 注入全链路已就绪）
+> **版本：** v3.1
+> **状态：** ✅ 定稿（R124 更新）
+> **日期：** 2026-07-19
+> **基线：** R111→R124（relay 协议 + `##key=value` + artifacts + 驳回归档全链路已就绪）
 
 ---
 
@@ -21,7 +21,11 @@ R111→R115 完成了全自动管线基础设施：
 | `_try_advance_pipeline()` | 自动识别 `已完成 ✅ R{N} Step {N}`，推进 Step | R113 |
 | `_extract_artifact_kv()` | 从完成消息提取 `##key=value`，注入 PipelineContext | R115 |
 | `_auto_dispatch()` + `_render_template()` | 自动渲染模板 + 用 L4 凭证派活下一步 | R107/R115 |
-| Relay 前缀规则（5 条） | `收到 ✅` / `已完成 ✅` / `退回 🔄` / `失败 ❌` / `##` 命令 | R87→R115 |
+| `_handle_reject()` + 状态回退 | 处理 `退回 🔄` 消息，回退 Step 状态，通知 PM | R124 |
+| `##archive##R{N}` 命令 | PM 手动归档已完成管线至 pipeline_archive.json | R124 |
+| `##advance##R{N}##step=N` 命令 | PM 手动推进管线到指定 Step（跳过/恢复） | R124 |
+| `_archive_pipeline()` 自动归档 | 管线完成时自动归档 + 通知 PM | R124 |
+| 前缀规则（6 条） | `收到 ✅` / `已完成 ✅` / `退回 🔄` / `失败 ❌` / `##` 命令 / `!` | R87→R124 |
 
 ---
 
@@ -100,6 +104,18 @@ await client.send_message(
     channel="_inbox:server",
 )
 ```
+
+R124 起，bot 还可以发送 `退回 🔄` 前缀消息来驳回当前步骤，server 自动回退管线状态并通知 PM：
+
+```python
+# R124 协议：驳回回复到 _inbox:server
+await client.send_message(
+    content="退回 🔄 R{xx} Step {N} — 原因描述",
+    channel="_inbox:server",
+)
+```
+
+驳回后管线回退到编码环节（Step 2），不自动重新派活，由 PM 人工决策。详见 §7.7。
 
 ### 4.1 回复时机
 
@@ -336,7 +352,7 @@ Bot 发往 `_inbox:server` 的消息，server **仅根据内容前缀**决定行
 |:-----|:-----|:-----------|
 | `收到 ✅` | ACK 确认 | ⏩ 转发给 PM：`📬 {bot名称} 已接活: 收到 ✅ ...` |
 | `已完成 ✅` | 完成通知 | ⏩ 转发给 PM + **自动回确认给 bot** + 自动 Step 推进 + artifacts 注入 |
-| `##` | 管线命令 | ⏩ `_handle_hash_cmd` 分发（`##start`/`##status`/`##stop`/`##help`） |
+|| `##` | 管线命令 | ⏩ `_handle_hash_cmd` 分发（`##start`/`##status`/`##stop`/`##advance`/`##archive`/`##help`） |
 | `退回 🔄` | 退回通知 | ⏩ 转发给 PM + 自动 Step 标记退回 |
 | `失败 ❌` | 失败通知 | ⏩ 转发给 PM + 自动确认给 bot |
 | `!` | 命令透传 | ⏩ 透传到正常路由（不走中继） |
@@ -344,7 +360,42 @@ Bot 发往 `_inbox:server` 的消息，server **仅根据内容前缀**决定行
 
 > **因此：** ACK、完成、退回、失败、## 命令的回复必须精确使用上述前缀。格式不正确（如 `好的，收到` / `✅ 已推`）会被 server 静默丢弃，**PM 看不到你的回复**。
 
-### 7.7 安全守卫
+### 7.7 驳回协议（R124）
+
+Review/QA bot 对当前步骤的产出不满意时，可以用 `退回 🔄` 前缀通知 server，触发自动状态回退：
+
+**触发条件：** bot 发往 `_inbox:server` 的消息以 `退回 🔄 R{N} Step {N} — 原因` 开头。
+
+**Server 行为：**
+1. 正则匹配 `r"退回 🔄 (R\d+) Step (\d+)"` 提取轮次和步骤号
+2. 检查管线状态：已完成/已归档/已取消/已卡死 → 忽略
+3. 累计退回计数：第 4 次退回 → 标记 `stuck`（卡死），通知 PM 人工介入
+4. 确定回退起点：Step 1~2 → 回到 Step 1（需求环节），Step 3+ → 回到 Step 2（编码环节）
+5. 重置 affected Step 的 `status`→`pending`、`output`→`null`、`result_msg`→`""`
+6. 持久化 + 通知 PM：`🔄 R{N} Step {N} 被退回（累计 N/3）`
+
+**后续流程：**
+- 驳回后**不自动重新派活**，由 PM 在群聊中人工决策
+- PM 可选择：重新派活当前 bot 重做，或使用 `##advance##R{N}##step=N` 跳过
+
+### 7.8 归档协议（R124）
+
+管线完成时（最后一步推进成功）自动触发归档。PM 也可以手动使用 `##archive##R{N}` 命令归档。
+
+**自动归档触发：** `_try_advance_pipeline` 在最后一步（Step 6）推进成功后调用 `_archive_pipeline(round_name)`。
+
+**手动归档触发：** PM 向 `_inbox:server` 发送 `##archive##R{N}`。
+
+**归档行为：**
+1. 从活跃 PipelineManager 中移除该管线上下文
+2. 构造归档记录（含 steps、artifacts、references、summary 等完整快照）
+3. 追加到 `pipeline_archive.json`（保留最近 30 条）
+4. 成功写入后通知 PM：`📦 R{N} 管线已完成并归档`
+5. 写入失败仅记录 warning，不抛异常
+
+**后续查询：** `##status##R{N}` 可查询已归档管线的状态快照（从 `pipeline_archive.json` 读取）。
+
+### 7.9 安全守卫
 
 - **PM 禁止使用 `_inbox:server`** — PM 误发 `_inbox:server` 会被 server 拒绝并报错：`_inbox:server 仅接受 bot 消息`
 - **## 命令在 PM 守卫前拦截** — `##start`/`##status`/`##stop` 命令可由任何认证 agent 发送，不限制 PM 身份
@@ -404,12 +455,14 @@ R111 引入的 `##` 命令体系，用于管线生命周期管理。
 
 ### B.1 命令列表
 
-| 命令 | 格式 | 功能 | 发送者 |
-|:-----|:-----|:------|:-------|
-| `##start` | `##start##R{N}##round_title=xxx##requirements_url=xxx` | 创建管线 + 派活 Step 1 | 任何认证 bot |
-| `##status` | `##status##R{N}` | 查询管线当前状态 | 任何认证 bot |
-| `##stop` | `##stop##R{N}` | 停止/取消管线 | 任何认证 bot |
-| `##help` | `##help` | 列出支持的命令 | 任何认证 bot |
+| 命令 | 格式 | 功能 | 发送者 | 轮次 |
+|:-----|:-----|:------|:-------|:----:|
+| `##start` | `##start##R{N}##round_title=xxx##requirements_url=xxx` | 创建管线 + 派活 Step 1 | 任何认证 bot | R111 |
+| `##status` | `##status##R{N}` | 查询管线当前状态 | 任何认证 bot | R111 |
+| `##stop` | `##stop##R{N}` | 停止/取消管线 | 任何认证 bot | R111 |
+| `##advance` | `##advance##R{N}##step=N` | 手动推进到指定 Step（PM 使用） | 仅 PM | R124 |
+| `##archive` | `##archive##R{N}` | 手动归档管线（PM 使用） | 仅 PM | R124 |
+| `##help` | `##help` | 列出支持的命令 | 任何认证 bot | R111 |
 
 ### B.2 `##start` 消息格式
 
