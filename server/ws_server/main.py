@@ -14,6 +14,7 @@ import logging
 import re
 import time
 import uuid
+from typing import Optional
 
 from . import agent_card as ac_mod  # R67: unified Agent Card interface
 from server.common import auth, config, persistence
