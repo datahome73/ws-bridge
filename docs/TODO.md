@@ -1,6 +1,6 @@
 # ws-bridge 开发总览 — TODO 清单
 
-> **版本：** v2.72
+> **版本：** v2.73
 > **目标：** 持续迭代推进 ws-bridge 功能完善，向可开源状态演进
 
 ---
@@ -226,9 +226,9 @@ PM                                Server                              Bot
 - ✅ **实现 AutoRouter** — 独立服务 `server/auto_router.py`，监听 PM 收件箱，检测 `✅ 完成` 后自动派发下一 Step（R88 ✅）
 - ✅ AutoRouter 增强 — payload 补全 + Step 超时检测告警 PM（R89 ✅）
 - 🔲 引入结构化 Task Card（替代自然语言描述）作为 bot 间交接的标准化文档载体
-- 🔲 异常处理机制完善：跳步、驳回回退、超时自动换人
+- ✅ 驳回回退（R124）+ 热修复（R125）
 - 🔲 管线监控可视化（`!pipeline_status` 增强，展示整条链路的进度）
-- 🔲 **更新 inbox-message-protocol.md** — §8 全流程协议改为 `_inbox:server` 中继模型
+- ✅ **更新 inbox-message-protocol.md** — R124 热修复已闭环
 
 **完成标准**：一次派活后全线自动执行完毕，无需人工介入转发消息
 ### Phase 3 — Coder Agent 编码专精（Phase 1+2 完成后启动）
@@ -266,7 +266,7 @@ Phase 3 (Coder Agent)
 ## 五、变更记录
 
 || 版本 | 日期 | 变更 |
-|| v2.72 | 2026-07-11 | R102: to_agent 派活路由 + 前缀匹配 + 入库留痕 🚀 |
+||| v2.73 | 2026-07-19 | 🎯 **R125 完成 ✅** — 热修复轮：死代码清理（-99 行）、##help 补齐 ##archive、归档通知加固、inbox-message-protocol.md v3.1 同步 🧹 |
 || v2.70 | 2026-07-11 | R101: WSS/Web 解耦 — 独立 web_service.py + Supervisor 双进程部署 🚀 |
 ||:---:|:----:|:----|
 ||| v2.72 | 2026-07-13 | 🎯 **R109 完成 ✅** — 架构大重构：server/ 拆分为 ws_server/ + web_ui/ + common/ 🏗️。Dockerfile 适配新目录结构，supervisord 双进程管理。修复 import 路径迁移问题（agent_card / load_web_sessions）。8 生产 bot 全部 🟢 在线。合并部署 main fff70e3，ws-bridge:r109 镜像

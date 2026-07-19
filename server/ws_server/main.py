@@ -2947,99 +2947,6 @@ def _build_step_summary(ctx: PipelineContext, step_num: int) -> str:
 # ════════════════════════════════════════════════════════════════
 
 
-# ═══ R124: 驳回回退处理 ──────────────────────────
-async def _handle_reject(content: str, sender_agent_id: str) -> None:
-    """处理退回 🔄 R{N} Step {N} — 原因 消息。"""
-    m = re.match(r"退回 🔄 (R\d+) Step (\d+)", content)
-    if not m:
-        logger.info("[R124] 退回消息格式不匹配: %s...", content[:60])
-        return
-    round_name = m.group(1)
-    rejected_step = int(m.group(2))
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        logger.info("[R124] 退回: 管线 %s 不存在，忽略", round_name)
-        return
-    if ctx.status in ("completed", "cancelled", "stopped"):
-        logger.info("[R124] 退回: %s 状态=%s，忽略", round_name, ctx.status)
-        return
-    reject_reason = ""
-    for sep in ("—", "--", "-"):
-        if sep in content:
-            reject_reason = content.split(sep, 1)[1].strip()[:200]
-            break
-    if not reject_reason:
-        reject_reason = content[:100]
-    reject_count = getattr(ctx, "reject_count", 0) + 1
-    ctx.reject_count = reject_count
-    if reject_count >= 4:
-        ctx.status = "stuck"
-        mgr.save()
-        await _notify_pm(ctx, rejected_step, "stuck",
-                         f"管线已卡死（累计退回 {reject_count} 次）。原因: {reject_reason}")
-        return
-    rollback_start = 1 if rejected_step <= 2 else 2
-    for i in range(rollback_start, len(ctx.steps)):
-        ctx.steps[i]["status"] = "pending"
-        ctx.steps[i]["output"] = None
-        ctx.steps[i]["result_msg"] = ""
-        ctx.steps[i].pop("reject_reason", None)
-    ctx.steps[rollback_start]["reject_reason"] = reject_reason
-    ctx.current_step = rollback_start + 1
-    mgr.save()
-    await _notify_pm(ctx, rejected_step, "rejected",
-                     f"Step {rejected_step} 被退回（累计 {reject_count}/3）\n"
-                     f"原因: {reject_reason}\n"
-                     f"管线已退回到 Step {rollback_start + 1}，未自动派活。")
-    logger.info("[R124] 退回处理: %s Step %d → Step %d",
-                round_name, rejected_step, rollback_start + 1)
-
-
-# ═══ R124: 管线归档 ──────────────────────────────
-async def _archive_pipeline(round_name: str) -> None:
-    """归档已完成管线：从活跃上下文移除，追加到 pipeline_archive.json。"""
-    from pathlib import Path
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        return
-    now = time.time()
-    archive_record = {
-        "round_name": ctx.round_name,
-        "status": "completed",
-        "archived_at": now,
-        "completed_at": getattr(ctx, "updated_at", now),
-        "reject_count": getattr(ctx, "reject_count", 0),
-        "steps": ctx.steps,
-        "artifacts": getattr(ctx, "artifacts", {}),
-        "references": getattr(ctx, "references", {}),
-        "summary": {
-            "total_steps": len(ctx.steps),
-            "completed_steps": sum(1 for s in (ctx.steps or []) if s.get("status") == "done"),
-            "reject_count": getattr(ctx, "reject_count", 0),
-            "total_duration_sec": int(now - getattr(ctx, "created_at", now)) if getattr(ctx, "created_at", None) else 0,
-        },
-    }
-    mgr._contexts.pop(round_name, None)
-    mgr.save()
-    archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
-    records: list[dict] = []
-    if archive_path.exists():
-        try:
-            records = json.loads(archive_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            records = []
-    records.append(archive_record)
-    if len(records) > 50:
-        records = records[-30:]
-    try:
-        archive_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("[R124] 归档完成: %s → %s (%d 条)", round_name, archive_path, len(records))
-        await _notify_pm(ctx, len(ctx.steps), "archived", "")
-    except (OSError, PermissionError) as e:
-        logger.warning("[R124] 归档写入失败: %s", e)
-
 
 def _find_archive(round_name: str) -> dict | None:
     """从 pipeline_archive.json 查找已归档轮次。"""
@@ -3691,6 +3598,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
                 "`##status##R{N}` — 查询管线状态\n"
                 "`##stop##R{N}` — 停止管线\n"
                 "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+                "`##archive##R{N}` — 归档管线（PM使用）\n"
                 "`##help` — 显示本帮助"
             ),
             "ts": time.time(),
@@ -3729,6 +3637,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
                 "`##status##R{N}` — 查询管线状态\n"
                 "`##stop##R{N}` — 停止管线\n"
                 "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+                "`##archive##R{N}` — 归档管线（PM使用）\n"
                 "`##help` — 显示本帮助"
             ),
             "ts": time.time(),
@@ -3740,7 +3649,7 @@ async def _handle_hash_cmd(content: str, agent_id: str, ws) -> bool:
         "channel": f"_inbox:{agent_id}",
         "from_name": "系统",
         "from_agent": state.SYSTEM_AGENT_ID,
-        "content": f"❌ 未知 ## 命令: {cmd}，可用: start / status / stop / advance / help",
+        "content": f"❌ 未知 ## 命令: {cmd}，可用: start / status / stop / advance / archive / help",
         "ts": time.time(),
     })
     return True
@@ -3838,6 +3747,7 @@ async def _handle_hash_archive(round_name: str, agent_id: str, ws) -> bool:
 # ═══ R124: 管线自动归档 ═══
 async def _archive_pipeline(round_name: str) -> None:
     """归档已完成管线：从活跃上下文移除，追加到 pipeline_archive.json。"""
+    from pathlib import Path
     mgr = _ensure_pipeline_manager()
     ctx = mgr.get(round_name)
     if not ctx:
@@ -3884,6 +3794,8 @@ async def _archive_pipeline(round_name: str) -> None:
         )
         logger.info("[R124] 归档完成: %s → %s (%d 条归档)",
                     round_name, archive_path, len(records))
+        await _notify_pm(ctx, len(ctx.steps), "archived",
+                         f"📦 {round_name} 管线已完成并归档")
     except (OSError, PermissionError) as e:
         logger.warning("[R124] 归档写入失败: %s", e)
 
