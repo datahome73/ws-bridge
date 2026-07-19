@@ -190,19 +190,20 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             k, v = p.split("=", 1)
             kv[k.strip()] = v.strip()
 
-    # Import callbacks registered by main.py
-    from . import main as _main
+    # Import callbacks — set by main.py after engine init
+    from .pipeline_engine import PipelineEngine
+    _engine: PipelineEngine = None  # type: ignore
 
     if cmd == "start":
-        return await _main._handle_hash_start(round_name, kv, agent_id, ws)
+        return await _engine.handle_hash_start(round_name, kv, agent_id, ws) if _engine else False
     elif cmd == "status":
-        return await _main._handle_hash_status(round_name, agent_id, ws)
+        return await _engine.handle_hash_status(round_name, agent_id, ws) if _engine else False
     elif cmd == "stop":
-        return await _main._handle_hash_stop(round_name, agent_id, ws)
+        return await _engine.handle_hash_stop(round_name, agent_id, ws) if _engine else False
     elif cmd == "advance":
-        return await _main._handle_hash_advance(round_name, kv, agent_id, ws)
+        return await _engine.handle_hash_advance(round_name, kv, agent_id, ws) if _engine else False
     elif cmd == "archive":
-        return await _main._handle_hash_archive(round_name, agent_id, ws)
+        return await _engine.handle_hash_archive(round_name, agent_id, ws) if _engine else False
     elif cmd == "help":
         await _send_reply(ws, agent_id,
             "📋 **## 命令帮助**\n\n"

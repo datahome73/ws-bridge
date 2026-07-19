@@ -806,10 +806,10 @@ def main():
 
         async def _start_pas(app):
             """启动时注入 context_mgr + dispatch_fn，然后启动 PAS。"""
-            from .main import _ensure_pipeline_manager, _auto_dispatch
+            from .main import _ensure_pipeline_manager, engine
             _pas._ctx_mgr = _ensure_pipeline_manager()
 
-            # 包装 _auto_dispatch 适配 PAS dispatch 签名
+            # 包装 engine.auto_dispatch 适配 PAS dispatch 签名
             async def _pas_dispatch(round_name: str, agent_id: str, content: str):
                 ctx = _pas._ctx_mgr.get(round_name)
                 if ctx and content:
@@ -823,7 +823,7 @@ def main():
                     })
                 # 推进到 RUNNING + step1
                 if ctx:
-                    await _auto_dispatch(ctx, 1)
+                    await engine.auto_dispatch(ctx, 1)
 
             _pas._dispatch = _pas_dispatch
             asyncio.create_task(_pas.start())
@@ -834,18 +834,18 @@ def main():
     else:
         logger.info("[PAS] disabled (PAS_ENABLED=0)")
 
-    # ── R118: 启动离线重试循环 ──
+    # ── R118: 启动离线重试循环（通过 PipelineEngine）──
     async def _start_retry_loop(app):
-        from .main import _retry_loop
-        asyncio.create_task(_retry_loop())
+        from .main import engine
+        asyncio.create_task(engine._retry_loop())
         logger.info("[R118] retry loop started")
 
     app.on_startup.append(_start_retry_loop)
 
-    # ── R119: 启动时恢复活跃管线的自动派活 ──
+    # ── R119: 启动时恢复活跃管线的自动派活（通过 PipelineEngine）──
     async def _restore_dispatches(app):
-        from .main import _restore_pipeline_dispatches
-        await _restore_pipeline_dispatches()
+        from .main import engine
+        await engine.restore_pipeline_dispatches()
         logger.info("[R119] pipeline dispatch restoration completed")
 
     app.on_startup.append(_restore_dispatches)

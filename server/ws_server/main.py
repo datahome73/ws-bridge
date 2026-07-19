@@ -29,6 +29,7 @@ from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTa
 from .command_utils import _refresh_role_agent_map, _broadcast_to_channel
 _card_watcher = None  # R100: module-level for _ensure_card_watcher()
 import shared.protocol as p
+from .pipeline_engine import PipelineEngine
 
 logger = logging.getLogger("ws-bridge")
 
@@ -36,6 +37,34 @@ _connections: dict[str, set] = {}
 # P6: message send stats
 state._send_stats: dict = {"total": 0, "total_latency": 0.0}
 _audit_logger = AuditLogger(config.DATA_DIR)
+
+# ── PipelineEngine 实例（惰性初始化） ──
+engine: Optional[PipelineEngine] = None
+
+def _ensure_engine() -> PipelineEngine:
+    global engine
+    if engine is None:
+        from .commands.pipeline import (
+            _get_step_config, _find_agents_by_role,
+            _set_pipeline_state, _step_sort_key,
+        )
+        from .commands.task import _cmd_task_update
+        engine = PipelineEngine(
+            context_mgr=_ensure_pipeline_manager(),
+            send_to_agent=_send_to_agent,
+            send_ws=_send,
+            resolve_card_key=_resolve_card_key_to_ws_id,
+            get_step_config=_get_step_config,
+            persist_broadcast=_persist_broadcast,
+            find_agents_by_role=_find_agents_by_role,
+            cmd_task_update=_cmd_task_update,
+            set_pipeline_state=_set_pipeline_state,
+            extract_artifact_kv=_extract_artifact_kv,
+        )
+        # ── 注入 engine 引用到 scenario_matcher ──
+        from . import scenario_matcher as _sm
+        _sm._engine = engine
+    return engine
 def _ensure_pipeline_manager() -> PipelineContextManager:
     """惰性初始化 PipelineContextManager."""
     if state._pipeline_manager is None:
@@ -1473,11 +1502,11 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     # ── R43 A: Lazy-start watchdog on first message ──
     _ensure_watchdog()
     # R49 C: Restore pipeline timers on start
-    await _restore_pipeline_timers()
-    # ── R65 A2: Start git sync loop ──
-    _ensure_git_scan()
-    # ── R122: Start timeout scanner ──
-    _ensure_timeout_scanner()
+    await _ensure_engine().restore_pipeline_timers()
+    # ── R65 A2: Start git sync loop (via PipelineEngine) ──
+    _ensure_engine()._ensure_git_scan()
+    # ── R122: Start timeout scanner (via PipelineEngine) ──
+    _ensure_engine()._ensure_timeout_scanner()
     # ── R67 B1: Ensure agent cards loaded + watcher running ──
     _ensure_agent_cards_loaded()
     _ensure_card_watcher()
@@ -2090,7 +2119,7 @@ async def _handle_server_query(ws, sender_id: str, content: str) -> None:
             mgr = _ensure_pipeline_manager()
             ctx = mgr.get(round_name)
             if ctx:
-                reply_text = _format_pipeline_context(ctx)
+                reply_text = _ensure_engine().format_context(ctx)
             else:
                 reply_text = f"❌ 管线 {round_name} 不存在"
         else:
@@ -4728,7 +4757,7 @@ async def _sm_handle_complete(ws, agent_id: str, msg: dict, matched) -> bool:
         "ts": time.time(),
     })
     logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
-    _try_advance_pipeline(content, agent_id)
+    _ensure_engine().try_advance(content, agent_id)
     return True
 
 
@@ -4755,7 +4784,7 @@ async def _sm_handle_reject(ws, agent_id: str, msg: dict, matched) -> bool:
         "ts": time.time(),
     })
     logger.info("[Relay] 退回: %s → PM + 自动确认", sender_name)
-    asyncio.ensure_future(_handle_reject(content, agent_id))
+    asyncio.ensure_future(_ensure_engine().handle_reject(content, agent_id))
     return True
 
 
