@@ -153,8 +153,6 @@ def search_messages(
         return [dict(r) for r in cur.fetchall()]
     except Exception:
         return []
-    finally:
-        conn.close()
 
 
 def clear_messages_by_channel(channel: str, data_dir: Path):
@@ -182,8 +180,6 @@ def is_duplicate(channel: str, content: str, window_sec: float, data_dir: Path) 
         return cur.fetchone() is not None
     except Exception:
         return False
-    finally:
-        conn.close()
 
 
 # ── R76: LIKE pattern query ──────────────────────────────────────────
