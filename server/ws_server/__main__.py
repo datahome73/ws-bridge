@@ -12,7 +12,8 @@ import uuid
 from aiohttp import web
 
 from server.common.config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SENDER_ID  # R102: PM guard
-from .main import handle_auth, handle_broadcast, handle_register, _connections, _handle_server_relay  # R87
+from .main import handle_auth, handle_broadcast, handle_register, _connections  # R87
+from . import scenario_matcher as _sm  # R126
 from .message_store import init_db, search_messages as _search_messages
 from .pipeline_auto_starter import PipelineAutoStarter  # R110
 from server.common.persistence import get_approved_users as _get_approved_users
@@ -91,20 +92,12 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         "error": "认证已失效：你的 api_key 已被吊销。请重新 register。",
                     })
                     continue  # skip this message, keep connection alive
-                # ═══ R87: _inbox:server 中继拦截 ═══
-                if await _handle_server_relay(ws, agent_id, data):
+                # ═══ R87+R126: _inbox:server 中继拦截（规则表调度）═══
+                if await _sm.dispatch(ws, agent_id, data):
                     continue
-                # ═══ R102: 非 _inbox:server 通道的消息，内容匹配前缀则强制走中继 ═══
-                _r102_channel = data.get("channel", "")
-                _r102_content = (data.get("content") or "").strip()
-                if _r102_channel != f"{p.INBOX_CHANNEL_PREFIX}server":
-                    _r102_prefixes = ("收到 ✅", "已完成 ✅", "退回 🔄", "失败 ❌", "ACK ✅", "✅ 完成", "✅ ")
-                    if _r102_content.startswith(_r102_prefixes):
-                        # PM 自己的消息不走中继（PM 应直接发 bot 收件箱）
-                        if not (DISPATCH_SENDER_ID and agent_id == DISPATCH_SENDER_ID):
-                            data["channel"] = f"{p.INBOX_CHANNEL_PREFIX}server"
-                            if await _handle_server_relay(ws, agent_id, data):
-                                continue
+                # ═══ R102+R126: 非 _inbox:server 通道 → dispatch 内部自动修正 channel ═══
+                if await _sm.dispatch(ws, agent_id, data):
+                    continue
                 # ════════════════════════════════════════════════════════════════════
                 # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
                 _channel = data.get("channel", "")
