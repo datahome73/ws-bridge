@@ -64,8 +64,6 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 .tab:hover{color:#ccc;background:rgba(255,255,255,0.05);}
 .tab.active{color:#fff;border-bottom-color:#4fc3f7;background:rgba(79,195,247,0.1);}
 .tab.pending{color:#666;font-size:0.85rem;}
-.tab.admin-tab{color:#f0a040;}
-.tab.admin-tab.active{border-bottom-color:#f0a040;background:rgba(240,160,64,0.15);}
 .badge{background:#e53935;color:#fff;font-size:11px;border-radius:10px;padding:1px 6px;min-width:16px;text-align:center;}
 .msg-list{padding:12px 16px;max-width:800px;margin:0 auto;}
 .msg{padding:10px 12px;margin-bottom:6px;border-radius:8px;background:#161b22;border:1px solid #30363d;}
@@ -133,19 +131,12 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
   </div>
   <div class="right-group" style="display:flex;align-items:center;gap:8px;">
     <button id="wsListBtn" class="ws-list-btn" title="工作室列表">📋 <span class="ws-btn-label">历史工作室</span></button>
-    <button id="toggleSearchBtn" class="ws-list-btn" title="搜索" style="margin-right:0;">🔍</button>
     <div id="status-bar" style="font-size:0.75rem;color:#8b949e;"></div>
     <div class="viewer" id="viewerName">__VIEWER__</div>
     <button id="logoutBtn" style="font-size:0.7rem;cursor:pointer;background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:2px 6px;margin-left:4px;">登出</button>
   </div>
 </div>
 
-
-<div class="search-bar" id="searchBar" style="display:none;">
-  <input type="text" id="searchInput" placeholder="搜索当前频道消息…" style="flex:1;max-width:400px;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#c9d1d9;font-size:0.85rem;outline:none;">
-  <button id="searchBtn" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#c9d1d9;cursor:pointer;font-size:0.8rem;">🔍</button>
-  <button id="searchClearBtn" style="display:none;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#8b949e;cursor:pointer;font-size:0.8rem;">✕ 退出搜索</button>
-</div>
 
 <div class="tab-bar" id="tabBar"></div>
 
@@ -156,17 +147,15 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 <script>
 const TOKEN='__TOKEN__';
 
-// ── R83: Tab state model — 3-tab (inbox | admin | history) ──
+// ── R83/R130: Tab state model — 3-tab (inbox | history | pipeline) ──
 const TAB_STATE = {
   tab1: { id: 'tab1', channel: '__inbox__',    label: '📬 收件箱',   permanent: true, visible: true },
-  tab2: { id: 'tab2', channel: '_admin',       label: '🔧 管理员',   permanent: true, visible: true },
   tab3: { id: 'tab3', channel: null,           label: '🗂️ 历史',    permanent: true, visible: true },
   tab4: { id: 'tab4', channel: null,           label: '📊 管线',    permanent: true, visible: true },
 };
 let activeTabId = 'tab1';
 let unreadCounts = { '__inbox__': 0 };
 const msgContainers = {};
-let searchMode = false;
 // R38 / 🔧 F-8: Deduplicate messages from WS push + poll double-delivery
 const _seenMsgHashes = {};
 // R76: archive state
@@ -252,9 +241,6 @@ function renderTabBar() {
       const inboxUnread = unreadCounts['__inbox__'] || 0;
       html += '<div class="tab' + (isActive ? ' active' : '') + '" data-tab="tab1" onclick="selectTab(\'tab1\')">📬 收件箱' +
         (inboxUnread > 0 ? '<span class="badge">' + inboxUnread + '</span>' : '') + '</div>';
-    } else if (id === 'tab2') {
-      html += '<div class="tab admin-tab' + (isActive ? ' active' : '') + '" data-tab="tab2" onclick="selectTab(\'tab2\')">' +
-        tab.label + '</div>';
     } else {
       const tabClass = 'tab' + (isActive ? ' active' : '') + (!tab.channel ? ' pending' : '');
       html += '<div class="' + tabClass + '" data-tab="' + id + '" onclick="selectTab(\'' + id + '\')">' +
@@ -268,7 +254,6 @@ function renderTabBar() {
 
 function selectTab(tabId) {
   if (tabId === activeTabId) return;
-  if (searchMode) exitSearchMode();
 
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
   const tabEl = document.querySelector('.tab[data-tab="' + tabId + '"]');
@@ -276,22 +261,12 @@ function selectTab(tabId) {
 
   activeTabId = tabId;
 
-  // R83: inbox tab (tab1) — no input box, clear unread, load inbox messages
+  // R83/R130: inbox tab (tab1) — no input box, clear unread, load inbox messages
   if (tabId === 'tab1') {
     unreadCounts['__inbox__'] = 0;
     renderTabBar();
     document.getElementById('inputArea').style.display = 'none';
     loadInboxMessages(archiveMode ? lastArchiveTs : null);
-    return;
-  }
-
-  // R83: admin tab (tab2) — no input box
-  if (tabId === 'tab2') {
-    document.getElementById('inputArea').style.display = 'none';
-    const tab = TAB_STATE[tabId];
-    if (tab && tab.channel) {
-      loadMessages(tab.channel, archiveMode ? lastArchiveTs : null);
-    }
     return;
   }
 
@@ -565,10 +540,13 @@ async function renderWsPanel() {
 async function renderPipelineDashboard() {
   const list = document.getElementById('msgList');
   list.innerHTML = '<div class="pipeline-empty">📊 加载中...</div>';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const resp = await fetch('/api/pipelines?token=' + encodeURIComponent(TOKEN));
-    if (!resp.ok) { list.innerHTML = '<div class="pipeline-empty">❌ 加载失败</div>'; return; }
+    const resp = await fetch('/api/pipelines?token=' + encodeURIComponent(TOKEN), {signal: controller.signal});
+    if (!resp.ok) { clearTimeout(timeout); list.innerHTML = '<div class="pipeline-empty">❌ 加载失败</div>'; return; }
     const data = await resp.json();
+    clearTimeout(timeout);
     const pipelines = data.pipelines || [];
     list.innerHTML = '';
     if (pipelines.length === 0) {
@@ -587,7 +565,12 @@ async function renderPipelineDashboard() {
       list.appendChild(createPipelineCard(pipelines[i]));
     }
   } catch(e) {
-    list.innerHTML = '<div class="pipeline-empty">❌ 加载失败: ' + escapeHtml(e.message || '') + '</div>';
+    clearTimeout(timeout);
+    if (e.name === 'AbortError') {
+      list.innerHTML = '<div class="pipeline-empty">⏱ 加载超时，请重试</div>';
+    } else {
+      list.innerHTML = '<div class="pipeline-empty">❌ 加载失败: ' + escapeHtml(e.message || '') + '</div>';
+    }
   }
 }
 
@@ -778,7 +761,8 @@ async function init() {
   }
   setInterval(pollPipelines, 15000);
 
-  // 5. R8: Poll bot status
+  // 5. R8/R130: Poll bot status — frontend whitelist
+  const STATUS_WHITELIST = ['小爱', '小谷', '小开', '爱泰', '小周', '泰虾'];
   let offlineSince = {};
   async function pollStatus() {
     try {
@@ -788,6 +772,8 @@ async function init() {
       const now = Date.now();
       if (data.agents) {
         data.agents.forEach(function(a) {
+          // R130: frontend whitelist filter
+          if (STATUS_WHITELIST.indexOf(a.name) === -1) return;
           if (!a.online) {
             if (!offlineSince[a.id]) offlineSince[a.id] = now;
           } else {
@@ -842,60 +828,6 @@ async function init() {
       wsPanel.classList.remove('open');
     }
   });
-
-  // 7. R8: Search toggle
-  document.getElementById('toggleSearchBtn').addEventListener('click', function() {
-    const bar = document.getElementById('searchBar');
-    if (searchMode) {
-      exitSearchMode();
-    } else {
-      bar.style.display = 'flex';
-      searchMode = true;
-      document.getElementById('searchInput').focus();
-    }
-  });
-
-  function exitSearchMode() {
-    searchMode = false;
-    document.getElementById('searchBar').style.display = 'none';
-    document.getElementById('searchInput').value = '';
-    document.getElementById('searchClearBtn').style.display = 'none';
-    document.getElementById('searchBtn').style.display = 'inline';
-    const activeTab = TAB_STATE[activeTabId];
-    if (activeTab && activeTab.channel) {
-      loadMessages(activeTab.channel);
-    }
-  }
-
-  async function doSearch() {
-    const q = document.getElementById('searchInput').value.trim();
-    if (!q) return;
-    const activeTab = TAB_STATE[activeTabId];
-    const channel = activeTab ? activeTab.channel : '';
-    const resp = await fetch('/api/chat/search?q=' + encodeURIComponent(q) + '&channel=' + encodeURIComponent(channel) + '&token=' + encodeURIComponent(TOKEN));
-    const data = await resp.json();
-    const results = data.results || [];
-    const list = document.getElementById('msgList');
-    if (results.length === 0) {
-      list.innerHTML = '<div class="empty">未找到匹配的消息</div>';
-    } else {
-      // ★ 统一排序：最新在上
-      sortNewestFirst(results);
-      list.innerHTML = '';
-      results.forEach(function(m) {
-        const el = createMessageEl(m);
-        list.appendChild(el);
-      });
-    }
-    document.getElementById('searchClearBtn').style.display = 'inline';
-    document.getElementById('searchBtn').style.display = 'none';
-  }
-
-  document.getElementById('searchInput').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') doSearch();
-  });
-  document.getElementById('searchBtn').addEventListener('click', doSearch);
-  document.getElementById('searchClearBtn').addEventListener('click', exitSearchMode);
 
   // 8. R8: Logout button
   document.getElementById('logoutBtn').addEventListener('click', async function() {
