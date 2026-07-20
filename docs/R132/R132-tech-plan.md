@@ -52,20 +52,11 @@
 
 **插入点：** `##step` 规则优先级 **28**，插在 rule 25 (##query) 和 rule 30 (##hash_cmd) 之间。
 
-### 2.3 `_QUERY_LEVEL_MAP`（`scenario_matcher.py` L177-L184）
+### 2.3 `_QUERY_LEVEL_MAP` 实为死代码（`scenario_matcher.py` L177-L184）
 
-```python
-_QUERY_LEVEL_MAP = {
-    "whoami": 1,
-    "help": 1,
-    "status": 3,
-    "agents": 3,
-    "agent_info": 3,
-    "audit": 4,
-}
-```
+`_QUERY_LEVEL_MAP` 被第一版 `handle_query`（L197）使用，但该版本已被第二版 `handle_query`（L465）完全覆盖。活跃版使用 `_get_agent_level()`（L542）直接硬编码权限检查。
 
-**插入点：** L184 追加 `"step": 4,`。
+**`##step` 权限应复用 `_get_agent_level()` 模式，不依赖 `_QUERY_LEVEL_MAP`。**
 
 ### 2.4 `handle_hash_cmd` 当前 `##` 命令分发（`scenario_matcher.py` L391-L445）
 
@@ -108,20 +99,21 @@ def _ensure_pipeline_manager() -> PipelineContextManager:
 
 ## §3 改造方案
 
-### 3.1 `_QUERY_LEVEL_MAP` 追加（`scenario_matcher.py` L184）
+### 3.1 权限检查 — `_get_agent_level()`（`scenario_matcher.py` L542）
+
+活跃 `handle_query`（L465）使用 `_get_agent_level()` 做硬编码权限检查。`##step` 复用此模式：
 
 ```python
-_QUERY_LEVEL_MAP = {
-    "whoami": 1,
-    "help": 1,
-    "status": 3,
-    "agents": 3,
-    "agent_info": 3,
-    "audit": 4,
-    # R132
-    "step": 4,               # ← 新增
-}
+# 在 handle_step 中：
+level = _get_agent_level(agent_id)
+if level < 4:
+    await _send_reply(ws, agent_id,
+        f"❌ 权限不足: 需要 L4 级别，你当前 L{level}"
+    )
+    return True
 ```
+
+不修改 `_QUERY_LEVEL_MAP`（该表已被第一版 `handle_query` 废弃，为死代码）。
 
 ### 3.2 新增 `match_step()`（`scenario_matcher.py`，rule 28，L184–L192 区域）
 
@@ -138,9 +130,9 @@ def match_step(content: str, msg: dict, agent_id: str) -> Any:
 
 **位置选择：** 插入 `_QUERY_LEVEL_MAP` 之后、`get_agent_level()` 之前（L185附近），保持 match 函数集中在前部。
 
-### 3.3 新增 `handle_step()`（`scenario_matcher.py`，~L197 区域）
+### 3.3 新增 `handle_step()`（`scenario_matcher.py`，~L195 区域）
 
-在 `handle_query` 函数之前插入：
+在活跃版 `handle_query`（L465）之后插入：
 
 ```python
 # ── R132: ##step handler ─────────────────────────────────────────────
@@ -149,6 +141,7 @@ _STEP_ACTIONS = ("complete", "reject", "restart", "force", "pause", "resume")
 async def handle_step(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     """Handle ##step commands: ##step##<action>##<args>
     Priority 28 — between query (25) and hash_cmd (30).
+    Permission: L4 required (uses _get_agent_level, matching R131 active pattern).
     """
     content = matched
     parts = content.split("##")
@@ -167,22 +160,23 @@ async def handle_step(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     action = parts[2].lower()
     args = parts[3] if len(parts) > 3 else ""
 
-    # ── Permission check ──
+    # ── Permission check (matches R131 active pattern: _get_agent_level) ──
     level = _get_agent_level(agent_id)
-    min_level = _QUERY_LEVEL_MAP.get("step", 4)
-    if level < min_level:
+    if level < 4:
         await _send_reply(ws, agent_id,
-            f"❌ 权限不足: 需要 L{min_level} 级别，你当前 L{level}"
+            f"❌ 权限不足: 需要 L4 级别，你当前 L{level}"
         )
         return True
 
-    # ── Route actions ──
-    from . import main as _main
+    # ── Route actions: import _cmd_step_* from commands.pipeline ──
+    from .commands.pipeline import (
+        _cmd_step_complete, _cmd_step_reject,
+        _cmd_step_force, _cmd_step_handoff,
+    )
 
     if action == "complete":
-        # Map to _cmd_step_complete logic
         params = {"step_name": args}
-        result = await _main._cmd_step_complete(agent_id, params)
+        result = await _cmd_step_complete(agent_id, params)
         await _send_reply(ws, agent_id, result)
 
     elif action == "reject":
@@ -191,26 +185,29 @@ async def handle_step(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         step_id = step_parts[0]
         reason = step_parts[1] if len(step_parts) > 1 else ""
         params = {"step_name": step_id, "reason": reason}
-        result = await _main._cmd_step_reject(agent_id, params)
+        result = await _cmd_step_reject(agent_id, params)
         await _send_reply(ws, agent_id, result)
 
     elif action == "restart":
-        # Map to step_back logic
-        result = await _main._cmd_step_restart(agent_id, args)
-        await _send_reply(ws, agent_id, result)
+        # 无直接 _cmd_step_restart，暂用占位回复
+        await _send_reply(ws, agent_id,
+            f"⏳ ##step##restart##{args} — 步骤重启（占位，待实现）"
+        )
 
     elif action == "force":
         params = {"step_name": args}
-        result = await _main._cmd_step_force(agent_id, params)
+        result = await _cmd_step_force(agent_id, params)
         await _send_reply(ws, agent_id, result)
 
     elif action == "pause":
-        result = await _main._cmd_step_pause(agent_id, args)
-        await _send_reply(ws, agent_id, result)
+        await _send_reply(ws, agent_id,
+            f"⏳ ##step##pause##{args} — 步骤暂停（占位，待实现）"
+        )
 
     elif action == "resume":
-        result = await _main._cmd_step_resume(agent_id, args)
-        await _send_reply(ws, agent_id, result)
+        await _send_reply(ws, agent_id,
+            f"⏳ ##step##resume##{args} — 步骤恢复（占位，待实现）"
+        )
 
     else:
         await _send_reply(ws, agent_id,
@@ -253,7 +250,9 @@ async def _sm_handle_step(ws, agent_id: str, msg: dict, matched) -> bool:
 
 ### 3.6 旧 `_cmd_step_*` 函数签名确认
 
-`commands/pipeline.py` 中 `_cmd_step_complete`、`_cmd_step_reject`、`_cmd_step_force` 均接受 `(sender_id, params)` 签名。`restart` / `pause` / `resume` 需确认是否存在或需新增：
+`commands/pipeline.py` 中 `_cmd_step_complete`、`_cmd_step_reject`、`_cmd_step_force` 均接受 `(sender_id, params)` 签名。`handle_step` 直接 `from .commands.pipeline import _cmd_step_complete` 调用，不走 `main` 模块兜转。
+
+`restart` / `pause` / `resume` 无对应 `_cmd_step_*` 函数：
 
 | action | 对应函数 | 状态 |
 |:-------|:---------|:-----|
@@ -272,11 +271,10 @@ async def _sm_handle_step(ws, agent_id: str, msg: dict, matched) -> bool:
 
 | 位置 | 文件 | 行号 | 改动 |
 |:-----|:-----|:----:|:-----|
-| `_QUERY_LEVEL_MAP` | `scenario_matcher.py` | **L184** | 追加 `"step": 4` |
 | `match_step` 定义 | `scenario_matcher.py` | **L185–L192** | 新增 match 函数 |
-| `handle_step` 定义 | `scenario_matcher.py` | **L195–L260** | 新增 handler 函数 |
+| `handle_step` 定义 | `scenario_matcher.py` | **~L540–L600** | 在活跃 `_get_agent_level` 后、文件末尾前新增 handler |
 | `_sm_handle_step` 定义 | `main.py` | **L4712–L4717** | 新增 handler 包装 |
-| rule 28 注册 | `main.py` | **L4882–L4890** | 注册规则 |
+| rule 28 注册 | `main.py` | **L4882–L4890** | 注册规则（在 rule 25 之后、rule 30 之前） |
 
 ---
 
@@ -312,18 +310,15 @@ async def _sm_handle_step(ws, agent_id: str, msg: dict, matched) -> bool:
 grep -c "def match_step" scenario_matcher.py          # → 1
 
 # 7.2 handle_step 存在
-grep -c "def handle_step" scenario_matcher.py         # → 1
+grep -c "async def handle_step" scenario_matcher.py    # → 1
 
-# 7.3 _QUERY_LEVEL_MAP 包含 step
-grep '"step"' scenario_matcher.py                      # → "step": 4
-
-# 7.4 rule 28 已注册
-grep "priority=28" main.py                             # → 1
-
-# 7.5 _sm_handle_step 存在
+# 7.3 _sm_handle_step 存在
 grep -c "_sm_handle_step" main.py                     # → 2（定义 + 注册）
 
-# 7.6 旧 !step 命令不受影响（无删除）
+# 7.4 rule 28 已注册（priority=28 在 rule 25 和 30 之间）
+grep "priority=28" main.py                             # → 1
+
+# 7.5 旧 !step 命令不受影响（无删除）
 grep -c "step_complete" commands/__init__.py          # → ≥1（保留）
 ```
 
