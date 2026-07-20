@@ -180,83 +180,114 @@ WebSocket 入站 JSON
 
 ## 四、广播路由分析（`handle_broadcast`）
 
-`handle_broadcast` 当前 3,706 行主函数中的核心部分（约 L1498-L1918）。
-以下拆解每一步的生死状态（⚡待清理 / 🟢存活）：
+`handle_broadcast` 是 `main.py` 的消息路由中枢（L1498-L1918），当前约 420 行。
+R134 移除了 `!` 命令路由段，但大量大厅/工作区相关死代码仍在。
+
+### 4.1 现状（R134 之后）
 
 ```
 handle_broadcast(ws, sender_id, msg)
   │
-  ├─ 🟢 1. 惰性启动 — 首次消息触发
-  │      _ensure_watchdog() / _ensure_engine() / _ensure_agent_cards
+  ├─ 🟢 A. 惰性启动
+  │      _ensure_watchdog() / engine._ensure_git_scan() / _ensure_agent_cards()
   │
-  ├─ 🟢 2. _inbox:server 快速返回
-  │      → scenario_matcher 已处理，直接 return
+  ├─ 🟢 B. _inbox:server 快速返回
+  │      channel == _inbox:server → 已由 scenario_matcher 处理，直接 return
   │
-  ├─ 🟢 3. 未注册 bot 保护
-  │      非 approved agent → 强制 channel = REGISTRATION_CHANNEL
+  ├─ 🟢 C. 未注册 bot 保护
+  │      非 approved → channel 强制改为 REGISTRATION_CHANNEL
   │
-  ├─ 🟢 4. 速率限制
-  │      _check_rate_limit() → 超限则 return
+  ├─ 🟢 D. 速率限制 + 消息过滤
+  │      _check_rate_limit() / _is_nonsense() / _is_duplicate() / 静音前缀
   │
-  ├─ 🟢 5. 消息过滤
-  │      _is_nonsense() / _is_duplicate() / 静音前缀
-  │
-  ├─ 🟢 6. 用户信息解析
+  ├─ 🟢 E. 用户信息解析
   │      users / sender_name / sender_role / admin_ids
   │
-  ├─ 🟢 7. Rollcall ACK 钩子
-  │      _r57_rollcall_events 触发
+  ├─ 🟢 F. Rollcall ACK 钩子 + Bot ACK 检测
+  │      _r57_rollcall_events / _update_step_ack_state()
   │
-  ├─ 🟢 8. Bot ACK 检测
-  │      _update_step_ack_state()
+  ├─ ⚡ G. _admin 频道 intercept  ←── 已废止，待删除
+  │      L1596-L1615 — 仅持久化消息，然后 return
+  │      实际无任何 bot 再发消息到 _admin
   │
-  ├─ ⚡ 9. _admin 频道 intercept  ←── 已废止
-  │      仅持久化消息，然后提示"仅支持 ! 命令"即 return
-  │      R135 应整段移除
+  ├─ 🟢 H. Inbox 通道（_inbox:{agent_id}）
+  │      L1617-L1659 — 单播给收件箱主人 → ACK
   │
-  ├─ 🟢 10. Inbox 通道（_inbox:{agent_id}）
-  │      单播给收件箱主人，ACK 回复
-  │
-  ├─ ⚡ 11. 频道解析  ←── 已废止
-  │      channel != LOBBY → 直接 channel = LOBBY
+  ├─ ⚡ I. 频道解析  ←── 已废止，待删除
+  │      L1661-L1666 — channel != LOBBY ⇒ channel = LOBBY
   │      整段只做了 fallback，无实际频道解析
   │
-  ├─ ⚡ 12. Lobby 暂停 + _can_broadcast  ←── 已废止
-  │      _can_broadcast() 原始设计是工作区权限检查
-  │      Lobby 暂停检查（_LOBBY_PAUSED）也已无场景触发
+  ├─ ⚡ J. Lobby 暂停 + _can_broadcast  ←── 已废止，待删除
+  │      L1668-L1680 — 权限检查和暂停检测
+  │      原始设计依赖工作区状态，现在 `resolved_workspace` 恒为 None
   │
-  ├─ ⚡ 13. 大厅前缀路由（📢/📋/🆘/@）  ←── 已废止
-  │      近 70 行代码，按消息类型选择 targets
-  │      当前所有消息直接走到统一广播路径即可
+  ├─ ⚡ K. 大厅前缀路由  ←── 已废止，待删除
+  │      L1700-L1768 — 📢 公告 / 📋 点名 / 🆘 求助 / @ 提及的路由选择
+  │      近 70 行，当前所有消息直接走统一广播路径即可
   │
-  ├─ 🟢 14. Registration 通道
-  │      仅投递到 admin 连接
+  ├─ 🟢 L. Registration 通道
+  │      L1770-L1775 — 仅投递到 admin 连接
   │
-  ├─ 🟢 15. 统一广播
-  │      构建 payload → 遍历 targets → send_str/send
-  │      持久化到 message_store → 离线队列
+  ├─ 🟢 M. 统一广播
+  │      L1777-L1859 — 构建 payload → 遍历 targets → 发送 → 离线队列
   │
-  └─ 🟢 16. ACK 交付统计
-        发送 delivery_status 给发送者
+  └─ 🟢 N. ACK 交付统计
+        L1861-L1918 — 发送 delivery_status / 延迟统计
 ```
 
-### 清理后预期（R135）
+### 4.2 待清理的死代码汇总
 
-移除 ⚡ 步骤后，`handle_broadcast` 精简为约 **200 行**：
+| 段落 | 行范围 | 行数 | 说明 |
+|---|---|---|---|
+| G `_admin` 频道 | L1596-L1615 | ~20 | 无实际流量，全 return |
+| I 频道解析 | L1661-L1666 | ~6 | 只剩 `channel = LOBBY` |
+| J 暂停+权限 | L1668-L1680 | ~13 | `_can_broadcast`/`_LOBBY_PAUSED` 已无关 |
+| K 大厅前缀路由 | L1700-L1768 | ~70 | 📢/📋/🆘/@ 路由选择，全 return |
+| 尾段 workspace admin roll-call | L1910-L1918 | ~10 | `resolved_workspace` 恒为 None |
+| **合计** | | **~120** | |
+
+此外，`handle_broadcast` 中的可重构段：
+
+| 段落 | 行范围 | 行数 | 问题 |
+|---|---|---|---|
+| D 速率限制+过滤 | L1532-L1556 | ~25 | 可提取到独立 `_preprocess_message()` |
+| F Rollcall+ACK | L1565-L1581 | ~17 | 可提取到 `_handle_bot_signals()` |
+| M 统一广播 | L1777-L1859 | ~83 | `send_str`/`send` 二选一模式重复 4+ 次 |
+| N ACK 统计 | L1861-L1918 | ~58 | 大厅专用 ACK + admin 交付状态 |
+
+### 4.3 清理后预期（R135 后）
+
+移除 ⚡ 段落后，`handle_broadcast` 降为约 **200 行**：
 
 ```
 handle_broadcast(ws, sender_id, msg)
   │
-  ├─ 1. 惰性启动
-  ├─ 2. _inbox:server 快速返回
-  ├─ 3. 未注册 bot 保护
-  ├─ 4. 速率限制
-  ├─ 5. 消息过滤
-  ├─ 6. Rollcall + ACK 检测
-  ├─ 7. Inbox 通道 → 单播
-  ├─ 8. Registration 通道 → 投递 admin
-  └─ 9. 统一广播 + ACK 统计
+  ├─ A. 惰性启动
+  ├─ B. _inbox:server 快速返回
+  ├─ C. 未注册 bot 保护
+  ├─ D. 速率限制 + 消息过滤（可提取 _preprocess_message）
+  ├─ E. Rollcall + Bot ACK 检测（可提取 _handle_bot_signals）
+  ├─ F. Inbox 通道 → 单播给收件箱主人
+  ├─ G. Registration 通道 → 投递 admin
+  └─ H. 广播 + 离线队列 + ACK 统计
 ```
+
+**简化后的消息路由流程：**
+
+```
+入站 message
+  │
+  ├─ _inbox:server → scenario_matcher 规则表处理 → 结束
+  │
+  ├─ _inbox:{agent_id} → 单播 + ACK
+  │
+  ├─ registration → 仅投 admin
+  │
+  └─ 其他 (实际仅 LOBBY) → 统一广播全部在线连接 + 离线队列
+```
+
+没有大厅前缀分类，没有工作区权限，没有 `_admin` 频道。`handle_broadcast`
+退化为纯粹的 **投递路由器**：判断通道类型 → 选择投递策略 → 发送 + ACK。
 
 ---
 
