@@ -77,6 +77,8 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
 .msg .sender.s-xiaozhou{color:#7ee787;}
 .msg .sender.s-taixia{color:#ffa657;}
 .msg .sender.s-unknown{color:#8b949e;}
+.msg .sender.s-system{color:#58a6ff;}
+.msg .sender.s-manager{color:#bc8cff;}
 .msg .content{font-size:0.95rem;line-height:1.5;word-break:break-word;user-select:text;-webkit-user-select:text;}
 .msg .content,.msg-sender{user-select:text;-webkit-user-select:text;}
 .empty{text-align:center;color:#8b949e;padding:40px;font-size:0.9rem;}
@@ -213,7 +215,7 @@ function formatClosedAt(ts) {
   return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
-const colorMap = {'小爱':'xiaoai','小谷':'xiaogu','小开':'xiaokai','爱泰':'aitai','小周':'xiaozhou','泰虾':'taixia'};
+const colorMap = {'小爱':'xiaoai','小谷':'xiaogu','小开':'xiaokai','爱泰':'aitai','小周':'xiaozhou','泰虾':'taixia','系统':'system','经理':'manager'};
 
 function createMessageEl(m) {
   const div = document.createElement('div');
@@ -413,12 +415,13 @@ function createInboxMessageEl(m) {
   const sender = m.from_name || m.from || m.sender || '?';
   const receiver = m.to_name || '?';
   const cls = colorMap[sender] || 'unknown';
+  const recvCls = colorMap[receiver] || 'unknown';
   div.innerHTML =
     '<div class="meta">' +
       '<span class="ts">' + formatTime(m.ts) + '</span>' +
       '<span class="sender s-' + cls + '">' + escapeHtml(sender) + '</span>' +
       '<span style="color:#8b949e;margin:0 4px;">→</span>' +
-      '<span class="sender s-unknown" style="color:#8b949e;font-weight:400;">' + escapeHtml(receiver) + '</span>' +
+      '<span class="sender s-' + recvCls + '">' + escapeHtml(receiver) + '</span>' +
     '</div>' +
     '<div class="content">' + escapeHtml(m.content || '') + '</div>';
   return div;
@@ -456,8 +459,9 @@ function createArchiveMessageEl(m) {
   let inner = '<div class="meta"><span class="ts">' + formatTime(m.ts) + '</span>' +
     '<span class="sender s-' + cls + '">' + escapeHtml(sender) + '</span>';
   if (m.to_name) {
+    const recvCls = colorMap[m.to_name] || 'unknown';
     inner += '<span style="color:#8b949e;margin:0 4px;">→</span>' +
-      '<span style="color:#8b949e;font-size:0.85rem;">' + escapeHtml(m.to_name) + '</span>';
+      '<span class="sender s-' + recvCls + '" style="font-size:0.85rem;">' + escapeHtml(m.to_name) + '</span>';
   }
   inner += '<span style="margin-left:auto;font-size:0.7rem;color:#8b949e;border:1px solid #30363d;border-radius:3px;padding:1px 4px;">' + escapeHtml(label) + '</span>';
   inner += '</div><div class="content">' + escapeHtml(m.content || '') + '</div>';
