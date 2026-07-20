@@ -99,13 +99,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         if not git_ok:
             return git_msg  # ❌ prevents advance
 
-    # ── R55 A: 2s serialization buffer ──
-    buffer_key = f"{round_name}:{step_name}"
-    last_ts = _step_advance_buffer.get(buffer_key, 0.0)
-    if time.time() - last_ts < 2.0:
-        return f"❌ {step_name} 正在被推进中（2 秒序列化缓冲），请稍后重试"
-    _step_advance_buffer[buffer_key] = time.time()
-
     # 提取 ws_id
     ws_id = sender_ch
 
@@ -201,7 +194,6 @@ async def _cmd_step_complete(sender_id: str, params: dict) -> str:
         close_result = await _cmd_close_workspace(sender_id, {"_positional": [ws_id]})
         if "❌" in str(close_result):
             return f"❌ 管线关闭失败，请手动处理：\n{close_result}"
-        set_lobby_paused(False)
 
         # ── R48 B: 写入 _admin 频道完结通知 ──
         try:
@@ -1197,10 +1189,6 @@ def _update_pipeline_step(round_name: str, step: str) -> None:
 
 def _clear_pipeline_state(round_name: str) -> None:
     state._PIPELINE_STATE.pop(round_name, None)
-def set_lobby_paused(paused: bool, round_name: str = "") -> None:
-    state._LOBBY_PAUSED = paused
-    state._LOBBY_PAUSED_ROUND = round_name if paused else ""
-    logger.info("R42 lobby-pause: %s (round=%s)", paused, state._LOBBY_PAUSED_ROUND)
 
 
 # ── R43: Watchdog helpers ──────────────────────────────────────────

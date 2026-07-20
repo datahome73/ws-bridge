@@ -34,9 +34,7 @@ logger = logging.getLogger("ws-bridge")
 
 _connections: dict[str, set] = {}
 # P6: message send stats
-state._send_stats: dict = {"total": 0, "total_latency": 0.0}
 _audit_logger = AuditLogger(config.DATA_DIR)
-
 # ── PipelineEngine 实例（惰性初始化） ──
 engine: Optional[PipelineEngine] = None
 
@@ -129,8 +127,6 @@ async def _broadcast_to_channel(channel: str, payload: dict) -> int:
         pass
     return sent
 
-def get_delivery_status(msg_id: str) -> dict[str, str]:
-    return state._delivery_status.get(msg_id, {})
 def _force_disconnect_revoked_agent(agent_id: str) -> None:
     """吊销 api_key 后强制断连 agent 的所有连接."""
     conns = list(_connections.get(agent_id, set()))
@@ -150,33 +146,16 @@ async def _send(ws, data: dict) -> None:
     elif hasattr(ws, "send"):
         await ws.send(json.dumps(data))
 
-def _build_online_list(users: dict) -> str:
-    """Build a comma-separated online member list with admin annotation.
-    Uses _connections (global) to determine who is online.
-    R72 B: 也包含通过 api_key 注册的 agent（不在 approved_users 中）."""
-    # Build a name map: approved_users first, then api_keys as fallback
-    api_keys = persistence.get_api_keys() if hasattr(persistence, 'get_api_keys') else {}
-    online_ids = set(_connections.keys())
-    parts = []
-    for aid in sorted(online_ids):
-        u = users.get(aid, {})
-        name = u.get("name", "")
-        role = u.get("role", "")
-        if not name:
-            # R72: fallback to api_key display_name or agent card
-            ak = api_keys.get(aid, {})
-            name = ak.get("display_name", "")
-            from . import agent_card as ac_mod
-            if not name:
-                card = ac_mod.get_all_cards().get(aid, {})
-                name = card.get("display_name", "")
-        if not name:
-            name = aid[:12]
-        prefix = ""
-        if role == "admin":
-            prefix = "管理员 "
-        parts.append(f"{prefix}{name}")
-    return "、".join(parts) if parts else "无"
+def _force_disconnect_revoked_agent(agent_id: str) -> None:
+    """吊销 api_key 后强制断连 agent 的所有连接."""
+    conns = list(_connections.get(agent_id, set()))
+    for conn in conns:
+        try:
+            if hasattr(conn, "close"):
+                asyncio.create_task(conn.close())
+        except Exception:
+            pass
+    _connections.pop(agent_id, None)
 
 async def handle_auth(ws, msg: dict) -> str | None:
     """R72: api_key 认证.不再支持 agent_id + app_id + pairing_code."""
@@ -383,70 +362,8 @@ async def handle_agent_card_register(ws, agent_id: str, msg: dict) -> dict:
     return result
 
 
-async def _push_offline(ws, since_ts: float) -> None:
-    """Push missed messages to a reconnecting agent."""
-    try:
-        offline = ms.get_messages_since(since_ts, config.DATA_DIR, limit=500)
-    except Exception:
-        logger.warning("Offline catchup query failed (maybe first run)")
-        return
-    if offline:
-        await _send(ws, {
-            "type": "offline_messages",
-            "messages": offline,
-            "count": len(offline),
-        })
-        logger.info("Pushed %d offline msgs to reconnecting agent", len(offline))
-
-
-async def _flush_offline_push(agent_id: str) -> None:
-    """R11 P1.2: Wait 3s for agent to come online, then flush (or discard)."""
-    await asyncio.sleep(3)
-    conns = _connections.get(agent_id, set())
-    pending = state._offline_push_queue.pop(agent_id, [])
-    state._offline_timers.pop(agent_id, None)
-    if conns and pending:
-        for conn in conns:
-            for item in pending:
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(json.dumps(item))
-                    elif hasattr(conn, "send"):
-                        await conn.send(json.dumps(item))
-                except Exception:
-                    pass
-        logger.info("Offline push: %d msgs delivered to %s after 3s", len(pending), agent_id[:12])
-    elif pending:
-        logger.info("Offline push: %d msgs for %s expired (still offline after 3s)", len(pending), agent_id[:12])
-
-
 # ── R35: Admin command infrastructure ────────────────────────────
 
-
-def _admin_msg(content: str) -> dict:
-    """Build a response message for the _admin channel."""
-    return {
-        "type": "broadcast",
-        "channel": p.ADMIN_CHANNEL,
-        "from_name": "系统",
-        "content": content,
-        "ts": time.time(),
-    }
-
-
-async def _persist_admin_response(ws, sender_id: str, from_name: str, content: str) -> None:
-    """Send admin response + persist to message store + chat log for web viewer."""
-    msg = _admin_msg(content)
-    await _send(ws, msg)
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()), msg_type="broadcast",
-            from_agent=sender_id, from_name=from_name,
-            content=content, ts=time.time(),
-            data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
-        )
-    except Exception:
-        pass
 
 def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
     """Persist a broadcast message to message store and chat log.
@@ -508,49 +425,6 @@ def _ensure_card_watcher() -> None:
     )
     _card_watcher.start()
 
-
-def _get_agents_by_role(role: str,
-                        workspace_members: list[str] = None) -> list[str]:
-    """Find agents by pipeline role.
-
-    Priority chain:
-    1. PipelineContextManager.get_role_agents() (R78 new path)
-    2. state._ROLE_AGENT_MAP (DEPRECATED fallback)
-    3. Fallback: auth.get_users().role (legacy compat)
-    4. Optional: filter by workspace_members
-
-    Args:
-        role: Pipeline role name (arch/dev/review/qa/admin).
-        workspace_members: Optional list of member IDs to filter by.
-
-    Returns:
-        List of matching agent IDs.
-    """
-    # R78 A4: 优先走 Manager 查询
-    try:
-        mgr = _ensure_pipeline_manager()
-        agents = mgr.get_role_agents(role)
-    except Exception:
-        agents = []
-    if not agents:
-        agents = state._ROLE_AGENT_MAP.get(role, [])
-    if not agents:
-        # Fallback to auth roles
-        users = auth.get_users()
-        agents = [aid for aid, u in users.items()
-                  if u.get("role", "member") == role]
-    if workspace_members:
-        agents = [a for a in agents if a in workspace_members]
-    return agents
-
-
-async def _handle_rollcall_ack(sender_id: str, content: str,
-                                ws_id: str) -> None:
-    """Handle rollcall response -> auto-register/update Agent Card.
-
-    R63 Phase 3: When agent replies to rollcall, register or update card.
-    R67: Unified — always go through ac_mod.register_agent.
-    """
 
 def _ensure_watchdog() -> None:
     """Lazily start the background watchdog loop on first call."""
@@ -1124,37 +998,11 @@ async def _trigger_ack_escalation(ack_key: str, state: dict) -> str:
     return alert
 
 
-def _update_step_ack_state(sender_id: str, content: str) -> None:
-    """Update state._step_ack_states when bot responds in a workspace.
-
-    R63 Phase 4: Bot ACK detection — any message from a target agent
-    is treated as ACK. If content contains ack keywords, mark IN_PROGRESS.
-
-    Args:
-        sender_id: Agent ID who sent the message.
-        content: Message content (checked for ack keywords).
+async def _channel_ack_timeout(ws_id: str) -> None:
+    """30s timeout for channel switch ACK.
+    On timeout: marks unresponsive members, calls _notify_rollcall_complete().
     """
-
-    ack_keywords = ["收到", "好的", "在", "到", "接", "OK", "ok", "开始", "done"]
-    is_ack = any(kw in content for kw in ack_keywords)
-
-    for ack_key, ack_state in state._step_ack_states.items():
-        if ack_state.get("agent_id") == sender_id and ack_state["state"] in ("SENT", "DELIVERED"):
-            old_state = ack_state["state"]
-            if is_ack:
-                ack_state["state"] = "IN_PROGRESS"
-            else:
-                ack_state["state"] = "ACKNOWLEDGED"
-            logger.info("ACK updated: %s %s → %s (from %s)",
-                        ack_key, old_state, ack_state["state"], sender_id[:12])
-            # R78 B3: 双写 Manager
-            try:
-                mgr = _ensure_pipeline_manager()
-                round_name = ack_key.split("/")[0]
-                step = ack_key.split("/")[1] if "/" in ack_key else ack_key
-                asyncio.ensure_future(mgr.set_ack_state(round_name, step, dict(ack_state)))
-            except Exception:
-                pass
+    await asyncio.sleep(30)
 
 
 def _format_ack_status(ack_key: str) -> str:
@@ -1525,94 +1373,10 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         # Otherwise → route directly to target agent's inbox (existing intercept handles it)
         # Fall through to normal inbox handling below
 
-    # R23: unregistered bots → registration channel only (cannot specify channel)
-    if not auth.is_approved(sender_id):
-        channel = p.REGISTRATION_CHANNEL
-
-    # R12 P1.1: Rate limiting check (before anything else)
-    users = auth.get_users()
-    sender_role = users.get(sender_id, {}).get("role", "member")
-    allowed, retry_after = _check_rate_limit(sender_id, channel, sender_role)
-    if not allowed:
-        await _send(ws, {
-            "type": p.MSG_RATE_LIMITED,
-            "reason": f"消息频率过高，{state.RATE_LIMIT_SECONDS}秒内最多发{state.RATE_LIMIT_WINDOW}条",
-            p.FIELD_RETRY_AFTER: retry_after,
-        })
-        logger.info("Rate-limited %s in '%s' (retry after %ds)", sender_id[:12], channel, retry_after)
-        return
-
-    # ── R35: Nonsense/duplicate filtering ──
-    if _is_nonsense(content, sender_id, channel):
-        logger.info("Nonsense msg filtered from %s in '%s': %s", sender_id[:12], channel, content[:40])
-        return
-    if _is_duplicate(content, sender_id):
-        logger.info("Duplicate msg filtered from %s: %s", sender_id[:12], content[:40])
-        return
-
-    # Skip system/noise
-    if any(content.startswith(p) for p in state._SILENT_PREFIXES) or content.strip("🤐") == "":
-        logger.info("Silent msg filtered: %s", content[:60])
-        return
-
     users = auth.get_users()
     # R72: R72 agents live in state._r72_users, not in users
     sender_name = users.get(sender_id, {}).get("name") or \
                   state._r72_users.get(sender_id, {}).get("name", sender_id)
-    sender_role = users.get(sender_id, {}).get("role", "member")
-    admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-
-    # ── R57 A: Rollcall ACK hook — any message from a waited-on agent fires event ──
-    if sender_id in state._r57_rollcall_events:
-        event = state._r57_rollcall_events.get(sender_id)
-        if event and not event.is_set():
-            event.set()
-            logger.info("R57 rollcall ACK from %s (%s)", sender_id[:12], sender_name)
-
-    # ── R63 Phase 3: Rollcall auto-register ──
-    # If in a workspace, try to register/update agent card on response
-    if channel.startswith(p.WORKSPACE_ID_PREFIX) or channel.startswith("ws:"):
-        try:
-            await _handle_rollcall_ack(sender_id, content, channel)
-        except Exception:
-            pass
-
-    # ── R63 Phase 4: Bot ACK detection for step assignment ──
-    _update_step_ack_state(sender_id, content)
-
-    # ── R26 P0: 📢 broadcast admin-only check ──
-    if content.startswith("📢") and sender_role != "admin":
-        await _send(ws, {"type": "error", "error": "「📢」广播仅限管理员使用"})
-        return
-
-    # R11 P2.1: Parse mentions from content (used in both lobby and workspace)
-    mention_names = set()
-    for m in re.finditer(r'@(\S+)', content):
-        name = m.group(1)
-        if any(users.get(aid, {}).get("name") == name for aid in users):
-            mention_names.add(name)
-    is_task = bool(mention_names)
-
-    # ── R35: _admin channel intercept ──
-    if channel == p.ADMIN_CHANNEL:
-        # Persist the admin's command message for web viewer
-        msg_id = str(uuid.uuid4())
-        try:
-            ms.save_message(
-                msg_id=msg_id, msg_type="broadcast",
-                from_agent=sender_id, from_name=sender_name,
-                content=content, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
-            )
-        except Exception:
-            pass
-        # R49: ! commands now handled by universal routing above.
-        # _admin channel still persists admin messages for logging.
-        # Non-! messages in _admin are silently logged (admin channel only supports ! commands).
-        if not content.startswith("!"):
-            resp = "ℹ️ 管理频道仅支持 ! 命令"
-            await _persist_admin_response(ws, sender_id, "系统", resp)
-        return
 
     # ── R68 A2: Inbox channel intercept ──
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
@@ -1657,357 +1421,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         logger.info("Inbox [%s] %s→%s: %s", channel, sender_name, owner_id[:12] if owner_id else "?", content[:60])
         await _send(ws, {"type": "ack", "channel": channel, "sent": sent, "to": owner_id})
         return
-
-    # ── Channel resolution (fall back to lobby for unknown channels) ──
-    resolved_workspace = None
-    if channel != p.LOBBY and channel != p.REGISTRATION_CHANNEL:
-        # R134: workspace subsystem removed — unknown channels fall back to lobby
-        logger.info("Unknown channel '%s' — falling back to lobby", channel)
-        channel = p.LOBBY
-
-    # ── Lobby pause check ──
-    allowed, reason = _can_broadcast(sender_id, channel, msg)
-    if not allowed:
-        await _send(ws, {"type": "error", "error": f"权限不足：{reason}"})
-        return
-
-    # ── R42 D: Lobby pause intercept ──
-    if state._LOBBY_PAUSED and channel == p.LOBBY:
-        await _send(ws, {
-            "type": "error",
-            "error": f"🔒 管线 {state._LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息.",
-        })
-        return
-
-    # ── R6: Broadcast permission check ──
-
-    broadcast = json.dumps({
-        "type": "broadcast",
-        "channel": channel,
-        # New unified field names
-        "from_name": sender_name,
-        "agent_id": sender_id,
-        # Legacy field names (Hermes built-in ws_bridge adapter reads these)
-        "from": sender_name,
-        "from_agent": sender_id,
-        "content": content,
-        "ts": time.time(),
-        # R11 P2.1: Mentions metadata
-        p.FIELD_MENTIONS: list(mention_names) if mention_names else None,
-        p.FIELD_IS_TASK: is_task or None,
-    })
-
-    # ── R24: Lobby routing with prefix classification ─────────────────
-    if channel == p.LOBBY:
-        msg_type, target_names = _sm.classify_lobby_message(content)
-
-        if msg_type == 'plain':
-            await _send(ws, {
-                "type": "error",
-                "error": "大厅消息需要明确类型.请使用 📢公告 / 📋点名 / 🆘求助 / @用户名.\n普通讨论请在工作室频道进行.",
-            })
-            logger.info("Lobby plain msg blocked from %s: %s", sender_id[:12], content[:40])
-            return
-
-        # Lobby-specific rate limit
-        allowed, retry_after = _check_lobby_rate_limit(sender_id, sender_role)
-        if not allowed:
-            await _send(ws, {
-                "type": p.MSG_RATE_LIMITED,
-                "reason": f"大厅消息频率过高，请{retry_after}秒后再试",
-                p.FIELD_RETRY_AFTER: retry_after,
-            })
-            return
-
-        # Route by type
-        targets = []
-        if msg_type == 'announce':
-            # 📢 → broadcast to admin/web viewers only (R82: bot connections excluded)
-            if sender_role != "admin":
-                await _send(ws, {
-                    "type": "error",
-                    "error": "📢 公告仅管理员可用.请使用 📋点名 / 🆘求助 / @用户名 发送大厅消息.",
-                })
-                return
-            targets = [(aid, conns) for aid, conns in _connections.items() if aid != sender_id]
-
-        elif msg_type == 'help':
-            # 🆘 → P4 admin only
-            targets = [(aid, conns) for aid, conns in _connections.items() if aid in admin_ids]
-
-        elif msg_type == 'checkin':
-            # 📋 → route to @mentioned targets
-            targets = []
-            for name in target_names:
-                for aid, conns in _connections.items():
-                    u = users.get(aid, {}) or state._r72_users.get(aid, {})
-                    if u.get("name") == name and aid != sender_id:
-                        targets.append((aid, conns))
-                        break
-            if not targets:
-                await _send(ws, {"type": "error", "error": f"未找到在线目标: {', '.join(target_names)}"})
-                return
-
-        elif msg_type == 'mention':
-            # @name → route to target + admin
-            targets = []
-            for name in target_names:
-                for aid, conns in _connections.items():
-                    u = users.get(aid, {}) or state._r72_users.get(aid, {})
-                    if u.get("name") == name and aid != sender_id:
-                        targets.append((aid, conns))
-                        break
-            # Always include admins
-            for aid, conns in _connections.items():
-                if aid in admin_ids and aid != sender_id:
-                    if not any(t[0] == aid for t in targets):
-                        targets.append((aid, conns))
-
-        if not targets:
-            logger.info("Lobby msg from %s has no online targets", sender_id[:12])
-            return
-
-    # ── R24: Registration channel → admin relay fallback ────────────
-    if channel == p.REGISTRATION_CHANNEL:
-        targets = [(aid, conns) for aid, conns in _connections.items() if aid in admin_ids]
-        if not targets:
-            logger.info("Reg channel: no admin online, msg from %s logged only", sender_id[:12])
-            return
-
-    # Use dual field names (new unified + legacy compat)
-    broadcast = json.dumps({
-        "type": "broadcast",
-        "channel": channel,
-        # New unified field names
-        "from_name": sender_name,
-        "agent_id": sender_id,
-        # Legacy field names (Hermes built-in ws_bridge adapter reads these)
-        "from": sender_name,
-        "from_agent": sender_id,
-        "content": content,
-        "ts": time.time(),
-        # R11 P2.1: Mentions metadata
-        p.FIELD_MENTIONS: list(mention_names) if mention_names else None,
-        p.FIELD_IS_TASK: is_task or None,
-    })
-    # P6: timing
-    _t0 = time.time()
-    msg_id = msg.get("id", "") or str(uuid.uuid4())
-    # Persist before broadcasting
-    try:
-        ms.save_message(
-            msg_id=msg_id,
-            msg_type="broadcast",
-            from_agent=sender_id,
-            from_name=sender_name,
-            content=content,
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
-        )
-    except Exception:
-        pass
-    sent = 0
-    target_names = []
-    # R11 P1.1: Track delivery
-    state._delivery_status[msg_id] = {}
-    for agent_id, conns in targets:
-        target_names.append(users.get(agent_id, {}).get("name", agent_id[:12]))
-        delivered = False
-        for conn in list(conns):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(broadcast)
-                elif hasattr(conn, "send"):
-                    await conn.send(broadcast)
-                sent += 1
-                delivered = True
-            except Exception:
-                pass
-        # R11 P1.1: Mark delivery status
-        state._delivery_status[msg_id][agent_id] = p.DELIVERY_SENT if delivered else p.DELIVERY_SENT
-    # R11 P1.2: Offline push — agents not in targets get queued (if admin message)
-    if sender_role == "admin":
-        all_agents = {aid for aid in users}
-        online_agents = {aid for aid in _connections}
-        offline_agents = all_agents - online_agents
-        # R41 B: Persist offline-queued messages to message store
-        if offline_agents:
-            try:
-                ms.save_message(
-                    msg_id=msg_id, msg_type="broadcast",
-                    from_agent=sender_id, from_name=sender_name,
-                    content=content, ts=time.time(),
-                    data_dir=config.DATA_DIR, channel=channel,
-                )
-            except Exception:
-                pass
-        for offline_id in offline_agents:
-            state._offline_push_queue.setdefault(offline_id, []).append({
-                "type": "broadcast",
-                "id": msg_id,
-                "channel": channel,
-                "from_name": sender_name,
-                "agent_id": sender_id,
-                "from": sender_name,
-                "from_agent": sender_id,
-                "content": content,
-                "ts": time.time(),
-            })
-            if offline_id not in state._offline_timers:
-                state._offline_timers[offline_id] = asyncio.create_task(
-                    _flush_offline_push(offline_id)
-                )
-
-    # R34 B: Send ACK with delivery stats (lobby path)
-    if msg_id:
-        _online = set(_connections.keys())
-        # targets = routed online recipients (already built above, but may include sender)
-        lobby_sent_list = [users.get(aid, {}).get("name", aid[:12]) for aid, _ in targets if aid != sender_id]
-        # Offline: all users (except sender) minus online = the ones not reachable
-        lobby_all_non_sender = {aid for aid in users if aid != sender_id}
-        lobby_offline_ids = lobby_all_non_sender - _online
-        lobby_offline_list = [users.get(aid, {}).get("name", aid[:12]) for aid in lobby_offline_ids]
-        await _send(ws, {
-            "type": "ack",
-            "id": msg_id,
-            "delivery": {
-                "total": len(lobby_all_non_sender),
-                "sent": len(lobby_sent_list),
-                "offline": len(lobby_offline_list),
-                "targets": lobby_sent_list,
-                "offline_targets": lobby_offline_list,
-            }
-        })
-    # R11 P1.1: Send delivery_status to admin senders
-    if sender_role == "admin" and msg_id:
-        online = set(_connections.keys())
-        status_report = {}
-        for aid in {u for u in users}:
-            name = users.get(aid, {}).get("name", aid[:12])
-            if aid == sender_id:
-                continue
-            if aid in online:
-                status_report[name] = "sent"
-            else:
-                status_report[name] = "offline"
-        await _send(ws, {
-            "type": p.MSG_DELIVERY_STATUS,
-            "id": msg_id,
-            "status": status_report,
-            "total": len(status_report),
-            "delivered": sum(1 for s in status_report.values() if s == "sent"),
-        })
-
-    # P6: record latency
-    _latency = time.time() - _t0
-    state._send_stats["total"] += 1
-    state._send_stats["total_latency"] += _latency
-    if sender_role == "admin":
-        logger.info("Admin-relay %s➔%s: %s", sender_name, ",".join(target_names), content[:60])
-    else:
-        logger.info("Member %s→admin: %s", sender_name, content[:60])
-
-    # ── R29: 📋 roll-call — send online member list to admin
-    # R33-1: Also allow workspace admin_ids (e.g. 泰虾) to call roll-call
-    is_ws_admin = (resolved_workspace is not None and
-                   (sender_id in resolved_workspace.admin_ids or
-                    sender_id == resolved_workspace.owner_id))
-    if (sender_role == "admin" or is_ws_admin) and content.startswith("📋"):
-        online_list = _build_online_list(users)
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": p.LOBBY,
-            "from_name": "系统",
-            "from": "系统",
-            "agent_id": "",
-            "from_agent": "",
-            "content": f"📋 当前在线：{online_list}",
-            "ts": time.time(),
-        })
-        logger.info("Admin %s roll-call — online list sent (%s)", sender_id[:12], online_list)
-
-        # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
-
-
-def _check_lobby_rate_limit(agent_id: str, role: str) -> tuple[bool, float]:
-    """Check lobby-specific rate limit. P4 unlimited, P3=5/60s, P1/P2=2/60s."""
-    if role == "admin":
-        return True, 0
-    window = state.LOBBY_RATE_WINDOW_P3 if role == "workspace_admin" else state.LOBBY_RATE_WINDOW_P1P2
-    now = time.time()
-    window_start = now - state.LOBBY_RATE_SECONDS
-    timestamps = state._lobby_rate_limits.setdefault(agent_id, [])
-    timestamps[:] = [t for t in timestamps if t > window_start]
-    if len(timestamps) >= window:
-        retry_after = int(timestamps[0] + state.LOBBY_RATE_SECONDS - now) + 1
-        return False, retry_after
-    timestamps.append(now)
-    return True, 0
-
-
-
-# ── R12 P1.1: Rate limiting ──────────────────────────────────────────
-
-
-def _check_rate_limit(agent_id: str, channel: str, role: str) -> tuple[bool, float]:
-    """Check if agent is rate-limited in channel. Returns (allowed, retry_after)."""
-    if role == "admin":
-        return True, 0
-    now = time.time()
-    window_start = now - state.RATE_LIMIT_SECONDS
-    agent_limits = state._rate_limits.setdefault(agent_id, {})
-    timestamps = agent_limits.setdefault(channel, [])
-    timestamps[:] = [t for t in timestamps if t > window_start]
-    if len(timestamps) >= state.RATE_LIMIT_WINDOW:
-        retry_after = int(timestamps[0] + state.RATE_LIMIT_SECONDS - now) + 1
-        return False, retry_after
-    timestamps.append(now)
-    return True, 0
-
-
-# ── R12 P1.2: Nonsense message patterns ────────────────────────────
-
-
-state._NONSENSE_PATTERNS = [
-    re.compile(r'^[\U0001F300-\U0001FAFF\U0001F600-\U0001F64F'
-               r'\U0001F680-\U0001F6FF\u2600-\u27BF\u2B50\u2702-\u27B0'
-               r'\uFE0F✅❌⚠️🟢🟡🔴⬜⬛➕➖🔄🤐👂🤫🦐🧐🦾📋'
-               r'\s\*]+$'),
-    re.compile(r'^\*\s*静默待命.*\*[\s🤫]*$'),
-    re.compile(r'^\*\s*弹药上膛.*\*[\s🦐🚀]*$'),
-    re.compile(r'^到[\s✅]*$'),
-]
-
-
-def _is_nonsense(content: str, agent_id: str, channel: str) -> bool:
-    """Check if message is nonsense (pure emoji, heartbeat, etc.)."""
-    stripped = content.strip()
-    if not stripped:
-        return True
-    for pattern in state._NONSENSE_PATTERNS:
-        if pattern.match(stripped):
-            return True
-    if '@' in stripped or 'http' in stripped.lower():
-        return False
-    text_chars = sum(1 for c in stripped if c.isascii() and c.isalnum())
-    if text_chars >= 5:
-        return False
-    has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf' for c in stripped)
-    if has_cjk:
-        return False
-    if text_chars < 3 and not has_cjk:
-        return True
-    return False
-
-
-def _is_duplicate(content: str, agent_id: str) -> bool:
-    """Check if agent is sending the same content within 30 seconds."""
-    entry = state._last_message.get(agent_id)
-    now = time.time()
-    if entry and entry["content"] == content and (now - entry["ts"]) < 30:
-        return True
-    state._last_message[agent_id] = {"content": content, "ts": now}
-    return False
 
 
 # ── R12 P0.3: Task ack timeout ────────────────────────────────────
@@ -2074,33 +1487,6 @@ def _resolve_ws_by_ack_task_id(ack_task_id: str) -> str | None:
         if state.get("ack_task_id") == ack_task_id:
             return ws_id
     return None
-
-
-def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
-    """Check if agent can broadcast in the given channel.
-    Returns (allowed: bool, reason: str).
-    """
-    # L4 global admin: any channel
-    if auth.is_global_admin(agent_id):
-        return True, ""
-
-    # R35: _admin channel — only admins (P3/P4) can send
-    # R44 F-12: PM pipeline_start bypass — allow broadcast, command-level check still applies
-    if channel == p.ADMIN_CHANNEL:
-        if auth.is_global_admin(agent_id):
-            return True, ""
-        # R44: member broadcast allowed
-        return True, ""
-
-    # R23: registration channel → allow (admin-relay handles routing)
-    if channel == p.REGISTRATION_CHANNEL:
-        return True, ""
-
-    # Lobby: members can reply (routing already limits to admin-only)
-    if channel == p.LOBBY:
-        return True, ""
-
-    return True, ""
 
 
 # ── R87: _inbox:server 中继转发 ─────────────────────────────
