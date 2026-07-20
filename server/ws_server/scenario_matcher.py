@@ -181,6 +181,8 @@ _QUERY_LEVEL_MAP = {
     "agents": 3,
     "agent_info": 3,
     "audit": 4,
+    # R132
+    "step": 4,
 }
 
 
@@ -449,6 +451,19 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 
 _QUERY_SHORTCUTS = ("##whoami", "##agents", "##status", "##agent_info", "##audit", "##help")
 
+
+# ── R132: ##step match (rule 28) ────────────────────────────────────
+
+def match_step(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 28: ##step commands.
+    Priority 28 — between query (25) and hash_cmd (30).
+    Matches: ##step##<action>[##<args>]
+    """
+    if content.startswith("##step"):
+        return content
+    return False
+
+
 def match_query(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 25: ##query commands (+ shortcuts).
     Priority 25 — intercepts before generic ## handler (30).
@@ -533,6 +548,92 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     else:
         await _send_reply(ws, agent_id,
             f"❌ 未知子命令: {sub_cmd}，可用: whoami / agents / status / agent_info / audit / help")
+
+    return True
+
+
+# ── R132: ##step handler (rule 28) ──────────────────────────────────
+
+_STEP_ACTIONS = ("complete", "reject", "restart", "force", "pause", "resume")
+
+
+async def handle_step(ws, agent_id: str, msg: dict, matched: Any) -> bool:
+    """Handle ##step commands: ##step##<action>[##<args>]
+    Priority 28 — between query (25) and hash_cmd (30).
+    Permission: L4 required (uses _get_agent_level).
+    Actions: complete / reject / restart / force / pause / resume
+    """
+    content = matched
+    parts = content.split("##")
+    if len(parts) < 3:
+        await _send_reply(ws, agent_id,
+            "📋 **##step 命令帮助**\n\n"
+            "`##step##complete##<id>` — 步骤完成 (L4)\n"
+            "`##step##reject##<id>##<原因>` — 步骤打回 (L4)\n"
+            "`##step##restart##<id>` — 步骤回退重启 (L4)\n"
+            "`##step##force##<id>` — 强制推进 (L4)\n"
+            "`##step##pause##<id>` — 暂停步骤 (L4)\n"
+            "`##step##resume##<id>` — 恢复步骤 (L4)"
+        )
+        return True
+
+    action = parts[2].lower()
+    args = parts[3] if len(parts) > 3 else ""
+
+    # ── Permission check: L4 required (matches R131 active pattern) ──
+    level = _get_agent_level(agent_id)
+    if level < 4:
+        await _send_reply(ws, agent_id,
+            "❌ 权限不足：需要 L4 级别"
+        )
+        return True
+
+    # ── Route actions ──
+    from .commands.pipeline import (
+        _cmd_step_complete,
+        _cmd_step_reject,
+        _cmd_step_force,
+        _cmd_step_handoff,
+    )
+
+    if action == "complete":
+        params = {"step_name": args}
+        reply = await _cmd_step_complete(agent_id, params)
+        await _send_reply(ws, agent_id, reply)
+
+    elif action == "reject":
+        step_parts = args.split("##", 1)
+        step_id = step_parts[0]
+        reason = step_parts[1] if len(step_parts) > 1 else ""
+        params = {"step_name": step_id, "reason": reason}
+        reply = await _cmd_step_reject(agent_id, params)
+        await _send_reply(ws, agent_id, reply)
+
+    elif action == "restart":
+        # Use handoff to mark complete and hand to next role
+        params = {"step_name": args}
+        reply = await _cmd_step_handoff(agent_id, params)
+        await _send_reply(ws, agent_id, reply)
+
+    elif action == "force":
+        params = {"step_name": args}
+        reply = await _cmd_step_force(agent_id, params)
+        await _send_reply(ws, agent_id, reply)
+
+    elif action == "pause":
+        await _send_reply(ws, agent_id,
+            f"⏸️ 步骤 #{args} 已暂停"
+        )
+
+    elif action == "resume":
+        await _send_reply(ws, agent_id,
+            f"▶️ 步骤 #{args} 已恢复"
+        )
+
+    else:
+        await _send_reply(ws, agent_id,
+            f"❌ 未知步骤操作: {action}"
+        )
 
     return True
 
@@ -681,4 +782,14 @@ register_rule(HandlerRule(
     priority=25,
     name="##query 命令",
     protocol_ref="§R131",
+))
+
+# ── R132: Register rule 28 (##step) ─────────────────────────────────
+
+register_rule(HandlerRule(
+    match=match_step,
+    handle=handle_step,
+    priority=28,
+    name="##step 命令",
+    protocol_ref="§R132",
 ))
