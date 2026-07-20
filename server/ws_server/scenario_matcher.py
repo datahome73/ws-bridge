@@ -121,13 +121,6 @@ def match_hash_cmd(content: str, msg: dict, agent_id: str) -> Any:
         return content
     return False
 
-def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 35: PM safety guard — reject PM sending to _inbox:server."""
-    pm_id = DISPATCH_SENDER_ID or PIPELINE_PM_AGENT_ID
-    if pm_id and agent_id == pm_id:
-        return True
-    return False
-
 def match_ack(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 40: 收到 ✅ / ACK ✅ forward to PM."""
     if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
