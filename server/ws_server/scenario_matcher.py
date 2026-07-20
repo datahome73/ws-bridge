@@ -212,7 +212,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # ── Route sub-commands ──
-    from . import engine2 as _e2
+    from . import pipeline_engine as _e2
 
     if sub_cmd == "whoami":
         from server.common import auth, persistence
@@ -263,7 +263,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 
 async def _format_query_status(round_name: str) -> str:
     """Format pipeline status response."""
-    from . import engine2 as _e2
+    from . import pipeline_engine as _e2
     if round_name:
         # Specific round
         mgr = _e2._ensure_pipeline_manager()
@@ -404,7 +404,7 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             kv[k.strip()] = v.strip()
 
     # Import callbacks registered by main.py
-    from . import engine2 as _e2
+    from . import pipeline_engine as _e2
 
     if cmd == "start":
         return await _e2._handle_hash_start(round_name, kv, agent_id, ws)
@@ -500,7 +500,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # 6 个子命令路由（复用 main.py 函数）
-    from . import engine2 as _e2
+    from . import pipeline_engine as _e2
 
     if sub_cmd == "whoami":
         from server.common import auth as _auth
