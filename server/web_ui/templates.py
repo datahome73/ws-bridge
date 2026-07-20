@@ -647,25 +647,6 @@ async function init() {
     if (dy > 100) pollActiveChannel();
   });
 
-      // Invalidate panel cache so next open re-fetches
-      wsPanelCache = null;
-
-      // Check if Tab3's channel still exists
-      if (TAB_STATE.tab3.channel) {
-        var exists = workspaces.some(function(w) { return w.id === TAB_STATE.tab3.channel; });
-        if (!exists) {
-          TAB_STATE.tab3.channel = null;
-          TAB_STATE.tab3.label = '🗂️ 历史';
-          if (activeTabId === 'tab3') {
-            selectTab('tab1');  // 自动回退到收件箱
-          } else {
-            renderTabBar();
-          }
-        }
-      }
-    } catch(_) {}
-  }, 15000);
-
   // ── R112: Pipeline poll (15s) ──
   async function pollPipelines() {
     if (activeTabId === 'tab4') renderPipelineDashboard();
