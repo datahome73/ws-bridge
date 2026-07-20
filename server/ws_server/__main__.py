@@ -529,8 +529,6 @@ def main():
     # P2: auth callback for session persistence
     # P5: enhanced health check (override basic one)
     app.router.add_get("/api/health", _api_health)
-    # R4: workspace API
-    app.router.add_get("/api/workspaces", _ws_api.api_workspaces)
 
     global _start_time
     _start_time = time.time()
