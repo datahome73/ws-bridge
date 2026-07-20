@@ -128,6 +128,7 @@ steps:
 | A9 | 🔧 修改 | `server/ws_server/main.py` L4937-4943 | 删除 `match_exclamation` 规则注册 |
 | A10 | 🔧 修改 | `server/ws_server/scenario_matcher.py` L155-158 | 删除 `match_exclamation()` 函数 |
 | A11 | 🔧 清理 | `server/ws_server/commands/pipeline.py` | 删除 `import command_utils` / `import workspace as ws_mod` 引用（A5+A2 删除后） |
+| **A12** | 🐛 **修复** | `server/ws_server/main.py` L3147-3148 | `_auto_dispatch` 中 `from_name: "小谷"` → `"系统"`，`agent_id: "ws_f26e585f6479"` → `state.SYSTEM_AGENT_ID`（派活消息发件人身份硬编码 bug） |
 
 > 注意 A6 删除前检查 `handle_broadcast` 中 `is_task = bool(mention_names) or content.startswith("!")`（L1594），确认改为 `is_task = bool(mention_names)`。
 
@@ -219,6 +220,7 @@ python3 -c "from server.ws_server import __main__; print('✅ __main__ import OK
 - [ ] D 批: `viewer.py` 中 workspace API 路由已移除，不影响其他 API
 - [ ] D 批: `templates.py` 工作区 Tab 已移除，不影响其他 4 个 Tab
 - [ ] E 批: `auto_router.py` 已删除
+- [ ] **A12 确认: `_auto_dispatch` 中 `from_name` 已改为 "系统"，`agent_id` 已改为 `state.SYSTEM_AGENT_ID`**
 - [ ] `py_compile` 全部通过
 - [ ] `from server.ws_server import main` 无 ImportError
 
@@ -233,6 +235,7 @@ python3 -c "from server.ws_server import __main__; print('✅ __main__ import OK
 - CLN-8 ~ CLN-10: main.py 中 3 个 ! 命令代码段已删除
 - CLN-11: scenario_matcher.py 中 ! 命令规则已删除
 - CLN-12: auto_router.py 已删除
+- CLN-13: `_auto_dispatch` 发件人身份已修复（"系统" 而非 "小谷"）
 
 **WKS 组（6 项）：**
 - WKS-1 ~ WKS-2: workspace.py / workspace_api.py 已删除

@@ -182,6 +182,7 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 | CLN-10 | `main.py` 中 `_sm_handle_exclamation` 函数已删除 | 代码 | P0 |
 | CLN-11 | `scenario_matcher.py` 中 `match_exclamation` + 规则注册已删除 | 代码 | P0 |
 | CLN-12 | `auto_router.py` 已删除 | 代码 | P0 |
+| CLN-13 | `main.py` `_auto_dispatch` 中 `from_name` 硬编码 "小谷" 改为 `"系统"`，`agent_id` 改为 `state.SYSTEM_AGENT_ID` | Bug修复 | P0 |
 
 ### WKS: Workspace 清理（P0）
 
@@ -249,10 +250,10 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 
 | 分组 | P0 项 | 合计 |
 |:-----|:-----:|:----:|
-| CLN ! 命令清理 | 12 | 12 |
+| CLN ! 命令清理 (+ Bug 修复) | 13 | 13 |
 | WKS Workspace 清理 | 6 | 6 |
 | RV 回归验证 | 8 | 8 |
-| **合计** | **26** | **26** |
+| **合计** | **27** | **27** |
 
 ---
 
