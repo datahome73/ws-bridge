@@ -41,22 +41,9 @@ CHAT_TEMPLATE = r"""<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;}
-@media (max-width:600px){body{font-size:15px;}.tab{padding:8px 10px;font-size:13px;}.search-bar{flex-wrap:wrap;}.search-bar input{max-width:100%;}.ws-panel{width:calc(100% - 32px);right:16px;}.ws-btn-label{display:none;}}
 .header{background:#161b22;border-bottom:1px solid #30363d;padding:8px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;}
 .header h1{font-size:1.1rem;}
 .header .viewer{font-size:0.8rem;color:#8b949e;}
-.ws-list-btn{background:none;border:1px solid #30363d;border-radius:6px;padding:2px 6px;cursor:pointer;font-size:1rem;line-height:1;color:#8b949e;margin-right:6px;display:inline-flex;align-items:center;gap:2px;}
-.ws-list-btn:hover{color:#c9d1d9;border-color:#8b949e;}
-.ws-panel{display:none;position:absolute;right:16px;top:44px;background:#161b22;border:1px solid #30363d;border-radius:8px;max-height:400px;overflow-y:auto;width:280px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.5);}
-.ws-panel.open{display:block;}
-.ws-panel .ws-item{padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #30363d;font-size:0.85rem;}
-.ws-panel .ws-item:hover{background:rgba(255,255,255,0.05);}
-.ws-panel .ws-item:last-child{border-bottom:none;}
-.ws-panel .ws-badge{font-size:0.7rem;padding:1px 6px;border-radius:4px;flex-shrink:0;}
-.ws-panel .ws-active{color:#3fb950;border:1px solid #3fb95044;}
-.ws-panel .ws-archived{color:#8b949e;border:1px solid #30363d;}
-.ws-panel .ws-round-tag{font-size:0.65rem;padding:1px 5px;border-radius:4px;flex-shrink:0;line-height:1.4;}
-.ws-section-header{padding:6px 14px;font-size:0.75rem;border-bottom:1px solid #30363d;}
 .ws-section-active{color:#3fb950;}
 .ws-section-archived{color:#8b949e;}
 .tab-bar{display:flex;gap:0;background:#161b22;border-bottom:1px solid #30363d;overflow-x:auto;-webkit-overflow-scrolling:touch;}
@@ -132,7 +119,6 @@ body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0d1117;color:#c
     <div><span class="live-badge"><span class="live-dot"></span>实时</span></div>
   </div>
   <div class="right-group" style="display:flex;align-items:center;gap:8px;">
-    <button id="wsListBtn" class="ws-list-btn" title="工作室列表">📋 <span class="ws-btn-label">历史工作室</span></button>
     <div id="status-bar" style="font-size:0.75rem;color:#8b949e;"></div>
     <div class="viewer" id="viewerName">__VIEWER__</div>
     <button id="logoutBtn" style="font-size:0.7rem;cursor:pointer;background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:2px 6px;margin-left:4px;">登出</button>
@@ -167,12 +153,8 @@ let lastArchiveTs = 0;
 let _inboxCache = [];
 
 // ── Panel cache ──
-let wsPanelCache = null;
-let wsPanelCacheTime = 0;
-const WS_PANEL_CACHE_TTL = 30000; // 30s
 
 // ── Workspaces poll ──
-let lastWorkspacesJson = '';
 
 function escapeHtml(s) {
   if (!s) return '';
@@ -221,7 +203,7 @@ function createMessageEl(m) {
   const div = document.createElement('div');
   const sender = m.from_name || m.name || m.sender || '';
   let typeClass = 'bot';
-  if (sender === '系统' || m._workspace_event) {
+  if (sender === '系统') {
     typeClass = 'system';
   } else if (sender === '小爱' || sender === 'admin') {
     typeClass = 'admin';
@@ -469,75 +451,6 @@ function createArchiveMessageEl(m) {
   return div;
 }
 
-// ── R20: Workspace panel — partitioned + closed_at + desc sorted ──
-
-function buildWsItem(w) {
-  const badge = w.state === 'active' ? '🟢' : '🗂️';
-  const cls = w.state === 'active' ? 'ws-active' : 'ws-archived';
-  const safeName = escapeHtml(w.name).replace(/'/g, "\\'");
-  const clickAction = "switchHistoryTab('" + w.id + "','" + safeName + "')";
-  // Round badge (empty string = hide)
-  const roundHtml = w.pipeline_round
-    ? '<span class="ws-round-tag ' + cls + '">🏷️ ' + escapeHtml(w.pipeline_round) + '</span>'
-    : '';
-  // Member count
-  const memberHtml = w.member_count > 0
-    ? '<span style="color:#8b949e;font-size:0.7rem;flex-shrink:0;margin-left:4px;">👥' + w.member_count + '</span>'
-    : '';
-  // Time string for archived items
-  var timeStr = '';
-  if (w.state === 'archived') {
-    if (w.created_at) {
-      timeStr += '<span style="color:#8b949e;font-size:0.6rem;flex-shrink:0;">' + formatClosedAt(w.created_at) + '</span>';
-    }
-    if (w.closed_at) {
-      timeStr += '<span style="margin-left:auto;color:#8b949e;font-size:0.65rem;flex-shrink:0;">' + formatClosedAt(w.closed_at) + '</span>';
-    }
-  }
-  return '<div class="ws-item" onclick="' + clickAction + '; document.getElementById(\'wsPanel\').classList.remove(\'open\')">' +
-    '<span class="ws-badge ' + cls + '">' + badge + '</span>' +
-    '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(w.name) + '</span>' +
-    roundHtml + memberHtml + timeStr + '</div>';
-}
-
-async function renderWsPanel() {
-  const wsPanel = document.getElementById('wsPanel');
-  // Check cache
-  var now = Date.now();
-  if (wsPanelCache && (now - wsPanelCacheTime) < WS_PANEL_CACHE_TTL) {
-    wsPanel.innerHTML = wsPanelCache;
-    return;
-  }
-  try {
-    const resp = await fetch('/api/workspaces');
-    const data = await resp.json();
-    const workspaces = data.workspaces || [];
-
-    const activeWs = workspaces.filter(function(w) { return w.state === 'active'; });
-    const archivedWs = workspaces.filter(function(w) { return w.state === 'archived'; });
-    archivedWs.sort(function(a, b) { return (b.closed_at || 0) - (a.closed_at || 0); });
-
-    var html = '';
-    if (activeWs.length > 0) {
-      html += '<div class="ws-section-header ws-section-active">🟢 活跃工作室</div>';
-      html += activeWs.map(buildWsItem).join('');
-    }
-    if (archivedWs.length > 0) {
-      html += '<div class="ws-section-header ws-section-archived">🗂️ 历史工作室</div>';
-      html += archivedWs.map(buildWsItem).join('');
-    }
-    html = html || '<div style="padding:14px;color:#8b949e;font-size:0.85rem;">暂无工作室</div>';
-
-    wsPanelCache = html;
-    wsPanelCacheTime = Date.now();
-    wsPanel.innerHTML = html;
-  } catch(e) {
-    wsPanel.innerHTML = '<div style="padding:14px;color:#8b949e;font-size:0.85rem;">加载失败</div>';
-  }
-}
-
-
-
 // ── R112: Pipeline Dashboard ─────────────────────────────────────
 
 
@@ -734,16 +647,6 @@ async function init() {
     if (dy > 100) pollActiveChannel();
   });
 
-  // 4. R83: Poll workspaces — refresh panel cache + detect history tab changes
-  setInterval(async function() {
-    try {
-      const resp = await fetch('/api/workspaces');
-      const data = await resp.json();
-      const workspaces = data.workspaces || [];
-      const wsJson = JSON.stringify(workspaces);
-      if (wsJson === lastWorkspacesJson) return;
-      lastWorkspacesJson = wsJson;
-
       // Invalidate panel cache so next open re-fetches
       wsPanelCache = null;
 
@@ -816,7 +719,6 @@ async function init() {
 
   // 6. R20: Workspace list panel
   const wsPanel = document.createElement('div');
-  wsPanel.className = 'ws-panel';
   wsPanel.id = 'wsPanel';
   document.body.appendChild(wsPanel);
 

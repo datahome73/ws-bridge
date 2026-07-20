@@ -96,48 +96,6 @@ _MAX_BUFFER = 1000
 
 # ── Daily chat log file (per channel) ──────────────────────────
 _CHAT_LOG_DIR = config.DATA_DIR / "chat_logs"
-
-# ── R76: Archive state persistence ────────────────────────────────────
-
-
-def _load_archive_state() -> dict:
-    """Load archive state from disk. Returns default if file missing."""
-    path = config.DATA_DIR / _ARCHIVE_STATE_FILE
-    if not path.exists():
-        return {"last_archive_ts": 0, "archived_workspaces": []}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"last_archive_ts": 0, "archived_workspaces": []}
-
-
-def _save_archive_state(state: dict) -> None:
-    """Persist archive state to disk."""
-    path = config.DATA_DIR / _ARCHIVE_STATE_FILE
-    try:
-        path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.warning("R76: Failed to save archive state: %s", exc)
-
-
-def set_archive_state(ws_id: str, ws_name: str, start_ts: float) -> None:
-    """Record archive entry for a workspace. Called when last workspace closes."""
-    now = time.time()
-    state = _load_archive_state()
-    state["last_archive_ts"] = now
-    state["archived_workspaces"].append({
-        "id": ws_id,
-        "name": ws_name,
-        "created_at": start_ts,
-        "closed_at": now,
-        "archive_window": {"start": start_ts, "end": now},
-    })
-    _save_archive_state(state)
-
-
 def _today_str() -> str:
     ict_now = datetime.now(timezone.utc) + timedelta(hours=7)
     return ict_now.strftime("%Y-%m-%d")
@@ -229,25 +187,6 @@ def validate_token(token: str) -> str | None:
     if token and len(token) >= 8:
         logger.debug("validate_token: token %s... not found in %d sessions", token[:8], len(sessions))
     return None
-
-
-async def _fetch_channels_from_wss() -> dict:
-    """HTTP poll workspace list from WSS core's /api/workspaces."""
-    url = f"http://127.0.0.1:{config.PORT}/api/workspaces"
-    try:
-        async with asyncio.timeout(5):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-    except Exception:
-        pass
-    return {"workspaces": [], "count": 0}
-
-
-# ── API handlers ──────────────────────────────────────────────────
-
-
 async def handle_chat(request: web.Request) -> web.Response:
     """Serve the chat HTML page."""
     try:
@@ -323,38 +262,6 @@ async def handle_api_chat(request: web.Request) -> web.Response:
         messages.sort(key=_sort_key, reverse=True)
         return web.json_response({"channel": channel, "messages": messages[:limit]})
     return web.json_response({"channel": channel, "messages": []})
-
-
-async def handle_api_channels(request: web.Request) -> web.Response:
-    """Return available channels — HTTP poll from WSS workspace API."""
-    channels = [
-        {"id": "lobby", "name": "大厅", "emoji": "🌐", "state": "active"},
-    ]
-    try:
-        data = await _fetch_channels_from_wss()
-        for ws in data.get("workspaces", []):
-            channels.append({
-                "id": ws["id"],
-                "name": ws["name"],
-                "emoji": "📋" if ws.get("state") == "active" else "🗂️",
-                "state": ws.get("state", "active"),
-                "admin_ids": [],
-            })
-    except Exception:
-        pass
-
-    try:
-        arch_state = _load_archive_state()
-        archive_state = {
-            "active": True,
-            "last_archive_ts": arch_state.get("last_archive_ts", 0),
-        }
-    except Exception:
-        archive_state = {"active": True, "last_archive_ts": 0}
-
-    return web.json_response({"channels": channels, "archive_state": archive_state})
-
-
 async def handle_api_approve_web(request: web.Request) -> web.Response:
     peer = request.remote
     if peer not in ("127.0.0.1", "::1", "localhost"):
@@ -441,56 +348,6 @@ async def handle_api_inbox(request: web.Request) -> web.Response:
             m["from_name"] = auth.get_agent_name(agent_id) if agent_id else "系统"
 
     return web.json_response({"messages": db_msgs})
-
-
-async def handle_api_archive(request: web.Request) -> web.Response:
-    """Return all messages from a workspace's archive window, across all channels."""
-    token = request.query.get("token", "")
-    if not validate_token(token):
-        return web.json_response({"error": "unauthorized"}, status=401)
-
-    ws_id = request.query.get("workspace_id", "")
-    if not ws_id:
-        return web.json_response({"error": "missing workspace_id"}, status=400)
-
-    state = _load_archive_state()
-    ws_info = None
-    for ws in state.get("archived_workspaces", []):
-        if ws["id"] == ws_id:
-            ws_info = ws
-            break
-    if not ws_info:
-        return web.json_response({"error": "workspace not found"}, status=404)
-
-    start = ws_info["archive_window"]["start"]
-    end = ws_info["archive_window"]["end"]
-
-    all_msgs = ms.get_messages_by_time_range(start, end, config.DATA_DIR)
-    all_msgs.reverse()
-
-    for m in all_msgs:
-        ch = m.get("channel", "")
-        if ch == "lobby":
-            m["_channel_label"] = "大厅"
-        elif ch == "_admin":
-            m["_channel_label"] = "管理员"
-        elif ch.startswith("_inbox:"):
-            owner_id = persistence.resolve_inbox_owner(ch)
-            to_name = auth.get_agent_name(owner_id) if owner_id else "?"
-            m["to_name"] = to_name
-            m["to_agent"] = owner_id or ""
-            m["_channel_label"] = f"收件箱（{to_name}）"
-        else:
-            m["_channel_label"] = ch
-
-    return web.json_response({
-        "workspace": ws_info["name"],
-        "period": ws_info["archive_window"],
-        "messages": all_msgs,
-        "total": len(all_msgs),
-    })
-
-
 async def handle_api_agents_status(request: web.Request) -> web.Response:
     """Return online/offline status for all registered agents (from WS poll cache)."""
     token = request.query.get("token", "")
@@ -665,26 +522,6 @@ async def handle_api_auth_me(request: web.Request) -> web.Response:
         "authenticated": True,
         "name": viewer,
     })
-
-
-# ── R104: Workspace list API for web service ─────────────────────────
-
-
-async def handle_api_workspaces(request: web.Request) -> web.Response:
-    """GET /api/workspaces — HTTP relay to WSS core."""
-    token = request.query.get("token", "")
-    if not validate_token(token):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    data = await _fetch_channels_from_wss()
-    return web.json_response(data)
-
-
-# ── R112: Lazy singleton for PipelineContextManager ─────────────────
-
-
-_PIPELINE_MGR: PipelineContextManager | None = None
-
-
 def _get_pipeline_mgr() -> PipelineContextManager:
     global _PIPELINE_MGR
     _PIPELINE_MGR = PipelineContextManager(data_dir=config.DATA_DIR)
@@ -764,7 +601,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/check", handle_api_check)
     app.router.add_get("/api/chat", handle_api_chat)
     app.router.add_post("/api/approve_web", handle_api_approve_web)
-    app.router.add_get("/api/channels", handle_api_channels)
     app.router.add_get("/health", _handle_health)
     app.router.add_post("/api/logout", handle_api_logout)
     app.router.add_get("/api/chat/search", handle_api_chat_search)
@@ -773,7 +609,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/auth/github/callback", handle_github_callback)
     app.router.add_get("/api/auth/me", handle_api_auth_me)
     app.router.add_get("/api/chat/inbox", handle_api_inbox)
-    app.router.add_get("/api/chat/archive", handle_api_archive)
-    app.router.add_get("/api/workspaces", handle_api_workspaces)
     app.router.add_get("/api/pipelines", handle_api_pipelines)
     app.router.add_get("/api/pipelines/{round_name}", handle_api_pipeline_detail)
