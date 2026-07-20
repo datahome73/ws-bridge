@@ -93,7 +93,6 @@ class PipelineEngine:
         get_step_config: Optional[Callable[[str], dict]] = None,
         persist_broadcast: Optional[Callable[[str, str, str], None]] = None,
         find_agents_by_role: Optional[Callable[[str, set, list], list]] = None,
-        cmd_task_update: Optional[Callable] = None,
         set_pipeline_state: Optional[Callable[[str, dict], None]] = None,
         extract_artifact_kv: Optional[Callable[[str], dict]] = None,
     ):
@@ -105,7 +104,6 @@ class PipelineEngine:
         self._get_step_config = get_step_config
         self._persist_broadcast = persist_broadcast
         self._find_agents_by_role = find_agents_by_role
-        self._cmd_task_update = cmd_task_update
         self._set_pipeline_state = set_pipeline_state
         self._extract_artifact_kv = extract_artifact_kv
 
@@ -137,6 +135,37 @@ class PipelineEngine:
     # ════════════════════════════════════════════════════════════════
     # 🅰️ 数据/工具函数
     # ════════════════════════════════════════════════════════════════
+
+    async def _cmd_task_update(self, sender_id: str, task_id: str, new_state: str, output_ref: str = "") -> str:
+        """Update a task's state (R134: migrated from commands/task.py as internal method)."""
+        import shared.protocol as _p
+        task = ts.get_task(task_id, config.DATA_DIR)
+        if not task:
+            return f"❌ Task {task_id[:12]} 不存在"
+        try:
+            current = _p.TaskState(task["state"])
+            target = _p.TaskState(new_state)
+        except ValueError:
+            valid = [s.value for s in _p.TaskState]
+            return f"❌ 无效状态：{new_state}。有效值：{', '.join(valid)}"
+        allowed = _p.TASK_VALID_TRANSITIONS.get(current, [])
+        if target not in allowed:
+            return f"❌ 不允许的转换：{current.value} → {target.value}"
+        if target == _p.TaskState.INPUT_REQUIRED:
+            ts.increment_reject_count(task_id, config.DATA_DIR)
+            task_d = ts.get_task(task_id, config.DATA_DIR)
+            if task_d["reject_count"] >= _p.TASK_REJECT_CEILING:
+                ts.update_state(task_id, _p.TaskState.FAILED.value, config.DATA_DIR)
+                task_d = ts.get_task(task_id, config.DATA_DIR)
+                return (f"❌ 审查已达上限 ({_p.TASK_REJECT_CEILING}次)，已锁定 FAILED\n"
+                        f"  {task_d['name']}: {task_d['state']} (rejects: {task_d['reject_count']})")
+        ts.update_state(task_id, new_state, config.DATA_DIR)
+        if output_ref:
+            ts.add_output_ref(task_id, output_ref, config.DATA_DIR)
+        task = ts.get_task(task_id, config.DATA_DIR)
+        refs = task.get("output_refs", [])
+        refs_str = f", 产出: {', '.join(refs)}" if refs else ""
+        return f"✅ Task 已更新：{task['name']} → {task['state']}{refs_str}"
 
     def format_context(self, ctx: PipelineContext) -> str:
         """格式化 PipelineContext 为人类可读文本."""
@@ -409,20 +438,12 @@ class PipelineEngine:
         # 1. 状态机推进
         pstate["current_step"] = next_step
         pstate["last_output_sha"] = new_sha
-        if self._cmd_task_update:
-            tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-            for t in tasks:
-                if t.get("name") == current_step and t.get("state") != p.TaskState.COMPLETED.value:
-                    await self._cmd_task_update("系统", {
-                        "_positional": [t["id"]],
-                        "state": p.TaskState.COMPLETED.value,
-                        "output": new_sha,
-                    })
-                if t.get("name") == next_step and t.get("state") == p.TaskState.PENDING.value:
-                    await self._cmd_task_update("系统", {
-                        "_positional": [t["id"]],
-                        "state": p.TaskState.WORKING.value,
-                    })
+        tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+        for t in tasks:
+            if t.get("name") == current_step and t.get("state") != p.TaskState.COMPLETED.value:
+                await self._cmd_task_update("系统", t["id"], p.TaskState.COMPLETED.value, output_ref=new_sha)
+            if t.get("name") == next_step and t.get("state") == p.TaskState.PENDING.value:
+                await self._cmd_task_update("系统", t["id"], p.TaskState.WORKING.value)
 
         # 2. 清理旧 ACK FAILED 标记
         old_ack_key = f"{round_name}/{current_step}"

@@ -19,15 +19,13 @@ from typing import Optional
 from . import agent_card as ac_mod  # R67: unified Agent Card interface
 from server.common import auth, config, persistence
 from . import state  # R100: shared state container
-from . import command_utils  # R100: command routing utilities
 from . import message_store as ms
-from . import workspace as ws_mod
 from .audit import AuditLogger
 from . import task_store as ts
+from . import workspace as ws_mod  # R134: minimal stub — pipeline sync still uses get_workspace()
 from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
 from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
-from .command_utils import _refresh_role_agent_map, _broadcast_to_channel
 _card_watcher = None  # R100: module-level for _ensure_card_watcher()
 import shared.protocol as p
 from .pipeline_engine import PipelineEngine
@@ -49,7 +47,6 @@ def _ensure_engine() -> PipelineEngine:
             _get_step_config, _find_agents_by_role,
             _set_pipeline_state, _step_sort_key,
         )
-        from .commands.task import _cmd_task_update
         engine = PipelineEngine(
             context_mgr=_ensure_pipeline_manager(),
             send_to_agent=_send_to_agent,
@@ -58,7 +55,6 @@ def _ensure_engine() -> PipelineEngine:
             get_step_config=_get_step_config,
             persist_broadcast=_persist_broadcast,
             find_agents_by_role=_find_agents_by_role,
-            cmd_task_update=_cmd_task_update,
             set_pipeline_state=_set_pipeline_state,
             extract_artifact_kv=_extract_artifact_kv,
         )
@@ -73,6 +69,65 @@ def _ensure_pipeline_manager() -> PipelineContextManager:
     return state._pipeline_manager
 def get_connections() -> dict[str, set]:
     return _connections
+
+
+# ── R99/100: Role-Agent Map Refresh (migrated from command_utils.py) ──
+logger_cu = __import__('logging').getLogger(__name__)
+
+def _refresh_role_agent_map() -> None:
+    """Rebuild state._ROLE_AGENT_MAP from Agent Card pipeline_roles."""
+    from . import agent_card as ac_mod
+    cards = ac_mod.get_all_cards()
+    state._ROLE_AGENT_MAP = {}
+    for aid, card in cards.items():
+        roles = card.get("pipeline_roles", [])
+        for role in roles:
+            if role not in state._ROLE_AGENT_MAP:
+                state._ROLE_AGENT_MAP[role] = []
+            if aid not in state._ROLE_AGENT_MAP[role]:
+                state._ROLE_AGENT_MAP[role].append(aid)
+    logger_cu.info("R63 role-agent map refreshed: %d roles, %d entries",
+                len(state._ROLE_AGENT_MAP),
+                sum(len(v) for v in state._ROLE_AGENT_MAP.values()))
+    # R78 A2: 同步写到 Manager 全局快照
+    try:
+        from .pipeline_context import PipelineContextManager
+        mgr = PipelineContextManager.get_instance()
+        mgr.set_global_role_map(dict(state._ROLE_AGENT_MAP))
+    except Exception:
+        pass
+
+
+# ── _broadcast_to_channel (migrated from command_utils.py) ──
+async def _broadcast_to_channel(channel: str, payload: dict) -> int:
+    """向指定频道的所有连接广播消息。返回发送数。同时持久化。"""
+    payload_json = json.dumps(payload)
+    sent = 0
+    for aid, conns in _connections.items():
+        for conn in list(conns):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(payload_json)
+                elif hasattr(conn, "send"):
+                    await conn.send(payload_json)
+                sent += 1
+            except Exception:
+                pass
+    # 同时持久化到 DB + chat log
+    try:
+        ms.save_message(
+            msg_id=str(uuid.uuid4()),
+            msg_type="broadcast",
+            from_agent=state.SYSTEM_AGENT_ID,
+            from_name="系统",
+            content=payload.get("content", ""),
+            ts=time.time(),
+            data_dir=config.DATA_DIR,
+            channel=channel,
+        )
+    except Exception:
+        pass
+    return sent
 
 def get_delivery_status(msg_id: str) -> dict[str, str]:
     return state._delivery_status.get(msg_id, {})
@@ -1440,59 +1495,6 @@ async def _restore_pipeline_dispatches() -> None:
 
 # ════════════════════════════════════════════════════════════
 
-# ── R38: Task notify broadcast ─────────────────────────────────────
-
-
-async def _broadcast_task_notify(
-        task: dict,
-        transition: str,
-        ) -> None:
-        """Broadcast MSG_TASK_NOTIFY to workspace members of the task's context.
-
-        transition is a short description e.g. 'SUBMITTED → WORKING'.
-        Also pushes to web viewer WS clients for live progress updates.
-        """
-        context_id = task.get("context_id", "")
-        if not context_id:
-            return
-        workspace = ws_mod.get_workspace(context_id)
-        if not workspace:
-            return
-        payload = json.dumps({
-            "type": p.MSG_TASK_NOTIFY,
-            "task_id": task["id"],
-            "name": task["name"],
-            "state": task["state"],
-            "transition": transition,
-            "assigned_role": task.get("assigned_role", ""),
-            "context_id": context_id,
-            "ts": time.time(),
-        })
-        targets = workspace.members
-        for agent_id in targets:
-            for conn in list(_connections.get(agent_id, set())):
-                try:
-                    if hasattr(conn, "send_str"):
-                        await conn.send_str(payload)
-                    elif hasattr(conn, "send"):
-                        await conn.send(payload)
-                except Exception:
-                    pass
-
-        # R41 C: Write task_notify to admin channel
-        try:
-            content_str = f"📊 {context_id} {task['name']}: {transition}"
-            ms.save_message(
-                msg_id=str(uuid.uuid4()), msg_type="broadcast",
-                from_agent="系统", from_name="系统",
-                content=content_str, ts=time.time(),
-                data_dir=config.DATA_DIR, channel=p.ADMIN_CHANNEL,
-            )
-        except Exception:
-            pass
-        logger.info("task_notify '%s' → %s (%s)", task["name"], context_id, transition)
-
-
 async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     """Admin-relay mode:
     - Non-admin (member) → relay ONLY to admin(s)
@@ -1517,9 +1519,8 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
     # R82 A1: Inbox fast path — skip all filters and routing
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
-        # _inbox:server → query command
+        # _inbox:server → handled by scenario matcher (rules handle it)
         if channel == f"{p.INBOX_CHANNEL_PREFIX}server":
-            await _handle_server_query(ws, sender_id, content)
             return
         # Otherwise → route directly to target agent's inbox (existing intercept handles it)
         # Fall through to normal inbox handling below
@@ -1541,14 +1542,13 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         logger.info("Rate-limited %s in '%s' (retry after %ds)", sender_id[:12], channel, retry_after)
         return
 
-    # R35: ! commands skip nonsense/duplicate filtering
-    if not content.startswith("!"):
-        if _is_nonsense(content, sender_id, channel):
-            logger.info("Nonsense msg filtered from %s in '%s': %s", sender_id[:12], channel, content[:40])
-            return
-        if _is_duplicate(content, sender_id):
-            logger.info("Duplicate msg filtered from %s: %s", sender_id[:12], content[:40])
-            return
+    # ── R35: Nonsense/duplicate filtering ──
+    if _is_nonsense(content, sender_id, channel):
+        logger.info("Nonsense msg filtered from %s in '%s': %s", sender_id[:12], channel, content[:40])
+        return
+    if _is_duplicate(content, sender_id):
+        logger.info("Duplicate msg filtered from %s: %s", sender_id[:12], content[:40])
+        return
 
     # Skip system/noise
     if any(content.startswith(p) for p in state._SILENT_PREFIXES) or content.strip("🤐") == "":
@@ -1591,32 +1591,7 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         name = m.group(1)
         if any(users.get(aid, {}).get("name") == name for aid in users):
             mention_names.add(name)
-    is_task = bool(mention_names) or content.startswith("!")
-
-    # ── R49: Universal ! command routing (works in any channel) ──
-    if content.startswith("!"):
-        # R100: 延迟导入避免循环依赖
-        from .commands import _ADMIN_COMMANDS as _cmds
-        cmd_name, params = command_utils._parse_command(content)
-        if not cmd_name or cmd_name not in _cmds:
-            available = ", ".join(f"!{k}" for k in sorted(_cmds))
-            await command_utils._send_cmd_response(ws, sender_id, "系统", f"❌ 未知命令.可用命令：{available}", channel)
-            return
-        cmd = _cmds[cmd_name]
-        allowed, reason = command_utils._check_command_permission(sender_id, cmd_name, cmd, params)
-        if not allowed:
-            await command_utils._send_cmd_response(ws, sender_id, "系统", f"❌ {reason}", channel)
-            return
-        try:
-            result = await cmd["handler"](sender_id, params)
-            command_utils._log_audit(sender_id, cmd_name, params, "success", result)
-            await command_utils._send_cmd_response(ws, sender_id, "系统", result, channel)
-        except Exception as e:
-            err_msg = f"❌ 执行失败: {e}"
-            command_utils._log_audit(sender_id, cmd_name, params, "error", err_msg)
-            logger.error("Admin cmd !%s failed: %s", cmd_name, e)
-            await _send_cmd_response(ws, sender_id, "系统", err_msg, channel)
-        return
+    is_task = bool(mention_names)
 
     # ── R35: _admin channel intercept ──
     if channel == p.ADMIN_CHANNEL:
@@ -1685,164 +1660,43 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
 
     # ── Channel resolution (fall back to lobby for unknown channels) ──
     resolved_workspace = None
-    if channel != p.LOBBY:
-        # R23: registration channel → skip workspace resolution
-        if channel == p.REGISTRATION_CHANNEL:
-            pass
-        else:
-            resolved_workspace = ws_mod.get_workspace(channel)
-            if not resolved_workspace:
-                # Unknown channel from Hermes built-in ws_bridge adapter
-                # (hardcoded chat_id="ws_bridge_group"). Try to auto-route
-                # to the sender's active workspace if they have exactly one.
-                agent_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
-                active = [w for w in agent_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
-                if len(active) == 1:
-                    resolved_workspace = active[0]
-                    channel = resolved_workspace.id
-                    logger.info(
-                        "Auto-routed %s to workspace '%s'",
-                        sender_id[:12], channel,
-                    )
-                else:
-                    logger.info("Unknown channel '%s' — falling back to lobby", channel)
-                    channel = p.LOBBY
+    if channel != p.LOBBY and channel != p.REGISTRATION_CHANNEL:
+        # R134: workspace subsystem removed — unknown channels fall back to lobby
+        logger.info("Unknown channel '%s' — falling back to lobby", channel)
+        channel = p.LOBBY
 
-    # ── R6: Broadcast permission check ──
+    # ── Lobby pause check ──
     allowed, reason = _can_broadcast(sender_id, channel, msg)
     if not allowed:
         await _send(ws, {"type": "error", "error": f"权限不足：{reason}"})
         return
 
-        # ── R42 D: Lobby pause intercept ──
+    # ── R42 D: Lobby pause intercept ──
     if state._LOBBY_PAUSED and channel == p.LOBBY:
-        # If sender has an active workspace, auto-route there
-        agent_workspaces = ws_mod.get_workspaces_for_agent(sender_id)
-        active = [w for w in agent_workspaces if w.state == ws_mod.WorkspaceState.ACTIVE]
-        if active:
-            channel = active[0].id
-            resolved_workspace = active[0]
-            logger.info("R42 lobby-pause: routed %s to workspace '%s'", sender_id[:12], channel)
-        else:
-            await _send(ws, {
-                "type": "error",
-                "error": f"🔒 管线 {state._LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息.请在工作区中发言.",
-            })
-            return
+        await _send(ws, {
+            "type": "error",
+            "error": f"🔒 管线 {state._LOBBY_PAUSED_ROUND} 进行中，大厅已暂停接收消息.",
+        })
+        return
 
-    # ── Channel-scoped routing ──────────────────────────────────────
-    if channel != p.LOBBY and resolved_workspace:
-            if resolved_workspace.state == ws_mod.WorkspaceState.ARCHIVED:
-                await _send(ws, {"type": "error", "error": f"Workspace '{channel}' is archived, read-only"})
-                return
+    # ── R6: Broadcast permission check ──
 
-            # Update activity
-            ws_mod.touch(channel)
+    broadcast = json.dumps({
+        "type": "broadcast",
+        "channel": channel,
+        # New unified field names
+        "from_name": sender_name,
+        "agent_id": sender_id,
+        # Legacy field names (Hermes built-in ws_bridge adapter reads these)
+        "from": sender_name,
+        "from_agent": sender_id,
+        "content": content,
+        "ts": time.time(),
+        # R11 P2.1: Mentions metadata
+        p.FIELD_MENTIONS: list(mention_names) if mention_names else None,
+        p.FIELD_IS_TASK: is_task or None,
+    })
 
-            # Only members + admin
-            member_ids = resolved_workspace.members
-            targets = [
-                (aid, conns) for aid, conns in _connections.items()
-                if (aid in member_ids or aid in admin_ids) and aid != sender_id
-            ]
-            if not targets:
-                logger.info("Workspace '%s': no online members, msg logged only", channel)
-                return
-
-            broadcast = json.dumps({
-                "type": "broadcast",
-                "channel": channel,
-                # New unified field names
-                "from_name": sender_name,
-                "agent_id": sender_id,
-                # Legacy field names (Hermes built-in ws_bridge adapter reads these)
-                "from": sender_name,
-                "from_agent": sender_id,
-                "content": content,
-                "ts": time.time(),
-                # R11 P2.1: Mentions metadata
-                p.FIELD_MENTIONS: list(mention_names) if mention_names else None,
-                p.FIELD_IS_TASK: is_task or None,
-            })
-
-            # Persist with channel
-            msg_id = msg.get("id", "") or str(uuid.uuid4())
-            try:
-                ms.save_message(
-                    msg_id=msg_id,
-                    msg_type="broadcast",
-                    from_agent=sender_id,
-                    from_name=sender_name,
-                    content=content,
-                    ts=time.time(),
-                    data_dir=config.DATA_DIR,
-                    channel=channel,
-                )
-            except Exception:
-                pass
-
-            sent = 0
-            target_names = []
-            # R11 P1.1: Track delivery
-            state._delivery_status[msg_id] = {}
-            for agent_id, conns in targets:
-                target_names.append(users.get(agent_id, {}).get("name", agent_id[:12]))
-                for conn in list(conns):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(broadcast)
-                        elif hasattr(conn, "send"):
-                            await conn.send(broadcast)
-                        sent += 1
-                    except Exception:
-                        pass
-                # R11 P1.1: Mark delivery
-                state._delivery_status[msg_id][agent_id] = p.DELIVERY_SENT
-
-            # R34 B: Send ACK with delivery stats (workspace path)
-            if msg_id:
-                _online = set(_connections.keys())
-                sent_list = []
-                offline_list = []
-                for aid in member_ids:
-                    if aid == sender_id:
-                        continue
-                    name = users.get(aid, {}).get("name", aid[:12])
-                    if aid in _online:
-                        sent_list.append(name)
-                    else:
-                        offline_list.append(name)
-                await _send(ws, {
-                    "type": "ack",
-                    "id": msg_id,
-                    "delivery": {
-                        "total": len(member_ids) - 1,  # exclude sender
-                        "sent": len(sent_list),
-                        "offline": len(offline_list),
-                        "targets": sent_list,
-                        "offline_targets": offline_list,
-                    }
-                })
-
-            # R11 P1.1: Send delivery_status to admin senders in workspace
-            if sender_role == "admin" and msg_id:
-                online = set(_connections.keys())
-                status_report = {}
-                for aid in member_ids:
-                    if aid == sender_id:
-                        continue
-                    name = users.get(aid, {}).get("name", aid[:12])
-                    status_report[name] = "sent" if aid in online else "offline"
-                await _send(ws, {
-                    "type": p.MSG_DELIVERY_STATUS,
-                    "id": msg_id,
-                    "status": status_report,
-                    "total": len(status_report),
-                    "delivered": sum(1 for s in status_report.values() if s == "sent"),
-                })
-
-            logger.info("Channel [%s] %s→%s: %s", channel, sender_name, ",".join(target_names), content[:60])
-            return
     # ── R24: Lobby routing with prefix classification ─────────────────
     if channel == p.LOBBY:
         msg_type, target_names = _sm.classify_lobby_message(content)
@@ -2075,134 +1929,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         # R82: removed MSG_SET_ACTIVE_CHANNEL broadcast
 
 
-
-# ── R82: _inbox:server query routing ─────────────────────
-
-
-async def _handle_server_query(ws, sender_id: str, content: str) -> None:
-    """Handle ! commands sent to _inbox:server channel.
-    Executes query commands and replies to sender's inbox.
-    """
-    if not content.startswith("!"):
-        return  # non-command silently ignored
-
-    sender_name = auth.get_agent_name(sender_id, sender_id[:12])
-    reply_ch = persistence.get_inbox_channel(sender_id)
-    if not reply_ch:
-        logger.warning("R82: Cannot reply to %s — no inbox channel", sender_id[:12])
-        return
-
-    parts = content.strip().split(maxsplit=1)
-    cmd = parts[0].lower() if parts else ""
-    params_str = parts[1] if len(parts) > 1 else ""
-
-    reply_text = ""
-
-    if cmd == "!agent_card":
-        sub_parts = params_str.split(maxsplit=1)
-        sub_cmd = sub_parts[0] if sub_parts else ""
-        if sub_cmd == "list":
-            cards = ac_mod.get_all_cards()
-            lines = [f"📇 Agent Cards ({len(cards)}):"]
-            for aid, card in sorted(cards.items()):
-                name = card.get("display_name", aid[:12])
-                roles = ", ".join(card.get("pipeline_roles", []))
-                status = card.get("status", "offline")
-                roles_str = f" 角色: {roles}" if roles else ""
-                lines.append(f"  {name} ({aid[:12]}...) [{status}] {roles_str}")
-            reply_text = "\n".join(lines)
-        else:
-            reply_text = f"❌ 未知子命令: !agent_card {sub_cmd}"
-
-    elif cmd == "!pipeline_status":
-        round_name = params_str.strip()
-        if round_name:
-            mgr = _ensure_pipeline_manager()
-            ctx = mgr.get(round_name)
-            if ctx:
-                reply_text = _ensure_engine().format_context(ctx)
-            else:
-                reply_text = f"❌ 管线 {round_name} 不存在"
-        else:
-            mgr = _ensure_pipeline_manager()
-            active = mgr.get_all_active()
-            if active:
-                lines = ["📋 活跃管线:"]
-                for ctx in sorted(active, key=lambda c: c.round_name):
-                    lines.append(f"  {ctx.round_name} [{ctx.task_kind.value}] {ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
-                reply_text = "\n".join(lines)
-            else:
-                reply_text = "📋 当前无活跃管线"
-
-    elif cmd == "!list_workspaces":
-        ws_list = ws_mod.get_all_workspaces()
-        if ws_list:
-            lines = [f"📋 工作区 ({len(ws_list)}):"]
-            for ws_item in ws_list:
-                state = ws_item.state.value
-                lines.append(f"  {ws_item.id} '{ws_item.name}' [{state}] members={len(ws_item.members)}")
-            reply_text = "\n".join(lines)
-        else:
-            reply_text = "📋 当前无工作区"
-
-    elif cmd == "!my_id":
-        reply_text = f"🆔 你的 agent_id: {sender_id}"
-
-    elif cmd == "!help":
-        reply_text = "📖 可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
-
-    else:
-        reply_text = f"❌ 未知命令: {cmd}\n可用查询: !agent_card list, !pipeline_status [R], !list_workspaces, !my_id"
-
-    if not reply_text:
-        return
-
-    # Reply to sender's inbox
-    try:
-        import time as _time
-        await _broadcast_to_channel(reply_ch, {
-            "type": "broadcast", "channel": reply_ch,
-            "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
-            "content": reply_text, "ts": _time.time(),
-        })
-        logger.info("R82: Replied to %s via %s for '%s'", sender_id[:12], reply_ch, content[:40])
-    except Exception as e:
-        logger.warning("R82: Failed to reply to %s: %s", sender_id[:12], e)
-
-
-# ── R11 P2.2: Membership change notification ────────────────────
-# ── R11 P2.2: Membership change notification ────────────────────
-
-
-async def _notify_member_changed(ws_id: str, member_id: str, event: str) -> None:
-    """Notify all workspace members of membership change (joined/removed)."""
-    resolved = ws_mod.get_workspace(ws_id)
-    if not resolved:
-        return
-    member_name = _get_agent_display(member_id)
-    payload = json.dumps({
-        "type": p.MSG_MEMBER_CHANGED,
-        p.FIELD_WORKSPACE_ID: ws_id,
-        p.FIELD_MEMBER_EVENT: event,
-        p.FIELD_TARGET_AGENT_ID: member_id,
-        "member_name": member_name,
-        "ts": time.time(),
-    })
-    targets = resolved.members | {member_id} if event == "joined" else resolved.members
-    for agent_id in targets:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-
-
-# ── R24: Lobby-specific rate limiter ─────────────────────────────────
-
-
 def _check_lobby_rate_limit(agent_id: str, role: str) -> tuple[bool, float]:
     """Check lobby-specific rate limit. P4 unlimited, P3=5/60s, P1/P2=2/60s."""
     if role == "admin":
@@ -2302,55 +2028,6 @@ async def _task_ack_timeout(admin_ws, task_id: str, target_name: str) -> None:
         pass
     logger.warning("Task %s ack timeout for %s", task_id, target_name)
 
-
-# ── R53: Channel switch verification ────────────────────────────
-
-
-async def _notify_rollcall_complete(ws_id: str) -> None:
-    """Verify all members have switched channels and notify host (R53)."""
-    ws_obj = ws_mod.get_workspace(ws_id)
-    if not ws_obj:
-        return
-    unconfirmed = []
-    for member_id in ws_obj.members:
-        ch = ""
-        if ch != ws_id:
-            unconfirmed.append(member_id)
-
-    users = auth.get_users()
-    payload = json.dumps({
-        "type": "broadcast",
-        "channel": ws_id,
-        "from_name": "系统",
-        "from": "系统",
-        "agent_id": "",
-        "from_agent": "",
-        "ts": time.time(),
-    })
-    if not unconfirmed:
-        content = "✅ 点名完成：全员活跃频道已锁定."
-        logger.info("R53: Roll-call complete for '%s' — all members confirmed", ws_id)
-    else:
-        names = [users.get(uid, {}).get("name", uid[:12]) for uid in unconfirmed]
-        content = f"⚠️ 点名完成（部分）：以下成员未确认频道切换：{', '.join(names)}"
-        logger.info("R53: Roll-call complete for '%s' — %d unconfirmed: %s", ws_id, len(unconfirmed), names)
-
-    payload = json.dumps({**json.loads(payload), "content": content})
-    for admin_id in ws_obj.admin_ids:
-        for conn in list(_connections.get(admin_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-    # R53: Cleanup ACK state
-    state._channel_ack_state.pop(ws_id, None)
-
-
-# ── R53: Channel switch ACK timeout (30s, replaces R37 3min) ───
-
 async def _channel_ack_timeout(ws_id: str) -> None:
     """30s timeout for channel switch ACK.
     On timeout: marks unresponsive members, calls _notify_rollcall_complete().
@@ -2399,73 +2076,6 @@ def _resolve_ws_by_ack_task_id(ack_task_id: str) -> str | None:
     return None
 
 
-# ── R12 P0.4: Workspace ready broadcast ────────────────────────────
-
-
-async def _broadcast_workspace_ready(ws_id: str, name: str, owner_name: str, members: set[str]) -> None:
-    """Broadcast workspace_ready to all members."""
-    from . import workspace as ws_mod
-    payload = ws_mod.build_workspace_ready(ws_id, name, owner_name, members)
-    payload_json = json.dumps(payload)
-    for agent_id in members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload_json)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload_json)
-            except Exception:
-                pass
-    logger.info("workspace_ready broadcast to %d members of '%s'", len(members), ws_id)
-
-
-# ── R12 P2: Stage completed broadcast ──────────────────────────────
-
-
-async def _broadcast_stage_completed(
-    ws_id: str,
-    completed_by: str,
-    stage: str,
-    output: str,
-    next_holder: str,
-    next_stage: str,
-) -> None:
-    """Notify next holder that a stage has been completed."""
-    workspace = ws_mod.get_workspace(ws_id)
-    if not workspace:
-        return
-    users = auth.get_users()
-    next_id = None
-    for aid, u in users.items():
-        if u.get("name") == next_holder:
-            next_id = aid
-            break
-    payload = json.dumps({
-        "type": p.MSG_STAGE_COMPLETED,
-        "workspace_id": ws_id,
-        "completed_by": completed_by,
-        "stage": stage,
-        "output": output,
-        "next_holder": next_holder,
-        "next_stage": next_stage,
-        "ts": time.time(),
-    })
-    targets = [next_id] if next_id else workspace.members
-    for agent_id in targets:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-    logger.info("stage_completed '%s' → %s (next: %s)", stage, next_holder, next_stage)
-
-
-# ── R6: Broadcast Permission Check ──────────────────────────────
-
-
 def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     """Check if agent can broadcast in the given channel.
     Returns (allowed: bool, reason: str).
@@ -2479,9 +2089,7 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     if channel == p.ADMIN_CHANNEL:
         if auth.is_global_admin(agent_id):
             return True, ""
-        if _is_any_workspace_admin(agent_id):
-            return True, ""
-        # R44: member broadcast allowed; _check_command_permission enforces pipeline_start only
+        # R44: member broadcast allowed
         return True, ""
 
     # R23: registration channel → allow (admin-relay handles routing)
@@ -2491,17 +2099,6 @@ def _can_broadcast(agent_id: str, channel: str, msg: dict) -> tuple[bool, str]:
     # Lobby: members can reply (routing already limits to admin-only)
     if channel == p.LOBBY:
         return True, ""
-
-    # Workspace: must be a member
-    members = ws_mod.get_workspace_members(channel)
-    if agent_id not in members:
-        return False, "您不是该工作区成员"
-
-    # R10: token ring permission check
-    reply_to = msg.get(p.FIELD_TOKEN_REPLY_TO)
-    allowed, reason = ws_mod.can_send_in_token_mode(channel, agent_id, reply_to)
-    if not allowed:
-        return False, reason
 
     return True, ""
 
@@ -3807,748 +3404,6 @@ async def handler(ws):
                 await _send(ws, result)
 
             # ★ 删除: elif msg_type == "approve" and agent_id:  — 旧 approve 路径已移除（R72）
-
-            elif msg_type == p.MSG_WORKSPACE_CREATE and agent_id:
-                # Bot requests creating a workspace → route to admin(s) for approval
-                ws_name = msg.get("name", "").strip()
-                if not ws_name:
-                    await _send(ws, {"type": "error", "error": "Missing workspace name"})
-                    continue
-                ws_id = f"{p.WORKSPACE_ID_PREFIX}{agent_id[:8]}-{ws_name[:20]}"
-                _users = auth.get_users()
-                _sender_name = _users.get(agent_id, {}).get("name") or \
-                               state._r72_users.get(agent_id, {}).get("name", agent_id)
-                _admin_ids = {aid for aid, u in _users.items() if u.get("role") == "admin"}
-                create_payload = json.dumps({
-                    "type": "broadcast",
-                    "channel": p.LOBBY,
-                    "content": f"@{agent_id} requests workspace: {ws_name}",
-                    "from_name": _sender_name,
-                    "agent_id": agent_id,
-                    "ts": time.time(),
-                    "_workspace_request": {
-                        "id": ws_id,
-                        "name": ws_name,
-                        "requester_id": agent_id,
-                    },
-                })
-                # Send to admin(s)
-                for admin_aid in _admin_ids:
-                    for conn in list(_connections.get(admin_aid, set())):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(create_payload)
-                            elif hasattr(conn, "send"):
-                                await conn.send(create_payload)
-                        except Exception:
-                            pass
-
-            elif msg_type == p.MSG_WORKSPACE_CREATE_APPROVED and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    ws_id = msg.get("id", "").strip()
-                    ws_name = msg.get("name", "").strip()
-                    owner_id = msg.get("owner_id", "").strip()
-                    owner_name = msg.get("owner_name", "").strip()
-                    if ws_id and owner_id:
-                        result = ws_mod.create_workspace(ws_id, ws_name or ws_id, owner_id, owner_name)
-                        if result:
-                            # R82: removed auto-bind active channel
-                            await _send(ws, {"type": "ok", "workspace_id": ws_id})
-                            logger.info("Workspace '%s' created by admin — owner %s channel set to '%s'",
-                                         ws_id, owner_id[:20], ws_id)
-                            # R12 P0.4: Send workspace_ready notification
-                            asyncio.create_task(
-                                _broadcast_workspace_ready(ws_id, ws_name or ws_id, owner_name or owner_id, result.members)
-                            )
-                        else:
-                            await _send(ws, {"type": "error", "error": f"Failed to create workspace '{ws_id}' (owner may have too many active)"})
-
-            elif msg_type == p.MSG_WORKSPACE_CLOSE and agent_id:
-                ws_id = msg.get("workspace_id", "").strip()
-                if not ws_id:
-                    await _send(ws, {"type": "error", "error": "Missing workspace_id"})
-                    continue
-                if ws_mod.start_closing(ws_id):
-                    await _send(ws, {"type": "ok", "workspace_id": ws_id, "message": f"Workspace '{ws_id}' closing initiated"})
-                    # Notify members
-                    asyncio.create_task(_broadcast_workspace_closing(ws_id))
-                else:
-                    await _send(ws, {"type": "error", "error": f"Failed to close workspace '{ws_id}' (not found or not active)"})
-
-            elif msg_type == p.MSG_WORKSPACE_ADD_MEMBER and agent_id:
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                member_id = msg.get(p.FIELD_MEMBER_ID, "").strip()
-                if ws_id and member_id:
-                    resolved_workspace = ws_mod.get_workspace(ws_id)
-                    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.ACTIVE:
-                        if auth.can_manage_workspace(ws_id, agent_id):
-                            if ws_mod.add_member(ws_id, member_id):
-                                # R82: removed auto-set active channel
-
-                                await _send(ws, {"type": "ok", "workspace_id": ws_id, "member_id": member_id})
-                                logger.info("Member %s added to workspace '%s'", member_id, ws_id)
-                                # R11 P2.2: Notify workspace members of membership change
-                                asyncio.create_task(_notify_member_changed(ws_id, member_id, "joined"))
-                            else:
-                                await _send(ws, {"type": "error", "error": "Failed to add member"})
-                        else:
-                            await _send(ws, {"type": "error", "error": "Permission denied"})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Workspace not found or not active"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Missing workspace_id or member_id"})
-
-            elif msg_type == p.MSG_WORKSPACE_REMOVE_MEMBER and agent_id:
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                member_id = msg.get(p.FIELD_MEMBER_ID, "").strip()
-                if ws_id and member_id:
-                    resolved_workspace = ws_mod.get_workspace(ws_id)
-                    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.ACTIVE:
-                        if auth.can_manage_workspace(ws_id, agent_id):
-                            if ws_mod.remove_member(ws_id, member_id):
-                                await _send(ws, {"type": "ok", "workspace_id": ws_id, "member_id": member_id})
-                                logger.info("Member %s removed from workspace '%s'", member_id, ws_id)
-                                # R11 P2.2: Notify workspace members of membership change
-                                asyncio.create_task(_notify_member_changed(ws_id, member_id, "removed"))
-                            else:
-                                await _send(ws, {"type": "error", "error": "Failed to remove member"})
-                        else:
-                            await _send(ws, {"type": "error", "error": "Permission denied"})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Workspace not found or not active"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Missing workspace_id or member_id"})
-
-            elif msg_type == p.MSG_SET_ADMIN and agent_id:
-                # Only global admin can set workspace admin
-                if auth.is_global_admin(agent_id):
-                    ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                    target_id = msg.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                    target_name = msg.get("target_name", target_id).strip()
-                    if ws_id and target_id:
-                        if auth.set_workspace_admin(ws_id, target_id, agent_id):
-                            await _send(ws, {"type": "ok", "workspace_id": ws_id, "admin_id": target_id, "admin_name": target_name})
-                            logger.info("Agent %s set as admin of workspace '%s' by %s", target_id[:20], ws_id, agent_id[:20])
-                        else:
-                            await _send(ws, {"type": "error", "error": "Failed to set admin"})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Missing workspace_id or target_agent_id"})
-
-
-            # ── R12 P0.2: Task Assignment ────────────────────────
-            elif msg_type == p.MSG_TASK_ASSIGNMENT and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") != "admin":
-                    await _send(ws, {"type": "error", "error": "Permission denied: only admin can assign tasks"})
-                    continue
-
-                target_name = msg.get(p.FIELD_TARGET_AGENT, "").strip()
-                target_id = msg.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                step = msg.get(p.FIELD_TASK_STEP, "")
-                description = msg.get(p.FIELD_TASK_DESC, "")
-                channel = msg.get(p.FIELD_CHANNEL, p.LOBBY)
-                task_id = str(time.time())
-
-                # Resolve target agent_id if only name provided
-                if not target_id and target_name:
-                    for aid, u in users.items():
-                        if u.get("name") == target_name:
-                            target_id = aid
-                            break
-
-                if not target_id:
-                    await _send(ws, {"type": "error", "error": f"Target agent '{target_name}' not found"})
-                    continue
-
-                assign_payload = {
-                    "type": p.MSG_TASK_ASSIGNMENT,
-                    "task_id": task_id,
-                    "channel": channel,
-                    "from_name": users.get(agent_id, {}).get("name", agent_id),
-                    "agent_id": agent_id,
-                    p.FIELD_TARGET_AGENT: target_name or users.get(target_id, {}).get("name", target_id),
-                    p.FIELD_TARGET_AGENT_ID: target_id,
-                    p.FIELD_TASK_STEP: step,
-                    p.FIELD_TASK_DESC: description,
-                    "ts": time.time(),
-                }
-
-                target_conns = _connections.get(target_id, set())
-                if target_conns:
-                    payload_json = json.dumps(assign_payload)
-                    for conn in list(target_conns):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(payload_json)
-                            elif hasattr(conn, "send"):
-                                await conn.send(payload_json)
-                        except Exception:
-                            pass
-                    await _send(ws, {
-                        "type": "delivery_status",
-                        "task_id": task_id,
-                        "status": "delivered",
-                        "message": f"✅ 已送达目标 {target_name or target_id[:12]}，等待响应",
-                    })
-                    state._task_ack_timers[task_id] = asyncio.create_task(
-                        _task_ack_timeout(ws, task_id, target_name or target_id[:12])
-                    )
-                    logger.info("Task assigned to %s (task_id=%s): %s", target_id[:12], task_id, description[:60])
-                else:
-                    state._offline_push_queue.setdefault(target_id, []).append(assign_payload)
-                    if target_id not in state._offline_timers:
-                        state._offline_timers[target_id] = asyncio.create_task(
-                            _flush_offline_push(target_id)
-                        )
-                    await _send(ws, {
-                        "type": "delivery_status",
-                        "task_id": task_id,
-                        "status": "queued",
-                        "message": f"❌ 目标 {target_name or target_id[:12]} 离线，消息已保存，上线后自动补发",
-                    })
-                    logger.info("Task for %s queued (offline): %s", target_id[:12], description[:60])
-
-            # ── R29: task_switch — fire-and-forget ─────────────────
-            elif msg_type == p.MSG_TASK_SWITCH and agent_id:
-                _users = auth.get_users()
-                if _users.get(agent_id, {}).get("role") != "admin":
-                    await _send(ws, {"type": "error", "error": "权限不足：仅管理员可发送 task_switch"})
-                    continue
-
-                target_id = msg.get("target", "").strip()
-                if not target_id:
-                    await _send(ws, {"type": "error", "error": "缺少 target 字段"})
-                    continue
-
-                # Resolve target by name if only name provided
-                if target_id not in _users:
-                    for aid, u in _users.items():
-                        if u.get("name") == target_id:
-                            target_id = aid
-                            break
-
-                if target_id and target_id in _users:
-                    # R82: removed set_agent_channel
-                    logger.info("Admin %s task-switched agent %s to lobby (R82: channel tracking removed)",
-                                 agent_id[:12], target_id[:12])
-                else:
-                    logger.info("Admin %s task-switch target '%s' not found (silently ignored)",
-                                 agent_id[:12], msg.get("target", "")[:20])
-                # Fire-and-forget: 不回复 ACK
-
-            # ── R29/R34: workspace_reset ──────────────────────────
-            elif msg_type == p.MSG_WORKSPACE_RESET and agent_id:
-                _users = auth.get_users()
-                if _users.get(agent_id, {}).get("role") != "admin":
-                    await _send(ws, {"type": "error", "error": "权限不足：仅管理员可执行 workspace_reset"})
-                    continue
-
-                workspace_id = msg.get("workspace_id", "").strip()
-                all_flag = msg.get("all", False)
-                target_id = msg.get("target", "").strip()
-
-                # ── R34: Workspace-scoped reset ──────────────────
-                if workspace_id:
-                    ws_info = ws_mod.get_workspace(workspace_id)
-                    if not ws_info:
-                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 不存在"})
-                        continue
-                    if ws_info.state == ws_mod.WorkspaceState.CLOSING:
-                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 正在关闭中，无法重置"})
-                        continue
-                    if ws_info.state == ws_mod.WorkspaceState.ARCHIVED:
-                        await _send(ws, {"type": "error", "error": f"工作室 '{workspace_id}' 已归档，无法重置"})
-                        continue
-
-                    sender_name = _users.get(agent_id, {}).get("name") or \
-                                   state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-                    member_ids = ws_info.members
-
-                    reset_content = f"⚠️ 工作室 {workspace_id} 已重置，请各成员确认就位 🫡"
-                    broadcast_payload = {
-                        "type": "broadcast",
-                        "channel": workspace_id,
-                        "subtype": "workspace_reset",
-                        "force": True,
-                        "from_name": sender_name,
-                        "agent_id": agent_id,
-                        "from": sender_name,
-                        "from_agent": agent_id,
-                        "content": reset_content,
-                        "ts": time.time(),
-                    }
-                    broadcast_json = json.dumps(broadcast_payload)
-
-                    sent = 0
-                    offline = 0
-                    target_names = []
-                    offline_names = []
-                    _online = set(_connections.keys())
-
-                    for mid in member_ids:
-                        name = _users.get(mid, {}).get("name") or \
-                               state._r72_users.get(mid, {}).get("name", mid[:12])
-                        if mid in _online:
-                            for conn in list(_connections.get(mid, set())):
-                                try:
-                                    if hasattr(conn, "send_str"):
-                                        await conn.send_str(broadcast_json)
-                                    elif hasattr(conn, "send"):
-                                        await conn.send(broadcast_json)
-                                    sent += 1
-                                except Exception:
-                                    pass
-                            target_names.append(name)
-                        else:
-                            offline += 1
-                            offline_names.append(name)
-                            state._offline_push_queue.setdefault(mid, []).append({
-                                "type": "broadcast",
-                                "channel": workspace_id,
-                                "subtype": "workspace_reset",
-                                "force": True,
-                                "from_name": sender_name,
-                                "agent_id": agent_id,
-                                "content": reset_content,
-                                "ts": time.time(),
-                            })
-                            if mid not in state._offline_timers:
-                                state._offline_timers[mid] = asyncio.create_task(
-                                    _flush_offline_push(mid)
-                                )
-
-                        # R82: removed set_agent_channel
-
-                    reset_id = str(uuid.uuid4())
-                    await _send(ws, {
-                        "type": "ack",
-                        "id": reset_id,
-                        "delivery": {
-                            "total": len(member_ids),
-                            "sent": sent,
-                            "offline": offline,
-                            "targets": target_names,
-                            "offline_targets": offline_names,
-                        }
-                    })
-                    logger.info("Admin %s reset workspace '%s': %d sent, %d offline",
-                                 agent_id[:12], workspace_id, sent, offline)
-
-                # ── R29: Global reset (all: true) ────────────────
-                elif all_flag:
-                    # R82: removed global agent channel reset
-                    logger.info("Admin %s reset ALL agents (R82: channel tracking removed)", agent_id[:12])
-                    await _send(ws, {"type": "ack", "status": "ok",
-                                     "message": f"✅ 已重置全部 {len(_users)} 个成员到 lobby"})
-
-                # ── R29: Single-target reset ─────────────────────
-                elif target_id:
-                    if target_id not in _users:
-                        for aid, u in _users.items():
-                            if u.get("name") == target_id:
-                                target_id = aid
-                                break
-                    if target_id and target_id in _users:
-                        # R82: removed set_agent_channel
-                        target_name = _users.get(target_id, {}).get("name", target_id[:12])
-                        logger.info("Admin %s reset agent %s to lobby", agent_id[:12], target_id[:12])
-                        await _send(ws, {"type": "ack", "status": "ok",
-                                         "message": f"✅ 已重置 {target_name} 到 lobby"})
-                    else:
-                        await _send(ws, {"type": "error", "error": f"目标成员 '{msg.get('target', '')}' 不存在"})
-
-                else:
-                    await _send(ws, {"type": "error", "error": "请指定 workspace_id、target 或设置 all: true"})
-
-            # ── R67 C1: Heartbeat — update last_online silently ──────
-            elif msg_type == p.MSG_HEARTBEAT:
-                agent_id = sender_id
-                card = ac_mod.get_agent_card(agent_id)
-                if card:
-                    card["last_online"] = time.time()
-                    card["status"] = "online"
-                    ac_mod.save_cards()
-                continue  # do NOT broadcast heartbeat
-
-            # ── R53 A-4: Channel switch ACK ──────────────────────
-            elif msg_type == p.MSG_ACK and agent_id:
-                ack_task_id = msg.get(p.FIELD_TASK_ID, "")
-                status = msg.get(p.FIELD_TASK_STATUS, "switched")  # "switched" | "failed"
-                channel = msg.get(p.FIELD_CHANNEL, "")
-
-                # Find matching channel_ack_state by ack_task_id
-                ws_id = _resolve_ws_by_ack_task_id(ack_task_id)
-                if not ws_id or ws_id not in state._channel_ack_state:
-                    continue  # stale ACK or not waiting
-
-                state = state._channel_ack_state[ws_id]
-                if status == "switched":
-                    state["acked_members"][agent_id] = time.time()
-
-                    # ── R81 B1: ACK 后自动加入工作区 ──
-                    try:
-                        ack_ch = "" or ""
-                        if ack_ch and ack_ch.startswith(p.WORKSPACE_ID_PREFIX):
-                            ack_ws = ws_mod.get_workspace(ack_ch)
-                            if ack_ws and agent_id not in ack_ws.members:
-                                ws_mod.add_member(ack_ch, agent_id)
-                                logger.info(
-                                    "R81 B1: Auto-added %s to workspace %s on ACK",
-                                    agent_id[:12], ack_ch[:20],
-                                )
-                    except Exception as e:
-                        logger.warning("R81 B1: Auto-add on ACK failed: %s", e)
-
-                    await _send(ws, {"type": "ack", "status": "ok",
-                                     "message": "✅ 频道切换已确认"})
-
-                    # All online members acknowledged?
-                    if set(state["acked_members"].keys()) >= state["online_members"]:
-                        state["timer"].cancel()
-                        asyncio.create_task(_notify_rollcall_complete(ws_id))
-                # "failed" → record but don't block
-
-            # ── R12 P0.3: Task ACK ──────────────────────────────
-            elif msg_type == p.MSG_TASK_ACK and agent_id:
-                task_id = msg.get(p.FIELD_TASK_ID, "")
-                status = msg.get(p.FIELD_TASK_STATUS, "accepted")
-                reason = msg.get(p.FIELD_TASK_REASON, "")
-
-                timer = state._task_ack_timers.pop(task_id, None)
-                if timer:
-                    timer.cancel()
-
-                users = auth.get_users()
-                admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                sender_name = users.get(agent_id, {}).get("name") or \
-                              state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-
-                if status == "accepted":
-                    # ★ R53 B-2: Advance task from submitted → working
-                    task = ts.get_task(task_id, config.DATA_DIR)
-                    if task and task.get("state") == p.TaskState.SUBMITTED.value:
-                        ts.update_task(task_id, state=p.TaskState.WORKING.value, data_dir=config.DATA_DIR)
-                        logger.info("R53: Task %s advanced to WORKING (ack by %s)", task_id, agent_id[:12])
-
-                    ack_msg = json.dumps({
-                        "type": p.MSG_DELIVERY_STATUS,
-                        "task_id": task_id,
-                        "status": "accepted",
-                        "agent_id": agent_id,
-                        "agent_name": sender_name,
-                        "message": f"✅ {sender_name} 已接受任务",
-                        "ts": time.time(),
-                    })
-                    for admin_id in admin_ids:
-                        for conn in list(_connections.get(admin_id, set())):
-                            try:
-                                if hasattr(conn, "send_str"):
-                                    await conn.send_str(ack_msg)
-                                elif hasattr(conn, "send"):
-                                    await conn.send(ack_msg)
-                            except Exception:
-                                pass
-                    logger.info("Task %s accepted by %s", task_id, agent_id[:12])
-                elif status == "rejected":
-                    reject_msg = json.dumps({
-                        "type": p.MSG_DELIVERY_STATUS,
-                        "task_id": task_id,
-                        "status": "rejected",
-                        "agent_id": agent_id,
-                        "agent_name": sender_name,
-                        "reason": reason,
-                        "message": f"❌ {sender_name} 拒绝了任务：{reason}",
-                        "ts": time.time(),
-                    })
-                    for admin_id in admin_ids:
-                        for conn in list(_connections.get(admin_id, set())):
-                            try:
-                                if hasattr(conn, "send_str"):
-                                    await conn.send_str(reject_msg)
-                                elif hasattr(conn, "send"):
-                                    await conn.send(reject_msg)
-                            except Exception:
-                                pass
-                    logger.info("Task %s rejected by %s: %s", task_id, agent_id[:12], reason)
-                else:
-                    await _send(ws, {"type": "error", "error": "Permission denied: only global admin can set workspace admin"})
-
-            # ── R15: Workspace Admin Request ──────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST and agent_id:
-                users = auth.get_users()
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                reason = msg.get(p.FIELD_REASON, "").strip()
-                if not ws_id:
-                    await _send(ws, {"type": "error", "error": "缺少 workspace_id"})
-                    continue
-                resolved = ws_mod.get_workspace(ws_id)
-                if not resolved:
-                    await _send(ws, {"type": "error", "error": "工作室不存在"})
-                    continue
-                if agent_id not in resolved.members:
-                    await _send(ws, {"type": "error", "error": "您不是该工作室成员"})
-                    continue
-                if agent_id in resolved.admin_ids or agent_id == resolved.owner_id:
-                    await _send(ws, {"type": "error", "error": "您已是该工作室的管理员"})
-                    continue
-                success, msg_text = ws_mod.submit_admin_request(ws_id, agent_id, reason)
-                if not success:
-                    await _send(ws, {"type": "error", "error": msg_text})
-                    continue
-                await _send(ws, {"type": "ack", "status": "submitted", "message": msg_text})
-                # Notify all global admins
-                requester_name = users.get(agent_id, {}).get("name", agent_id[:12])
-                admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                notify_payload = json.dumps({
-                    "type": p.MSG_ADMIN_REQUEST,
-                    "workspace_id": ws_id,
-                    "requester_id": agent_id,
-                    "requester_name": requester_name,
-                    "reason": reason,
-                    "ts": time.time(),
-                })
-                for admin_id in admin_ids:
-                    for conn in list(_connections.get(admin_id, set())):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(notify_payload)
-                            elif hasattr(conn, "send"):
-                                await conn.send(notify_payload)
-                        except Exception:
-                            pass
-                logger.info("Admin request from %s for workspace '%s': %s", agent_id[:12], ws_id, reason[:60])
-
-            # ── R15: Workspace Admin Approved ─────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST_APPROVED and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") != "admin":
-                    await _send(ws, {"type": "error", "error": "权限不足：仅全局管理员可审批"})
-                    continue
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = msg.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                target_name = msg.get(p.FIELD_TARGET_AGENT, "").strip()
-                if not ws_id or not target_id:
-                    await _send(ws, {"type": "error", "error": "缺少 workspace_id 或 target_agent_id"})
-                    continue
-                # Resolve target_id by name if needed
-                if not target_id and target_name:
-                    for aid, u in users.items():
-                        if u.get("name") == target_name:
-                            target_id = aid
-                            break
-                if not target_id:
-                    await _send(ws, {"type": "error", "error": f"未找到目标成员 {target_name}"})
-                    continue
-                # Update request status
-                success, msg_text = ws_mod.approve_admin_request(ws_id, target_id, agent_id)
-                if not success:
-                    await _send(ws, {"type": "error", "error": msg_text})
-                    continue
-                # Call set_admin
-                target_name_resolved = target_name or users.get(target_id, {}).get("name", target_id[:12])
-                if not auth.set_workspace_admin(ws_id, target_id, agent_id):
-                    await _send(ws, {"type": "error", "error": "设置管理员失败"})
-                    continue
-                # Notify the applicant
-                notify_payload = json.dumps({
-                    "type": p.MSG_ADMIN_NOTIFICATION,
-                    "workspace_id": ws_id,
-                    "status": "approved",
-                    "message": f"✅ 你已成为 {ws_id} 的管理员",
-                    "ts": time.time(),
-                })
-                for conn in list(_connections.get(target_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(notify_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(notify_payload)
-                    except Exception:
-                        pass
-                # Broadcast to workspace
-                broadcast_payload = json.dumps({
-                    "type": "broadcast",
-                    "channel": ws_id,
-                    "from_name": "系统",
-                    "content": f"{target_name_resolved} 已成为 {ws_id} 的管理员",
-                    "ts": time.time(),
-                })
-                for member_id in resolved.members if (resolved := ws_mod.get_workspace(ws_id)) else set():
-                    for conn in list(_connections.get(member_id, set())):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(broadcast_payload)
-                            elif hasattr(conn, "send"):
-                                await conn.send(broadcast_payload)
-                        except Exception:
-                            pass
-                await _send(ws, {"type": "ack", "message": f"✅ {target_name_resolved} 已成为管理员"})
-                logger.info("Admin request approved: %s → admin of '%s' by %s", target_id[:12], ws_id, agent_id[:12])
-
-            # ── R15: Workspace Admin Rejected ─────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST_REJECTED and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") != "admin":
-                    await _send(ws, {"type": "error", "error": "权限不足：仅全局管理员可审批"})
-                    continue
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = msg.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                target_name = msg.get(p.FIELD_TARGET_AGENT, "").strip()
-                reject_reason = msg.get(p.FIELD_REASON, "").strip()
-                if not ws_id or not target_id:
-                    await _send(ws, {"type": "error", "error": "缺少 workspace_id 或 target_agent_id"})
-                    continue
-                if not target_id and target_name:
-                    for aid, u in users.items():
-                        if u.get("name") == target_name:
-                            target_id = aid
-                            break
-                if not target_id:
-                    await _send(ws, {"type": "error", "error": f"未找到目标成员 {target_name}"})
-                    continue
-                success, msg_text = ws_mod.reject_admin_request(ws_id, target_id, agent_id, reject_reason)
-                if not success:
-                    await _send(ws, {"type": "error", "error": msg_text})
-                    continue
-                # Notify the applicant
-                reject_payload = json.dumps({
-                    "type": p.MSG_ADMIN_NOTIFICATION,
-                    "workspace_id": ws_id,
-                    "status": "rejected",
-                    "reason": reject_reason,
-                    "message": f"❌ 申请被拒绝：{reject_reason}" if reject_reason else "❌ 申请被拒绝",
-                    "ts": time.time(),
-                })
-                for conn in list(_connections.get(target_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(reject_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(reject_payload)
-                    except Exception:
-                        pass
-                await _send(ws, {"type": "ack", "message": f"✅ 已拒绝 {target_name or target_id[:12]} 的管理员申请"})
-                logger.info("Admin request rejected: %s for '%s' by %s, reason: %s", target_id[:12], ws_id, agent_id[:12], reject_reason)
-
-            elif msg_type == p.MSG_MANAGE_MEMBER and agent_id:
-                # Workspace admin can add/remove members in their workspace
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = msg.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                action = msg.get(p.FIELD_ACTION, "").strip()
-                if ws_id and target_id and action:
-                    resolved_workspace = ws_mod.get_workspace(ws_id)
-                    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.ACTIVE:
-                        if auth.can_manage_workspace(ws_id, agent_id):
-                            if action == "add":
-                                if ws_mod.add_member(ws_id, target_id):
-                                    await _send(ws, {"type": "ok", "workspace_id": ws_id, "member_id": target_id, "action": "add"})
-                                    logger.info("Member %s added to workspace '%s' by admin %s", target_id[:20], ws_id, agent_id[:20])
-                                else:
-                                    await _send(ws, {"type": "error", "error": "Failed to add member"})
-                            elif action == "remove":
-                                if ws_mod.remove_member(ws_id, target_id):
-                                    await _send(ws, {"type": "ok", "workspace_id": ws_id, "member_id": target_id, "action": "remove"})
-                                    logger.info("Member %s removed from workspace '%s' by admin %s", target_id[:20], ws_id, agent_id[:20])
-                                else:
-                                    await _send(ws, {"type": "error", "error": "Failed to remove member"})
-                            else:
-                                await _send(ws, {"type": "error", "error": f"Unknown action '{action}': use 'add' or 'remove'"})
-                        else:
-                            await _send(ws, {"type": "error", "error": "Permission denied"})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Workspace not found or not active"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Missing workspace_id, target_agent_id, or action"})
-
-            elif msg_type == p.MSG_WORKSPACE_ACK_CLOSE and agent_id:
-                ws_id = msg.get("workspace_id", "").strip()
-                if ws_id:
-                    ws_mod.confirm_ack(ws_id, agent_id)
-                    resolved_workspace = ws_mod.get_workspace(ws_id)
-                    if resolved_workspace and resolved_workspace.closing_acks >= resolved_workspace.members:
-                        await _broadcast_workspace_closing(ws_id, force_finalize=True)
-
-            elif msg_type == "approve_web" and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    code = msg.get("code", "").strip().upper()
-                    name = msg.get("name", "大宏")
-                    result = auth.approve_web_bind_code(code, name)
-                    if result.get("type") == "approve_ok":
-                        persistence.save_web_bind_codes(config.DATA_DIR)
-                        persistence.save_web_sessions(config.DATA_DIR)
-                        logger.info("Web viewer '%s' approved via WS", name)
-                    await _send(ws, result)
-
-            elif msg_type == p.MSG_TOKEN_SET_MODE and agent_id:
-                # Admin only: set token/free mode
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                    mode = msg.get(p.FIELD_TOKEN_MODE, "").strip()
-                    if ws_id and mode:
-                        if ws_mod.set_token_mode(ws_id, mode):
-                            await _send(ws, {"type": p.MSG_TOKEN_MODE_SET, "workspace_id": ws_id, "mode": mode})
-                            logger.info("Admin %s set workspace '%s' token mode → %s", agent_id[:20], ws_id, mode)
-                        else:
-                            await _send(ws, {"type": "error", "error": "Failed to set token mode"})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Missing workspace_id or mode"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Permission denied: only admin can change token mode"})
-
-            elif msg_type == p.MSG_TOKEN_SET_ORDER and agent_id:
-                # Admin only: set token order
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                    order = msg.get(p.FIELD_TOKEN_ORDER, [])
-                    if ws_id and order:
-                        if ws_mod.set_token_order(ws_id, order):
-                            await _send(ws, {"type": p.MSG_TOKEN_ORDER_SET, "workspace_id": ws_id, "order": order})
-                            logger.info("Admin %s set workspace '%s' token order", agent_id[:20], ws_id)
-                    else:
-                        await _send(ws, {"type": "error", "error": "Missing workspace_id or order"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Permission denied"})
-
-            elif msg_type == p.MSG_TOKEN_ADVANCE and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                    next_token = msg.get(p.FIELD_TOKEN_CURRENT, 0)
-                    if ws_id:
-                        if ws_mod.advance_token(ws_id, next_token):
-                            stats = ws_mod.get_token_status(ws_id)
-                            await _send(ws, {"type": p.MSG_TOKEN_ADVANCED, "workspace_id": ws_id, **stats})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Missing workspace_id"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Permission denied"})
-
-            elif msg_type == p.MSG_TOKEN_SKIP and agent_id:
-                users = auth.get_users()
-                if users.get(agent_id, {}).get("role") == "admin":
-                    ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                    if ws_id:
-                        if ws_mod.skip_token(ws_id):
-                            stats = ws_mod.get_token_status(ws_id)
-                            await _send(ws, {"type": p.MSG_TOKEN_SKIPPED, "workspace_id": ws_id, **stats})
-                        else:
-                            await _send(ws, {"type": "error", "error": "Cannot skip: already at end of order"})
-                else:
-                    await _send(ws, {"type": "error", "error": "Permission denied"})
-
-            elif msg_type == p.MSG_TOKEN_STATUS and agent_id:
-                ws_id = msg.get(p.FIELD_WORKSPACE_ID, "").strip()
-                if ws_id:
-                    stats = ws_mod.get_token_status(ws_id)
-                    if stats:
-                        await _send(ws, {"type": p.MSG_TOKEN_STATUS_RESULT, "workspace_id": ws_id, **stats})
-                    else:
-                        await _send(ws, {"type": "error", "error": "Workspace not found"})
-
             elif msg_type == "ping":
                 await _send(ws, {"type": "pong"})
 
@@ -4563,94 +3418,6 @@ async def handler(ws):
             if not _connections[agent_id]:
                 del _connections[agent_id]
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
-
-
-# ── Workspace Closing ──────────────────────────────────────────────
-
-async def _broadcast_workspace_closing(ws_id: str, force_finalize: bool = False) -> None:
-    """Notify workspace members of impending close and wait for ACKs."""
-    resolved_workspace = ws_mod.get_workspace(ws_id)
-    if not resolved_workspace or resolved_workspace.state != ws_mod.WorkspaceState.CLOSING:
-        return
-
-    deadline_ts = time.time() + p.WORKSPACE_CLOSING_TIMEOUT
-    payload = json.dumps({
-        "type": p.MSG_WORKSPACE_CLOSING,
-        p.FIELD_WORKSPACE_ID: ws_id,
-        p.FIELD_REASON: "task_completed",
-        p.FIELD_DEADLINE_TS: deadline_ts,
-        p.FIELD_ACK_REQUIRED: True,
-    })
-
-    # Broadcast to all members
-    for agent_id in resolved_workspace.members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-
-    if force_finalize:
-        ws_mod.finalize_close(ws_id)
-        await _broadcast_workspace_archived(ws_id, resolved_workspace)
-        return
-
-    # Wait for ACKs with timeout
-    await asyncio.sleep(p.WORKSPACE_CLOSING_TIMEOUT)
-
-    # Force-close any unacked members
-    resolved_workspace = ws_mod.get_workspace(ws_id)
-    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.CLOSING:
-        unacked = resolved_workspace.members - resolved_workspace.closing_acks
-        if unacked:
-            logger.warning("Workspace '%s': force-closing unacked members: %s", ws_id, unacked)
-            for aid in unacked:
-                resolved_workspace.closing_acks.add(aid)
-        ws_mod.finalize_close(ws_id)
-        await _broadcast_workspace_archived(ws_id, resolved_workspace)
-
-
-# ── Broadcast Workspace Archived ──────────────────────────────────
-
-
-async def _broadcast_workspace_archived(ws_id: str, resolved_workspace=None) -> None:
-    """Broadcast that workspace has been archived — Web UI uses to regroup tab."""
-    if resolved_workspace is None:
-        resolved_workspace = ws_mod.get_workspace(ws_id)
-    if not resolved_workspace:
-        return
-    # R82: removed active channel reset — bot uses inbox only
-    logger.info("R82: Workspace '%s' archived — no channel reset", ws_id)
-    arch_payload = json.dumps({
-        "type": "broadcast",
-        "channel": ws_id,
-        "from_name": "系统",
-        "content": f"workspace {ws_id} 已归档",
-        "_workspace_event": "archived",
-        "workspace_id": ws_id,
-        "ts": time.time(),
-    })
-    for agent_id in resolved_workspace.members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(arch_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(arch_payload)
-            except Exception:
-                pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# R126: scenario_matcher rule registration
-# ═══════════════════════════════════════════════════════════════════════
-
-from . import scenario_matcher as _sm
-
-# ── Handle callbacks (each calls existing main.py functions) ────────
 
 async def _sm_handle_loopback(ws, agent_id: str, msg: dict, matched) -> bool:
     """Rule 10: test ✅ loopback."""
@@ -4831,13 +3598,6 @@ async def _sm_handle_fail(ws, agent_id: str, msg: dict, matched) -> bool:
     return True
 
 
-async def _sm_handle_exclamation(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 80: ! command → passthrough to normal routing."""
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    logger.info("[Relay] 透传: %s 发送 ! 命令到 _inbox:server", sender_name)
-    return False
-
-
 async def _sm_handle_catchall(ws, agent_id: str, msg: dict, matched) -> bool:
     """Rule 90: no match → store silently."""
     content = (msg.get("content") or "").strip()
@@ -4861,6 +3621,8 @@ async def _sm_handle_catchall(ws, agent_id: str, msg: dict, matched) -> bool:
 
 
 # ── Register all rules ──────────────────────────────────────────────
+
+from . import scenario_matcher as _sm
 
 _sm.register_rule(_sm.HandlerRule(
     match=_sm.match_loopback,
@@ -4933,13 +3695,6 @@ _sm.register_rule(_sm.HandlerRule(
     priority=70,
     name="失败告警",
     protocol_ref="§7.8",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_exclamation,
-    handle=_sm_handle_exclamation,
-    priority=80,
-    name="!命令透传",
-    protocol_ref="§7.9",
 ))
 _sm.register_rule(_sm.HandlerRule(
     match=_sm.match_catchall,
