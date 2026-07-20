@@ -36,14 +36,15 @@
 | 🗑️ ! 命令 handler: admin | `commands/admin.py` (176行) | **176 行** |
 | 🗑️ ! 命令 handler: agent_card | `commands/agent_card.py` (258行) | **258 行** |
 | 🔧 ! 命令 handler: pipeline (精简) | `commands/pipeline.py` (2085→~1200行) | **~-885 行** |
-| 🔧 ! 命令 handler: task (精简) | `commands/task.py` (197→~30行) | **~-167 行** |
+| 🗑️ ! 命令 handler: task | `commands/task.py` (197→0行，`_cmd_task_update` 移入 `pipeline_engine.py`) | **197 行** |
 | 🗑️ Workspace 核心 | `workspace.py` (460行) + `workspace_api.py` (37行) | **497 行** |
 | 🗑️ Workspace 路由 | `__main__.py` 消息类型 handler (~80行) | **80 行** |
 | 🔧 Workspace 引用清理 | `main.py`、`web_ui/templates.py`、`web_ui/viewer.py` | **~-60 行** |
 | 🗑️ ! 命令规则 + handler | `scenario_matcher.py` 中 `match_exclamation` + 注册 | **~15 行** |
-| | **合计** | **~-3,000 行** |
+| 🗑️ AutoRouter (已退役) | `auto_router.py` (750行) | **750 行** |
+| | **合计** | **~-3,750 行** |
 
-> 清理后 server 目录从当前 **33 文件 / ~17,100 行** 降至 **~27 文件 / ~14,100 行**，减负约 17%。
+> 清理后 server 目录从当前 **33 文件 / ~17,100 行** 降至 **~26 文件 / ~13,350 行**，减负约 22%。
 
 ---
 
@@ -90,7 +91,7 @@ main.py L2070: _handle_server_query() 处理部分 ! 命令
 | `commands/agent_card.py` | ❌ 删除 | 所有 `!agent_card` 命令 handler |
 | `command_utils.py` | ❌ 删除 | 仅被 ! 命令系统使用的工具函数 (`_parse_command`, `_check_command_permission`, `_log_audit`, `_resolve_workspace`, `_broadcast_to_channel`, `_send_cmd_response`, `_refresh_role_agent_map`, `_is_any_workspace_admin`) |
 | `commands/pipeline.py` | 🔧 精简 | 保留 `_cmd_step_complete` / `_cmd_step_reject` / `_cmd_step_force` / `_cmd_step_handoff`（被 scenario_matcher 使用）+ `_get_step_config` / `_find_agents_by_role` / `_set_pipeline_state` / `_step_sort_key`（被 main.py PipelineEngine 使用）；删除 `!pipeline_start` / `!pipeline_stop` / `!pipeline_status` / `!pipeline_activate` / `!pipeline_mode` / `!pipeline_role_override` / `!step_verify` 等 handler |
-| `commands/task.py` | 🔧 精简 | 保留 `_cmd_task_update`（被 main.py PipelineEngine 使用）；删除 `!task_create` / `!task_query` / `!task_list` / `!rollcall_role` / `!rollcall_next` |
+| `commands/task.py` | ❌ 删除 | 整个文件删除。`_cmd_task_update` 函数（核心逻辑依赖 `task_store`）移入 `pipeline_engine.py` 作为内部方法 |
 | `main.py` | 🔧 清理 | 删除 `!` 命令路由段（L1596-1618）、`_handle_server_query` 函数（L2070-2170）、`_sm_handle_exclamation` 函数（L4834-4838）、`!` 命令规则注册（L4937-4943） |
 | `scenario_matcher.py` | 🔧 清理 | 删除 `match_exclamation` 函数（L155-158） |
 
@@ -116,8 +117,7 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 | 文件 | 行数 | 保留理由 |
 |:-----|:----:|:---------|
 | `audit.py` | 94 | `##query##audit` 命令仍使用 `AuditLogger` 查询审计日志 |
-| `auto_router.py` | 750 | 独立 CLI 脚本，不阻塞 — 已有 R129 确认保留 |
-| `task_store.py` | 184 | `_cmd_task_update` 可能还用到 (待 Arch 确认) |
+| `task_store.py` | 184 | PipelineEngine 的 `list_tasks_by_context` / `restore_pipeline_timers` 使用 |
 | `agent_card.py` (ws_server/) | 429 | Agent Card 被 ##query##agent_info / pipeline_engine 使用 |
 
 ---
@@ -128,17 +128,16 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 
 ```diff
  commands/
--├── __init__.py         (202行，! 命令注册表)
--├── admin.py            (176行，废弃 !admin)
--├── agent_card.py       (258行，废弃 !agent_card)
--├── pipeline.py         (2085→~1200行，保留 step ops + 工具函数)
--├── task.py             (197→~30行，保留 _cmd_task_update)
--└── workspace.py        (455行，废弃 !workspace)
-+└── pipeline.py         (~1200行，精简后)
-+└── task.py             (~30行，精简后)
+ -├── __init__.py         (202行，! 命令注册表)
+ -├── admin.py            (176行，废弃 !admin)
+ -├── agent_card.py       (258行，废弃 !agent_card)
+ -├── pipeline.py         (2085→~1200行，保留 step ops + 工具函数)
+ -├── task.py             (197行，全部删除，_cmd_task_update 移入 pipeline_engine.py)
+ -└── workspace.py        (455行，废弃 !workspace)
+ +└── pipeline.py         (~1200行，精简后)
 ```
 
-> 若精简后 `commands/` 目录只有 2 个文件，可考虑将 `pipeline.py` 重命名为 `step_ops.py` 并移到 `commands/` 目录外。
+> 精简后 `commands/` 目录只剩 1 个文件。可考虑将 `pipeline.py` 重命名为 `step_ops.py` 并移到 `commands/` 目录外。
 
 ### 3.2 main.py 清理
 
@@ -182,6 +181,7 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 | CLN-9 | `main.py` 中 `_handle_server_query` 函数已删除 | 代码 | P0 |
 | CLN-10 | `main.py` 中 `_sm_handle_exclamation` 函数已删除 | 代码 | P0 |
 | CLN-11 | `scenario_matcher.py` 中 `match_exclamation` + 规则注册已删除 | 代码 | P0 |
+| CLN-12 | `auto_router.py` 已删除 | 代码 | P0 |
 
 ### WKS: Workspace 清理（P0）
 
@@ -213,9 +213,8 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 
 | # | 事项 | 理由 |
 |:-:|:-----|:------|
-| ❌ | **不删 `auto_router.py`** | R129 已确认保留为独立 CLI 脚本，不影响 server 启动 |
 | ❌ | **不删 `audit.py`** | `##query##audit` 命令仍使用 `AuditLogger` |
-| ❌ | **不删 `task_store.py`** | `_cmd_task_update` 调用 task_store，需 Arch 确认是否可移除 |
+| ❌ | **不删 `task_store.py`** | PipelineEngine 的 `list_tasks_by_context` 仍使用 |
 | ❌ | **不改 `##` 命令逻辑** | 只删 ! 命令死代码，不碰 ## 命令的功能代码 |
 | ❌ | **不改 Inbox 协议文档** | 本轮纯代码清理，不涉及协议文档修改 |
 | ❌ | **不改 server/README.md** | 架构文档在清理验证通过后单独更新 |
@@ -237,7 +236,8 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 | ❌ 删除 | `server/ws_server/workspace.py` | 460 |
 | ❌ 删除 | `server/ws_server/workspace_api.py` | 37 |
 | 🔧 精简 | `server/ws_server/commands/pipeline.py` | 2085→~1200 |
-| 🔧 精简 | `server/ws_server/commands/task.py` | 197→~30 |
+| ❌ 删除 | `server/ws_server/commands/task.py` | 197（`_cmd_task_update` 移入 pipeline_engine.py） |
+| ❌ 删除 | `server/ws_server/auto_router.py` | 750 |
 | 🔧 修改 | `server/ws_server/main.py` | 4951→~4860 |
 | 🔧 修改 | `server/ws_server/__main__.py` | 846→~770 |
 | 🔧 修改 | `server/ws_server/scenario_matcher.py` | 795→~780 |
@@ -249,10 +249,10 @@ Workspace（工作区）是早期 bot 协作的频道模型。当前消息路由
 
 | 分组 | P0 项 | 合计 |
 |:-----|:-----:|:----:|
-| CLN ! 命令清理 | 11 | 11 |
+| CLN ! 命令清理 | 12 | 12 |
 | WKS Workspace 清理 | 6 | 6 |
 | RV 回归验证 | 8 | 8 |
-| **合计** | **25** | **25** |
+| **合计** | **26** | **26** |
 
 ---
 
