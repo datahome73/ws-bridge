@@ -152,12 +152,6 @@ def match_fail(content: str, msg: dict, agent_id: str) -> Any:
         return True
     return False
 
-def match_exclamation(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 80: ! command passthrough."""
-    if content.startswith("!"):
-        return True
-    return False
-
 def match_catchall(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 90: catch-all — store silently."""
     return True

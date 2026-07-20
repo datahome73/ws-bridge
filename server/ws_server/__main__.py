@@ -16,7 +16,6 @@ from .main import handle_auth, handle_broadcast, handle_register, _connections  
 from . import scenario_matcher as _sm  # R126
 from .message_store import init_db, search_messages as _search_messages
 from server.common.persistence import get_approved_users as _get_approved_users
-from . import workspace as ws_mod
 from server.common.persistence import (
     load_approved_users,
     load_web_sessions,
@@ -119,225 +118,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # ★ 删除: elif msg_type == "approve" and agent_id:  — 旧 approve 路径已移除（R72）
 
-            # ── R4: Workspace message types ────────────────────────────
-            elif msg_type in (
-                "workspace_create",
-                "workspace_create_approved",
-                "workspace_close",
-                "workspace_ack_close",
-                "workspace_add_member",
-                "workspace_remove_member",
-            ) and agent_id:
-                # Route to handler's workspace processing
-                from .main import handler as _handler_fn
-                # Re-use the same logic — delegate to handler
-                if msg_type == "workspace_create":
-                    ws_name = data.get("name", "").strip()
-                    if not ws_name:
-                        await ws.send_json({"type": "error", "error": "Missing workspace name"})
-                        continue
-                    ws_id = f"ws:{agent_id[:8]}-{ws_name[:20]}"
-                    users = (await _get_users())
-                    sender_name = users.get(agent_id, {}).get("name", agent_id)
-                    admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                    payload = json.dumps({
-                        "type": "broadcast",
-                        "channel": "lobby",
-                        "content": f"@{agent_id} requests workspace: {ws_name}",
-                        "from_name": sender_name,
-                        "agent_id": agent_id,
-                        "from": sender_name,
-                        "from_agent": agent_id,
-                        "ts": time.time(),
-                        "_workspace_request": {"id": ws_id, "name": ws_name, "requester_id": agent_id},
-                    })
-                    for admin_aid in admin_ids:
-                        for conn in list(_connections.get(admin_aid, set())):
-                            try:
-                                if hasattr(conn, "send_str"):
-                                    await conn.send_str(payload)
-                                elif hasattr(conn, "send"):
-                                    await conn.send(payload)
-                            except Exception:
-                                pass
-                elif msg_type == "workspace_create_approved":
-                    users = (await _get_users())
-                    if users.get(agent_id, {}).get("role") == "admin":
-                        ws_id = data.get("id", "").strip()
-                        ws_name = data.get("name", "").strip()
-                        owner_id = data.get("owner_id", "").strip()
-                        owner_name = data.get("owner_name", "").strip()
-                        if ws_id and owner_id:
-                            result = ws_mod.create_workspace(ws_id, ws_name or ws_id, owner_id, owner_name)
-                            if result:
-                                # R82: removed auto-bind active channel
-                                await ws.send_json({"type": "ok", "workspace_id": ws_id})
-                            else:
-                                await ws.send_json({"type": "error", "error": f"Failed: owner may have too many active"})
-                elif msg_type == "workspace_close":
-                    ws_id = data.get("workspace_id", "").strip()
-                    if ws_id and ws_mod.start_closing(ws_id):
-                        await ws.send_json({"type": "ok", "workspace_id": ws_id})
-                        asyncio.create_task(_broadcast_workspace_closing_aiohttp(ws_id))
-                    else:
-                        await ws.send_json({"type": "error", "error": "Failed to close workspace"})
-                elif msg_type == "workspace_ack_close":
-                    # R82: removed ack-close logic — workspace close is immediate archive
-                    ws_id = data.get("workspace_id", "").strip()
-                    if ws_id:
-                        ws_mod.start_closing(ws_id)
-                elif msg_type == "workspace_add_member":
-                    ws_id = data.get("workspace_id", "").strip()
-                    member_id = data.get("member_id", "").strip()
-                    if ws_id and member_id:
-                        ws_info = ws_mod.get_workspace(ws_id)
-                        if ws_info and ws_info.state == ws_mod.WorkspaceState.ACTIVE:
-                            if ws_mod.add_member(ws_id, member_id):
-                                await ws.send_json({"type": "ok", "workspace_id": ws_id, "member_id": member_id})
-                            else:
-                                await ws.send_json({"type": "error", "error": "Failed to add member"})
-                        else:
-                            await ws.send_json({"type": "error", "error": "Workspace not found or not active"})
-                    else:
-                        await ws.send_json({"type": "error", "error": "Missing workspace_id or member_id"})
-                elif msg_type == "workspace_remove_member":
-                    ws_id = data.get("workspace_id", "").strip()
-                    member_id = data.get("member_id", "").strip()
-                    if ws_id and member_id:
-                        ws_info = ws_mod.get_workspace(ws_id)
-                        if ws_info and ws_info.state == ws_mod.WorkspaceState.ACTIVE:
-                            if ws_mod.remove_member(ws_id, member_id):
-                                await ws.send_json({"type": "ok", "workspace_id": ws_id, "member_id": member_id})
-                            else:
-                                await ws.send_json({"type": "error", "error": "Failed to remove member"})
-                        else:
-                            await ws.send_json({"type": "error", "error": "Workspace not found or not active"})
-                    else:
-                        await ws.send_json({"type": "error", "error": "Missing workspace_id or member_id"})
-            
-            elif msg_type == "approve_web" and agent_id:
-                users = (await _get_users())
-                if users.get(agent_id, {}).get("role") == "admin":
-                    logger.warning("Web viewer bind code rejected: deprecated feature removed in R83")
-                    await ws.send_json({"type": "error", "error": "bind_code_deprecated"})
-
+            # ── R4: Workspace message types — R134: removed
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
 
-            # ── R15: Workspace Admin Request ─────────────────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST and agent_id:
-                from . import workspace as _ws_mod
-                users = (await _get_users())
-                ws_id = data.get(p.FIELD_WORKSPACE_ID, "").strip()
-                reason = data.get(p.FIELD_REASON, "").strip()
-                if not ws_id:
-                    await ws.send_json({"type": "error", "error": "缺少 workspace_id"})
-                    continue
-                resolved = _ws_mod.get_workspace(ws_id)
-                if not resolved:
-                    await ws.send_json({"type": "error", "error": "工作室不存在"})
-                    continue
-                if agent_id not in resolved.members:
-                    await ws.send_json({"type": "error", "error": "您不是该工作室成员"})
-                    continue
-                if agent_id in resolved.admin_ids or agent_id == resolved.owner_id:
-                    await ws.send_json({"type": "error", "error": "您已是该工作室的管理员"})
-                    continue
-                success, msg_text = _ws_mod.submit_admin_request(ws_id, agent_id, reason)
-                if not success:
-                    await ws.send_json({"type": "error", "error": msg_text})
-                    continue
-                await ws.send_json({"type": "ack", "status": "submitted", "message": msg_text})
-                # Notify all global admins
-                requester_name = users.get(agent_id, {}).get("name", agent_id[:12])
-                admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                import json as _json
-                notify_payload = _json.dumps({
-                    "type": p.MSG_ADMIN_REQUEST,
-                    "workspace_id": ws_id,
-                    "requester_id": agent_id,
-                    "requester_name": requester_name,
-                    "reason": reason,
-                    "ts": time.time(),
-                })
-                for admin_id in admin_ids:
-                    for conn in list(_connections.get(admin_id, set())):
-                        try:
-                            if hasattr(conn, "send_str"):
-                                await conn.send_str(notify_payload)
-                            elif hasattr(conn, "send"):
-                                await conn.send(notify_payload)
-                        except Exception:
-                            pass
-                logger.info("Admin request from %s for workspace '%s': %s", agent_id[:12], ws_id, reason[:60])
 
-            elif msg_type == p.MSG_ADMIN_REQUEST_APPROVED and agent_id:
-                from . import workspace as _ws_mod
-                from server.common import auth as _auth
-                users = (await _get_users())
-                if users.get(agent_id, {}).get("role") != "admin":
-                    await ws.send_json({"type": "error", "error": "权限不足：仅全局管理员可审批"})
-                    continue
-                ws_id = data.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = data.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                target_name = data.get(p.FIELD_TARGET_AGENT, "").strip()
-                if not ws_id or not target_id:
-                    await ws.send_json({"type": "error", "error": "缺少 workspace_id 或 target_agent_id"})
-                    continue
-                if not target_id and target_name:
-                    for aid, u in users.items():
-                        if u.get("name") == target_name:
-                            target_id = aid
-                            break
-                if not target_id:
-                    await ws.send_json({"type": "error", "error": f"未找到目标成员 {target_name}"})
-                    continue
-                success, msg_text = _ws_mod.approve_admin_request(ws_id, target_id, agent_id)
-                if not success:
-                    await ws.send_json({"type": "error", "error": msg_text})
-                    continue
-                target_name_resolved = target_name or users.get(target_id, {}).get("name", target_id[:12])
-                if not _auth.set_workspace_admin(ws_id, target_id, agent_id):
-                    await ws.send_json({"type": "error", "error": "设置管理员失败"})
-                    continue
-                # Notify applicant
-                import json as _json
-                notify_payload = _json.dumps({
-                    "type": p.MSG_ADMIN_NOTIFICATION,
-                    "workspace_id": ws_id,
-                    "status": "approved",
-                    "message": f"✅ 你已成为 {ws_id} 的管理员",
-                    "ts": time.time(),
-                })
-                for conn in list(_connections.get(target_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(notify_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(notify_payload)
-                    except Exception:
-                        pass
-                # Broadcast to workspace
-                resolved_ws = _ws_mod.get_workspace(ws_id)
-                if resolved_ws:
-                    broadcast_payload = _json.dumps({
-                        "type": "broadcast",
-                        "channel": ws_id,
-                        "from_name": "系统",
-                        "content": f"{target_name_resolved} 已成为 {ws_id} 的管理员",
-                        "ts": time.time(),
-                    })
-                    for member_id in resolved_ws.members:
-                        for conn in list(_connections.get(member_id, set())):
-                            try:
-                                if hasattr(conn, "send_str"):
-                                    await conn.send_str(broadcast_payload)
-                                elif hasattr(conn, "send"):
-                                    await conn.send(broadcast_payload)
-                            except Exception:
-                                pass
-                await ws.send_json({"type": "ack", "message": f"✅ {target_name_resolved} 已成为管理员"})
-                logger.info("Admin request approved: %s → admin of '%s' by %s", target_id[:12], ws_id, agent_id[:12])
 
             elif msg_type == p.MSG_ADMIN_REQUEST_REJECTED and agent_id:
                 from . import workspace as _ws_mod
@@ -386,53 +171,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # ── R82: removed MSG_SET_ACTIVE_CHANNEL handler
 
-            # ── R15: Workspace Admin Request ──────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST and agent_id:
-                ws_id = data.get(p.FIELD_WORKSPACE_ID, "").strip()
-                reason = data.get(p.FIELD_REASON, "").strip()
-                if not ws_id:
-                    await ws.send_json({"type": "error", "error": "缺少 workspace_id"})
-                    continue
-                if agent_id not in ws_mod.get_workspace_members(ws_id):
-                    await ws.send_json({"type": "error", "error": "您不是该工作室成员"})
-                    continue
-                success, msg_text = ws_mod.submit_admin_request(ws_id, agent_id, reason)
-                if not success:
-                    await ws.send_json({"type": "error", "error": msg_text})
-                    continue
-                await ws.send_json({"type": "ack", "status": "submitted", "message": msg_text})
-                # Notify admins
-                users = await _get_users()
-                admin_ids = {aid for aid, u in users.items() if u.get("role") == "admin"}
-                for admin_id in admin_ids:
-                    for conn in list(_connections.get(admin_id, set())):
-                        try:
-                            await conn.send_json({"type": p.MSG_ADMIN_REQUEST, "workspace_id": ws_id,
-                                "requester_id": agent_id, "ts": time.time()})
-                        except Exception:
-                            pass
 
-            # ── R15: Workspace Admin Approved ────────────────────
-            elif msg_type == p.MSG_ADMIN_REQUEST_APPROVED and agent_id:
-                users = await _get_users()
-                if not users.get(agent_id, {}).get("role") == "admin":
-                    await ws.send_json({"type": "error", "error": "权限不足"})
-                    continue
-                ws_id = data.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = data.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                if not ws_id or not target_id:
-                    await ws.send_json({"type": "error", "error": "缺少 workspace_id 或 target_agent_id"})
-                    continue
-                success, msg_text = ws_mod.approve_admin_request(ws_id, target_id, agent_id)
-                if not success:
-                    await ws.send_json({"type": "error", "error": msg_text})
-                    continue
-                if not auth.set_workspace_admin(ws_id, target_id, agent_id):
-                    await ws.send_json({"type": "error", "error": "设置管理员失败"})
-                    continue
-                await ws.send_json({"type": "ack", "message": f"✅ 已批准 {target_id[:12]} 为管理员"})
 
-            # ── R15: Workspace Admin Rejected ────────────────────
             elif msg_type == p.MSG_ADMIN_REQUEST_REJECTED and agent_id:
                 users = await _get_users()
                 if not users.get(agent_id, {}).get("role") == "admin":
@@ -605,45 +345,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _broadcast_workspace_closing_aiohttp(ws_id: str):
-    """Notify workspace members of close via aiohttp connections."""
-    from . import workspace as _ws_mod
-    ws_info = _ws_mod.get_workspace(ws_id)
-    if not ws_info or ws_info.state != _ws_mod.WorkspaceState.ACTIVE:
-        return
-    
-    import json as _json
-    import shared.protocol as _p
-    from .main import _connections as _conns
-    
-    deadline_ts = time.time() + _p.WORKSPACE_CLOSING_TIMEOUT
-    payload = _json.dumps({
-        "type": _p.MSG_WORKSPACE_CLOSING,
-        "workspace_id": ws_id,
-        "reason": "task_completed",
-        "deadline_ts": deadline_ts,
-        "ack_required": True,
-    })
-    
-    for agent_id in ws_info.members:
-        for conn in list(_conns.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-    
-    await asyncio.sleep(_p.WORKSPACE_CLOSING_TIMEOUT)
-    
-    ws_info = _ws_mod.get_workspace(ws_id)
-    if ws_info and ws_info.state == _ws_mod.WorkspaceState.ARCHIVED:
-        pass  # already archived (R82: close is immediate)
-    if ws_info:
-        _ws_mod.start_closing(ws_id)
-
-
 async def _get_users():
     """Lazy import to avoid circular dependency."""
     from server.common import auth
@@ -793,9 +494,6 @@ def main():
     from .agent_card import load_cards
     load_cards()
 
-    # Initialise workspace module
-    ws_mod.init()
-    # R82: removed load_agent_channels
 
     logger.info("WS Bridge starting on %s:%d", HOST, PORT)
     logger.info("Admin agents: %s", ADMIN_AGENTS or "none")
@@ -832,7 +530,6 @@ def main():
     # P5: enhanced health check (override basic one)
     app.router.add_get("/api/health", _api_health)
     # R4: workspace API
-    from . import workspace_api as _ws_api
     app.router.add_get("/api/workspaces", _ws_api.api_workspaces)
 
     global _start_time

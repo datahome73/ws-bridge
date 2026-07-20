@@ -22,41 +22,10 @@ def get_users() -> dict:
     return persistence.get_approved_users()
 
 
-def is_workspace_admin(ws_id: str, agent_id: str) -> bool:
-    """Check if agent is an admin of the given workspace.
-    Uses lazy import of workspace module to avoid import-time dependency.
-    """
-    try:
-        from server.ws_server import workspace as ws_mod
-        ws = ws_mod.get_workspace(ws_id)
-        if not ws:
-            return False
-        return agent_id in ws.admin_ids or agent_id == ws.owner_id
-    except (ImportError, Exception):
-        return False
-
-
 def is_global_admin(agent_id: str) -> bool:
     """Check if agent is a global admin (L4)."""
     users = get_users()
     return users.get(agent_id, {}).get("role") == "admin"
-
-
-def can_manage_workspace(ws_id: str, agent_id: str) -> bool:
-    """Check if agent can manage a workspace (global admin or workspace admin)."""
-    return is_global_admin(agent_id) or is_workspace_admin(ws_id, agent_id)
-
-
-def set_workspace_admin(ws_id: str, agent_id: str, by_agent: str) -> bool:
-    """Global admin by_agent appoints agent_id as workspace admin."""
-    if not is_global_admin(by_agent):
-        return False
-    from server.ws_server import workspace as ws_mod
-    ws = ws_mod.get_workspace(ws_id)
-    if not ws:
-        return False
-    ws_mod.set_admin(ws_id, agent_id)
-    return True
 
 
 # ── R72: API Key 核心逻辑 ────────────────────────────────────
