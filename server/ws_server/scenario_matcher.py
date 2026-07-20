@@ -162,6 +162,230 @@ def match_catchall(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 90: catch-all — store silently."""
     return True
 
+
+# ── R131: ##query match ──────────────────────────────────────────────
+
+def match_query(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 25: ##query commands."""
+    if content.startswith("##query"):
+        return content
+    return False
+
+
+# ── R131: Level helper ──────────────────────────────────────────────
+
+_QUERY_LEVEL_MAP = {
+    "whoami": 1,
+    "help": 1,
+    "status": 3,
+    "agents": 3,
+    "agent_info": 3,
+    "audit": 4,
+}
+
+
+def get_agent_level(agent_id: str) -> int:
+    """Return agent permission level (1-4). Default 1 for unregistered."""
+    from server.common import persistence
+    users = persistence.get_approved_users()
+    info = users.get(agent_id, {})
+    return info.get("level", 1)
+
+
+# ── R131: ##query handler ────────────────────────────────────────────
+
+async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
+    """Handle ##query commands: parse sub-command → check level → execute → reply inbox."""
+    content = matched
+    parts = content.split("##")
+    if len(parts) < 3:
+        await _send_reply(ws, agent_id,
+            "📋 **##query 命令帮助**\\n\\n"
+            "`##query##whoami` — 查看自己信息\\n"
+            "`##query##status [R{N}]` — 查询管线状态\\n"
+            "`##query##agents` — 列出所有注册 bot\\n"
+            "`##query##agent_info <id>` — 查询 bot 详情\\n"
+            "`##query##audit` — 审计日志（需 L4）\\n"
+            "`##query##help` — 显示本帮助"
+        )
+        return True
+
+    sub_cmd = parts[2].lower()
+    params = parts[3] if len(parts) > 3 else ""
+
+    # ── Permission check: use minimum level map ──
+    level = get_agent_level(agent_id)
+    min_level = _QUERY_LEVEL_MAP.get(sub_cmd, 5)
+    if level < min_level:
+        await _send_reply(ws, agent_id,
+            f"❌ 权限不足: {sub_cmd} 需要 L{min_level}，你当前 L{level}"
+        )
+        return True
+
+    # ── Route sub-commands ──
+    from . import main as _main
+
+    if sub_cmd == "whoami":
+        from server.common import auth, persistence
+        users = auth.get_users()
+        info = users.get(agent_id, {})
+        name = info.get("name", agent_id[:12])
+        reply = f"🆔 agent_id: {agent_id} | 名称: {name} | 级别: L{level}"
+
+    elif sub_cmd == "status":
+        reply = await _format_query_status(params)
+
+    elif sub_cmd == "agents":
+        reply = await _format_query_agents()
+
+    elif sub_cmd == "agent_info":
+        if not params:
+            reply = "❌ 用法: ##query##agent_info <agent_id>"
+        else:
+            reply = await _format_query_agent_info(params)
+
+    elif sub_cmd == "audit":
+        limit = 20
+        if params:
+            try:
+                limit = min(int(params.replace("--limit=", "").replace("--limit ", "")), 100)
+            except (ValueError, IndexError):
+                pass
+        reply = await _format_query_audit(limit)
+
+    elif sub_cmd == "help":
+        reply = (
+            "📋 **##query 命令**\\n\\n"
+            "`##query##whoami` — 查看自己信息 (L1+)\\n"
+            "`##query##status [R{N}]` — 管线状态 (L3+)\\n"
+            "`##query##agents` — 列出所有 bot (L3+)\\n"
+            "`##query##agent_info <id>` — bot 详情 (L3+)\\n"
+            "`##query##audit [--limit N]` — 审计日志 (L4+)\\n"
+            "`##query##help` — 本帮助"
+        )
+    else:
+        reply = f"❌ 未知查询: {sub_cmd}"
+
+    await _send_reply(ws, agent_id, reply)
+    return True
+
+
+# ── R131: Query data formatters ─────────────────────────────────────
+
+async def _format_query_status(round_name: str) -> str:
+    """Format pipeline status response."""
+    from . import main as _main
+    if round_name:
+        # Specific round
+        mgr = _main._ensure_pipeline_manager()
+        ctx = mgr.get(round_name.upper())
+        if ctx:
+            return _main._ensure_engine().format_context(ctx)
+        # Check archive
+        archive = _main._ensure_engine().find_archive(round_name.upper())
+        if archive:
+            from datetime import datetime
+            ts = archive.get("archived_at", 0)
+            time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "?"
+            total = archive.get("total_steps", 6)
+            done = archive.get("completed_steps", 0)
+            return f"📦 {round_name.upper()} 已归档\\n状态: completed\\n归档时间: {time_str}\\n总步数: {total} / 完成: {done}"
+        return f"❌ 管线 {round_name.upper()} 不存在"
+    # All active pipelines
+    mgr = _main._ensure_pipeline_manager()
+    active = mgr.get_all_active()
+    if not active:
+        return "📋 当前无活跃管线"
+    lines = ["📋 活跃管线:"]
+    for ctx in sorted(active, key=lambda c: c.round_name):
+        lines.append(f"  {ctx.round_name} [{ctx.task_kind.value}] {ctx.status.value} step={ctx.current_step}/{ctx.total_steps}")
+    return "\\n".join(lines)
+
+
+async def _format_query_agents() -> str:
+    """Format agent list response."""
+    from server.common import auth, persistence
+    from .main import _connections
+    from . import agent_card as ac_mod
+
+    users = auth.get_users()
+    api_keys = persistence.get_api_keys()
+    cards = ac_mod.get_all_cards()
+
+    lines = [f"📇 Agents ({len(users)}):"]
+    for aid, info in sorted(users.items()):
+        name = info.get("name", aid[:12])
+        level = info.get("level", 1)
+        online = aid in _connections
+        status = "🟢" if online else "🔴"
+        role = info.get("role", "member")
+        card_roles = cards.get(aid, {}).get("pipeline_roles", [])
+        roles_str = f" [{','.join(card_roles)}]" if card_roles else ""
+        lines.append(f"  {status} {name} ({aid[:12]}...) L{level} {role}{roles_str}")
+
+    # Add api_keys-only agents (registered but not in approved_users)
+    for aid, key_info in api_keys.items():
+        if aid not in users:
+            name = key_info.get("display_name", aid[:12])
+            lines.append(f"  🔴 {name} ({aid[:12]}...) L1 api_key")
+
+    return "\\n".join(lines)
+
+
+async def _format_query_agent_info(agent_id: str) -> str:
+    """Format single agent detail."""
+    from server.common import auth, persistence
+    from .main import _connections
+    from . import agent_card as ac_mod
+
+    users = auth.get_users()
+    info = users.get(agent_id, {})
+    if not info:
+        # Check api_keys
+        api_keys = persistence.get_api_keys()
+        key_info = api_keys.get(agent_id, {})
+        if not key_info:
+            return f"❌ Agent {agent_id} 不存在"
+        name = key_info.get("display_name", agent_id[:12])
+        level = 1
+    else:
+        name = info.get("name", agent_id[:12])
+        level = info.get("level", 1)
+
+    online = agent_id in _connections
+    status = "🟢 在线" if online else "🔴 离线"
+    card = ac_mod.get_card(agent_id) or {}
+    card_roles = card.get("pipeline_roles", [])
+    roles_str = f"\\n  角色: {', '.join(card_roles)}" if card_roles else ""
+
+    return (
+        f"📇 **{name}**\\n"
+        f"  ID: {agent_id}\\n"
+        f"  状态: {status}\\n"
+        f"  级别: L{level}{roles_str}"
+    )
+
+
+async def _format_query_audit(limit: int) -> str:
+    """Format audit log response."""
+    from .main import _audit_logger
+    try:
+        entries = _audit_logger.query(tail=limit)
+        if not entries:
+            return "📋 暂无审计日志"
+        lines = [f"📋 最近 {len(entries)} 条审计日志:"]
+        for entry in entries:
+            ts = entry.get("ts", 0)
+            from datetime import datetime
+            time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "?"
+            agent = entry.get("agent_id", "")[:12]
+            cmd = entry.get("command", "")
+            result = "✅" if entry.get("result") == "success" else "❌"
+            lines.append(f"  {time_str} {result} {agent} !{cmd}")
+        return "\\n".join(lines)
+    except Exception as e:
+        return f"❌ 读取审计日志失败: {e}"
+
 # ── Moved from main.py: _handle_hash_cmd ─────────────────────────────
 
 async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
@@ -447,3 +671,14 @@ async def _send_reply(ws, agent_id: str, content: str) -> None:
         })
     except Exception:
         pass
+
+
+# ── R131: Register rule 25 (##query) ────────────────────────────────
+
+register_rule(HandlerRule(
+    match=match_query,
+    handle=handle_query,
+    priority=25,
+    name="##query 命令",
+    protocol_ref="§R131",
+))
