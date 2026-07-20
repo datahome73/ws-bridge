@@ -729,27 +729,6 @@ def _format_audit_log(limit_str: str) -> str:
     )
 
 
-# ── Moved from main.py: _classify_lobby_message ──────────────────────
-def classify_lobby_message(content: str) -> tuple[str, list[str]]:
-    """Classify lobby message by prefix.
-    Returns (type, extracted_names).
-    Types: 'announce', 'checkin', 'help', 'mention', 'plain'
-    """
-    content = content.strip()
-    # R45 B (F-4): Strip [R{N}测试] test tags before prefix check
-    content = re.sub(r'^\[R\d+测试\]\s*', '', content).strip()
-    if content.startswith(state.PREFIX_ANNOUNCE):
-        return 'announce', []
-    if content.startswith(state.PREFIX_CHECKIN):
-        names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
-        return 'checkin', names
-    if content.startswith(state.PREFIX_HELP):
-        return 'help', []
-    names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
-    if names:
-        return 'mention', names
-    return 'plain', []
-
 # ── Helper ────────────────────────────────────────────────────────────
 
 async def _send_reply(ws, agent_id: str, content: str) -> None:
