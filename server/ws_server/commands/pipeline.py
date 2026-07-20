@@ -24,39 +24,8 @@ from ..pipeline_context import PipelineContext, PipelineStatus, PipelineTaskKind
 def _get_pipeline_manager() -> PipelineContextManager:
     from ..main import _ensure_pipeline_manager
     return _ensure_pipeline_manager()
-    async def _auto_dispatch_step1():
-        from ..main import _auto_dispatch as _ad
-        pc = mgr.get(round_name)
-        if pc and config.AUTO_DISPATCH_ENABLED:
-            await _ad(pc, 1)
-    asyncio.ensure_future(_auto_dispatch_step1())
 
-    # 广播 _admin
-    step_chain = " → ".join(
-        f"{s['step_key']}({s['role']})"
-        for s in ctx.steps
-    )
-    try:
-        await _broadcast_to_channel(p.ADMIN_CHANNEL, {
-            "type": "broadcast",
-            "channel": p.ADMIN_CHANNEL,
-            "from_name": "系统",
-            "from_agent": SYSTEM_AGENT_ID,
-            "content": (
-                f"🚀 **{round_name} 管线已启动**\n"
-                f"  发起者: {sender_name}\n"
-                f"  Step 链: {step_chain}"
-            ),
-            "ts": time.time(),
-        })
-    except Exception as e:
-        logger.warning("R97: _admin 广播失败: %s", e)
 
-    return (
-        f"🚀 **{round_name} 管线已启动**\n"
-        f"  Step 链: {step_chain}\n"
-        f"  AutoRouter 将自动派活 Step 1 → PM（{DEFAULT_STEPS['step1'].role}）"
-    )
 async def _cmd_step_complete(sender_id: str, params: dict) -> str:
     """标记 Step 完成，自动点名下一人。
     用法：!step_complete <step_name> [--output <commit/file>]
