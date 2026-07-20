@@ -79,7 +79,7 @@ ws_server/
 
 ## 二、架构分层
 
-WS 消息从入站到出站穿越 **5 层**：
+WS 消息从入站到出站穿越 **3 层**（R135 精简后：传输→路由→场景匹配→管线→数据）：
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -93,12 +93,9 @@ WS 消息从入站到出站穿越 **5 层**：
 ┌────────────────────────────────────────────────────────┐
 │  L2 消息路由层  Routing Layer                           │
 │  main.py handle_broadcast()                            │
-│  · 惰性启动 (watchdog/git/agent cards)                  │
-│  · _inbox:server 快速返回（交 scenario_matcher 处理）  │
-│  · 消息过滤（速率限制/去重/噪音）                        │
-│  · inbox 通道 → 单播给目标 agent                       │
-│  · 通用广播 → 投递所有在线连接                         │
-│  · 离线队列 + ACK 交付统计                             │
+│  · 惰性启动 (watchdog / git / agent cards)              │
+│  · _inbox:server → scenario_matcher 规则表              │
+│  · _inbox:{agent_id} → 单播给收件箱主人 + ACK           │
 └──────────────┬─────────────────────────────────────────┘
                │ _inbox:server 通道
                ▼
@@ -134,7 +131,7 @@ WS 消息从入站到出站穿越 **5 层**：
 | 层 | 文件 | 职责 | 关键函数 |
 |---|---|---|---|
 | **L1 传输** | `__main__.py` | WS 握手、会话管理、msg_type 一级分发 | `ws_handler()` |
-| **L2 路由** | `main.py` | `handle_broadcast()` 消息路由 | 惰性启动 / 过滤 / inbox 单播 / 广播 / ACK |
+| **L2 路由** | `main.py` | `handle_broadcast()` 消息路由 | 惰性启动 / inbox 单播 / ACK |
 | **L3 场景匹配** | `scenario_matcher.py` | `_inbox:server` 中继路由（规则表） | `dispatch()` → 规则链 |
 | **L4 管线域** | `pipeline_engine.py` + `main.py` | 管线状态机、`##` 命令处理、自动派发 | `try_advance()`, `auto_dispatch()`, `handle_hash_*()` |
 | **L5 数据层** | `message_store.py` / `task_store.py` / `audit.py` | 持久化存储 | SQLite CRUD |
@@ -181,95 +178,80 @@ WebSocket 入站 JSON
 ## 四、广播路由分析（`handle_broadcast`）
 
 `handle_broadcast` 是 `main.py` 的消息路由中枢（L1498-L1918），当前约 420 行。
-R134 移除了 `!` 命令路由段，但大量大厅/工作区相关死代码仍在。
+R134 移除了 `!` 命令路由段。但更根本的变化是：**现有的频道体系已全部废止**。
 
-### 4.1 现状（R134 之后）
+| 已废止的概念 | 原因 |
+|---|---|
+| `LOBBY`（大厅） | 无大厅，所有通信走 `_inbox:*` |
+| `REGISTRATION_CHANNEL` | 注册自动完成，无 admin 审批 |
+| `_admin` 频道 | 无 admin 角色，无管理频道 |
+| `WORKSPACE`（工作区） | R134 已清理 |
+| `sender_role`（admin/member） | 无分级，全自动注册 |
+
+这意味着 `handle_broadcast` 中除 inbox 路由外的所有逻辑都是死代码。
+
+### 4.1 现状 — 全量代码标注
 
 ```
-handle_broadcast(ws, sender_id, msg)
+handle_broadcast(ws, sender_id, msg)       ← L1498
   │
-  ├─ 🟢 A. 惰性启动
-  │      _ensure_watchdog() / engine._ensure_git_scan() / _ensure_agent_cards()
+  ├─ A. 惰性启动                            ← L1505  🟢 存活
   │
-  ├─ 🟢 B. _inbox:server 快速返回
-  │      channel == _inbox:server → 已由 scenario_matcher 处理，直接 return
+  ├─ B. _inbox:server 快速返回               ← L1520  🟢 存活
+  │    channel == _inbox:server → 直接 return
+  │    （scenario_matcher 已处理）
   │
-  ├─ 🟢 C. 未注册 bot 保护
-  │      非 approved → channel 强制改为 REGISTRATION_CHANNEL
+  ├─ C. 未注册 bot → REGISTRATION           ← L1528  ⚡ 无 registration 了
+  ├─ D. 速率限制                             ← L1532  ⚡ 只有 inbox 通道，无需全局限速
+  ├─ E. 消息过滤（去重/噪音）                 ← L1545  ⚡ inbox 是点对点，无需全局过滤
+  ├─ F. 用户信息 / sender_role / admin_ids   ← L1558  ⚡ 无 admin 角色了
+  ├─ G. Rollcall ACK + Bot ACK 检测          ← L1565  ⚡ 无大厅/工作区，无 rollcall
   │
-  ├─ 🟢 D. 速率限制 + 消息过滤
-  │      _check_rate_limit() / _is_nonsense() / _is_duplicate() / 静音前缀
+  ├─ H. _admin 频道 intercept                ← L1596  ⚡ 无 _admin 频道了
   │
-  ├─ 🟢 E. 用户信息解析
-  │      users / sender_name / sender_role / admin_ids
+  ├─ I. _inbox:{agent_id} 单播               ← L1617  🟢 存活（核心功能）
+  │    单播给收件箱主人 → ACK 回复
   │
-  ├─ 🟢 F. Rollcall ACK 钩子 + Bot ACK 检测
-  │      _r57_rollcall_events / _update_step_ack_state()
-  │
-  ├─ ⚡ G. _admin 频道 intercept  ←── 已废止，待删除
-  │      L1596-L1615 — 仅持久化消息，然后 return
-  │      实际无任何 bot 再发消息到 _admin
-  │
-  ├─ 🟢 H. Inbox 通道（_inbox:{agent_id}）
-  │      L1617-L1659 — 单播给收件箱主人 → ACK
-  │
-  ├─ ⚡ I. 频道解析  ←── 已废止，待删除
-  │      L1661-L1666 — channel != LOBBY ⇒ channel = LOBBY
-  │      整段只做了 fallback，无实际频道解析
-  │
-  ├─ ⚡ J. Lobby 暂停 + _can_broadcast  ←── 已废止，待删除
-  │      L1668-L1680 — 权限检查和暂停检测
-  │      原始设计依赖工作区状态，现在 `resolved_workspace` 恒为 None
-  │
-  ├─ ⚡ K. 大厅前缀路由  ←── 已废止，待删除
-  │      L1700-L1768 — 📢 公告 / 📋 点名 / 🆘 求助 / @ 提及的路由选择
-  │      近 70 行，当前所有消息直接走统一广播路径即可
-  │
-  ├─ 🟢 L. Registration 通道
-  │      L1770-L1775 — 仅投递到 admin 连接
-  │
-  ├─ 🟢 M. 统一广播
-  │      L1777-L1859 — 构建 payload → 遍历 targets → 发送 → 离线队列
-  │
-  └─ 🟢 N. ACK 交付统计
-        L1861-L1918 — 发送 delivery_status / 延迟统计
+  ├─ J. 频道解析 (channel→LOBBY fallback)   ← L1661  ⚡ 无 LOBBY 了
+  ├─ K. Lobby 暂停 + _can_broadcast          ← L1668  ⚡ 无 LOBBY 了
+  ├─ L. 大厅前缀路由 (📢/📋/🆘/@)            ← L1700  ⚡ 无 LOBBY 了
+  ├─ M. Registration 通道投递 admin           ← L1770  ⚡ 无 registration/admin 了
+  ├─ N. 统一广播 + 离线队列                   ← L1777  ⚡ 无广播目标了
+  └─ O. ACK 交付统计                         ← L1861  ⚡ 无广播了
 ```
 
-### 4.2 待清理的死代码汇总
+### 4.2 死代码汇总
 
-| 段落 | 行范围 | 行数 | 说明 |
+| 段落 | 行范围 | 行数 | 废止原因 |
 |---|---|---|---|
-| G `_admin` 频道 | L1596-L1615 | ~20 | 无实际流量，全 return |
-| I 频道解析 | L1661-L1666 | ~6 | 只剩 `channel = LOBBY` |
-| J 暂停+权限 | L1668-L1680 | ~13 | `_can_broadcast`/`_LOBBY_PAUSED` 已无关 |
-| K 大厅前缀路由 | L1700-L1768 | ~70 | 📢/📋/🆘/@ 路由选择，全 return |
-| 尾段 workspace admin roll-call | L1910-L1918 | ~10 | `resolved_workspace` 恒为 None |
-| **合计** | | **~120** | |
+| C 未注册 bot | L1528-L1530 | ~3 | 无 registration 通道 |
+| D 速率限制 | L1532-L1543 | ~12 | inbox 点对点无需限速 |
+| E 消息过滤 | L1545-L1556 | ~12 | inbox 无需全局去重 |
+| F 用户角色 | L1558-L1563 | ~6 | 无 admin/member 概念 |
+| G Rollcall+ACK | L1565-L1581 | ~17 | 无大厅/工作区 |
+| H `_admin` 频道 | L1596-L1615 | ~20 | 无管理频道 |
+| J 频道解析 | L1661-L1666 | ~6 | 无 LOBBY |
+| K 暂停+权限 | L1668-L1680 | ~13 | 无 LOBBY |
+| L 大厅前缀路由 | L1700-L1768 | ~70 | 无 LOBBY |
+| M Registration | L1770-L1775 | ~6 | 无 registration |
+| N 统一广播 | L1777-L1859 | ~83 | 无广播目标 |
+| O ACK 统计 | L1861-L1918 | ~58 | 无广播 |
+| **合计** | | **~306** | |
 
-此外，`handle_broadcast` 中的可重构段：
+存活代码仅 **~110 行**（惰性启动 + inbox 单播 + 辅助函数）。
 
-| 段落 | 行范围 | 行数 | 问题 |
-|---|---|---|---|
-| D 速率限制+过滤 | L1532-L1556 | ~25 | 可提取到独立 `_preprocess_message()` |
-| F Rollcall+ACK | L1565-L1581 | ~17 | 可提取到 `_handle_bot_signals()` |
-| M 统一广播 | L1777-L1859 | ~83 | `send_str`/`send` 二选一模式重复 4+ 次 |
-| N ACK 统计 | L1861-L1918 | ~58 | 大厅专用 ACK + admin 交付状态 |
-
-### 4.3 清理后预期（R135 后）
-
-移除 ⚡ 段落后，`handle_broadcast` 降为约 **200 行**：
+### 4.3 R135 清理后预期
 
 ```
 handle_broadcast(ws, sender_id, msg)
   │
   ├─ A. 惰性启动
-  ├─ B. _inbox:server 快速返回
-  ├─ C. 未注册 bot 保护
-  ├─ D. 速率限制 + 消息过滤（可提取 _preprocess_message）
-  ├─ E. Rollcall + Bot ACK 检测（可提取 _handle_bot_signals）
-  ├─ F. Inbox 通道 → 单播给收件箱主人
-  ├─ G. Registration 通道 → 投递 admin
-  └─ H. 广播 + 离线队列 + ACK 统计
+  │
+  ├─ B. _inbox:server → 直接 return
+  │    （scenario_matcher 已处理）
+  │
+  └─ C. _inbox:{agent_id} → 单播 + ACK
+       其他 channel → 静默忽略（不存在的通道）
 ```
 
 **简化后的消息路由流程：**
@@ -277,17 +259,19 @@ handle_broadcast(ws, sender_id, msg)
 ```
 入站 message
   │
-  ├─ _inbox:server → scenario_matcher 规则表处理 → 结束
+  ├─ channel == _inbox:server
+  │     → scenario_matcher.dispatch() 规则表
+  │     → loopback / to_agent / ##命令 / ACK / 完成确认 / 退回 / 失败 / 兜底
   │
-  ├─ _inbox:{agent_id} → 单播 + ACK
-  │
-  ├─ registration → 仅投 admin
-  │
-  └─ 其他 (实际仅 LOBBY) → 统一广播全部在线连接 + 离线队列
+  └─ channel == _inbox:{agent_id}
+        → 验证收件箱存在
+        → 验证 sender != owner（防自刷）
+        → 单播给 owner
+        → ACK 回复发送者
 ```
 
-没有大厅前缀分类，没有工作区权限，没有 `_admin` 频道。`handle_broadcast`
-退化为纯粹的 **投递路由器**：判断通道类型 → 选择投递策略 → 发送 + ACK。
+没有大厅、没有工作区、没有权限分级、没有广播。
+`handle_broadcast` 退化为 **inbox 投递器**。
 
 ---
 
