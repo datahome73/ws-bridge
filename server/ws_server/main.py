@@ -45,7 +45,7 @@ def _ensure_engine() -> PipelineEngine:
             _get_step_config, _find_agents_by_role,
             _set_pipeline_state, _step_sort_key,
         )
-        from .engine2 import _resolve_card_key_to_ws_id, _extract_artifact_kv
+        from .pipeline_engine import _resolve_card_key_to_ws_id, _extract_artifact_kv
         engine = PipelineEngine(
             context_mgr=_ensure_pipeline_manager(),
             send_to_agent=_send_to_agent,
