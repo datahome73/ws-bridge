@@ -212,7 +212,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # ── Route sub-commands ──
-    from . import main as _main
+    from . import engine2 as _e2
 
     if sub_cmd == "whoami":
         from server.common import auth, persistence
@@ -263,15 +263,15 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 
 async def _format_query_status(round_name: str) -> str:
     """Format pipeline status response."""
-    from . import main as _main
+    from . import engine2 as _e2
     if round_name:
         # Specific round
-        mgr = _main._ensure_pipeline_manager()
+        mgr = _e2._ensure_pipeline_manager()
         ctx = mgr.get(round_name.upper())
         if ctx:
-            return _main._ensure_engine().format_context(ctx)
+            return _e2._ensure_engine().format_context(ctx)
         # Check archive
-        archive = _main._ensure_engine().find_archive(round_name.upper())
+        archive = _e2._ensure_engine().find_archive(round_name.upper())
         if archive:
             from datetime import datetime
             ts = archive.get("archived_at", 0)
@@ -281,7 +281,7 @@ async def _format_query_status(round_name: str) -> str:
             return f"📦 {round_name.upper()} 已归档\\n状态: completed\\n归档时间: {time_str}\\n总步数: {total} / 完成: {done}"
         return f"❌ 管线 {round_name.upper()} 不存在"
     # All active pipelines
-    mgr = _main._ensure_pipeline_manager()
+    mgr = _e2._ensure_pipeline_manager()
     active = mgr.get_all_active()
     if not active:
         return "📋 当前无活跃管线"
@@ -404,18 +404,18 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             kv[k.strip()] = v.strip()
 
     # Import callbacks registered by main.py
-    from . import main as _main
+    from . import engine2 as _e2
 
     if cmd == "start":
-        return await _main._handle_hash_start(round_name, kv, agent_id, ws)
+        return await _e2._handle_hash_start(round_name, kv, agent_id, ws)
     elif cmd == "status":
-        return await _main._handle_hash_status(round_name, agent_id, ws)
+        return await _e2._handle_hash_status(round_name, agent_id, ws)
     elif cmd == "stop":
-        return await _main._handle_hash_stop(round_name, agent_id, ws)
+        return await _e2._handle_hash_stop(round_name, agent_id, ws)
     elif cmd == "advance":
-        return await _main._handle_hash_advance(round_name, kv, agent_id, ws)
+        return await _e2._handle_hash_advance(round_name, kv, agent_id, ws)
     elif cmd == "archive":
-        return await _main._handle_hash_archive(round_name, agent_id, ws)
+        return await _e2._handle_hash_archive(round_name, agent_id, ws)
     elif cmd == "help":
         await _send_reply(ws, agent_id,
             "📋 **## 命令帮助**\n\n"
@@ -500,7 +500,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # 6 个子命令路由（复用 main.py 函数）
-    from . import main as _main
+    from . import engine2 as _e2
 
     if sub_cmd == "whoami":
         from server.common import auth as _auth
