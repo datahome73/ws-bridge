@@ -2,10 +2,15 @@
 
 | 字段 | 内容 |
 |:-----|:------|
-| **版本** | v1.0 |
+| **版本** | v2.0 |
 | **关联需求** | `docs/R132/R132-product-requirements.md` |
 | **开发分支** | `dev` |
 | **目标分支** | `main` |
+
+---
+
+> **本轮范围调整：** `##admin` 和 `##task` 规则组已取消（admin 角色不存在，task 已被管线替代）。
+> **仅迁移 `##step` 一个规则组（6 个步骤操作）。**
 
 ---
 
@@ -28,63 +33,53 @@
 
 | 文件 | 操作 | 说明 |
 |:-----|:----:|:-----|
-| `server/ws_server/scenario_matcher.py` | 修改 | 新增 3 个规则组 + 3 个 handler |
+| `server/ws_server/scenario_matcher.py` | 修改 | 新增 `##step` 规则组 + `handle_step()` handler |
 | `server/commands/` | 不变 | 旧 `!` 命令保持兼容，本轮不动 |
 
 ### 2.2 规则注册
 
-在 `scenario_matcher.py` 的 `MATCH_RULES` 中追加 3 条规则：
+在 `scenario_matcher.py` 的 `MATCH_RULES` 中追加一条规则：
 
 ```python
 # R132 — 步骤操作（优先级 32）
 QueryRule(
     priority=32,
-    patterns=[r"^##step##(?P<step_action>\w+)(?:##(?P<step_args>.+))?$"],
+    patterns=[
+        r"^##step##(?P<step_action>\w+)(?:##(?P<step_args>.+))?$",
+    ],
     handler="handle_step",
-),
-
-# R132 — 管理操作（优先级 34）
-QueryRule(
-    priority=34,
-    patterns=[r"^##admin##(?P<admin_action>\w+)(?:##(?P<admin_args>.+))?$"],
-    handler="handle_admin",
-),
-
-# R132 — 任务操作（优先级 36）
-QueryRule(
-    priority=36,
-    patterns=[r"^##task##(?P<task_action>\w+)(?:##(?P<task_args>.+))?$"],
-    handler="handle_task",
 ),
 ```
 
 ### 2.3 Handler 签名
 
-所有 handler 遵循统一签名：
-
 ```python
-def handle_<group>(agent_id: str, action: str, args: str, level: int) -> dict:
-    # 返回: {"reply": "..."} 或 {"error": "..."}
+def handle_step(agent_id: str, action: str, args: str, level: int) -> dict:
+    """
+    处理 ##step 命令
+    返回: {"reply": "..."} 或 {"error": "..."}
+    """
 ```
 
-### 2.4 权限
+### 2.4 权限配置
 
-沿用 `_QUERY_LEVEL_MAP` 最小级别表模式（R131 已确立）：
+在 `_QUERY_LEVEL_MAP` 中追加：
 
 ```python
 _QUERY_LEVEL_MAP = {
     # R131
-    "whoami": 1, "help": 1, "status": 3, "agents": 3, "agent_info": 3, "audit": 4,
+    "whoami": 1, "help": 1,
+    "status": 3, "agents": 3, "agent_info": 3,
+    "audit": 4,
     # R132
-    "step": 4, "admin": 4, "task": 4,
+    "step": 4,
 }
 ```
 
 ### 2.5 旧兼容
 
-- R131 的 `!` → `##` 映射仍保留
 - 旧 `commands/` 目录代码不变
-- **不新增** `commands/` 中的文件
+- 旧 `!step_*` 命令仍可工作（兼容期）
 
 ---
 
@@ -92,18 +87,16 @@ _QUERY_LEVEL_MAP = {
 
 ### 3.1 实现顺序
 
-1. `_QUERY_LEVEL_MAP` 追加 step/admin/task 级别定义
-2. 实现 `handle_step()` handler
-3. 实现 `handle_admin()` handler
-4. 实现 `handle_task()` handler
-5. `MATCH_RULES` 追加 3 条新规则
+1. `_QUERY_LEVEL_MAP` 追加 `"step": 4`
+2. 实现 `handle_step()` handler（6 个 action：complete / reject / restart / force / pause / resume）
+3. `MATCH_RULES` 追加 `##step` 规则
 
 ### 3.2 验收条件
 
-- 所有 handler 返回结构统一：`{"reply": "..."}` 或 `{"error": "..."}`
+- `handle_step()` 返回结构统一：`{"reply": "..."}` 或 `{"error": "..."}`
 - 权限不足时返回 `{"error": "权限不足：需要 L4 级别"}`
-- 未知 action 时返回 `{"error": "未知操作: {action}"}`
-- 旧 `!` 命令不受影响
+- 未知 action 时返回 `{"error": "未知步骤操作: {action}"}`
+- 旧 `!step_*` 命令不受影响
 
 ---
 
@@ -113,41 +106,44 @@ _QUERY_LEVEL_MAP = {
 
 | # | 检查项 |
 |:--|:-------|
-| 1 | 3 个 handler 是否正确注册到 `MATCH_RULES` |
-| 2 | 权限级别配置正确（`_QUERY_LEVEL_MAP`） |
-| 3 | 正则 pattern 不与其他规则冲突 |
-| 4 | 所有 handler 返回统一 dict 格式 |
-| 5 | 旧 `!` 命令仍正常工作 |
-| 6 | 无硬编码字符串（如 `"L4"` 写死） |
+| 1 | `handle_step` 正确注册到 `MATCH_RULES`（优先级 32） |
+| 2 | 权限级别配置正确（`_QUERY_LEVEL_MAP` 中 `step: 4`） |
+| 3 | 正则 `^##step##(?P<step_action>\w+)(?:##(?P<step_args>.+))?$` 不与其他规则冲突 |
+| 4 | 6 个 action（complete / reject / restart / force / pause / resume）都有对应分支 |
+| 5 | 返回统一 dict 格式 |
+| 6 | 旧 `!step_*` 命令仍正常工作 |
 
 ---
 
 ## Step 5 — 测试验证
 
-### 5.1 测试用例
+### 5.1 功能测试
 
 | # | 命令 | 期望 |
-|:--|:-----|:------|
-| 1 | `##step##complete##R131` | 回复：步骤 R131 已 complete ✅ |
-| 2 | `##step##reject##R131##bug太多` | 回复：步骤 R131 已 reject ✅ |
-| 3 | `##step##force##R131` | 回复：步骤 R131 已 force ✅ |
-| 4 | `##step##unknown##R131` | 回复：未知操作 unknown ❌ |
-| 5 | `##admin##set_card##小谷##测试中` | 回复：名片已更新 ✅ |
-| 6 | `##admin##reload_agents` | 回复：agent 列表已重载 ✅ |
-| 7 | `##admin##reset_pipeline` | 回复：管线已重置 ✅ |
-| 8 | `##task##create##新任务` | 回复：任务已创建 ✅ |
-| 9 | `##task##list` | 回复：任务列表 ✅ |
-| 10 | `##task##rollcall` | 回复：点名统计 ✅ |
-| 11 | `!whoami` | 旧命令仍正常工作 ✅ |
-| 12 | `!help` | 旧命令仍正常工作 ✅ |
+|:--|:------|:------|
+| 1 | `##step##complete##R131` | 回复：步骤 R131 已完成 ✅ |
+| 2 | `##step##reject##R131##bug太多` | 回复：步骤 R131 已打回 ✅ |
+| 3 | `##step##restart##R131` | 回复：步骤 R131 已重启 ✅ |
+| 4 | `##step##force##R132` | 回复：步骤 R132 已强制推进 ✅ |
+| 5 | `##step##pause##R132` | 回复：步骤 R132 已暂停 ⏸️ |
+| 6 | `##step##resume##R132` | 回复：步骤 R132 已恢复 ▶️ |
+| 7 | `##step##unknown##R132` | 回复：未知步骤操作 unknown ❌ |
 
-### 5.2 L1 权限验证
+### 5.2 兼容测试
 
 | # | 命令 | 期望 |
-|:--|:-----|:------|
-| 13 | `##step##complete##R131`（L1） | 权限不足：需要 L4 ❌ |
-| 14 | `##admin##set_card##小谷`（L1） | 权限不足：需要 L4 ❌ |
-| 15 | `##task##create##test`（L1） | 权限不足：需要 L4 ❌ |
+|:--|:------|:------|
+| 8 | `!step_complete R131` | 旧命令仍正常工作 ✅ |
+| 9 | `!whoami` | 旧命令仍正常工作 ✅ |
+| 10 | `!help` | 旧命令仍正常工作 ✅ |
+| 11 | `!set_card xxx` | 旧命令仍工作（不会被误拦截）✅ |
+
+### 5.3 权限测试（L1 用户）
+
+| # | 命令 | 期望 |
+|:--|:------|:------|
+| 12 | `##step##complete##R131`（L1） | 权限不足：需要 L4 ❌ |
+| 13 | `##step##pause##R132`（L1） | 权限不足：需要 L4 ❌ |
 
 ---
 
@@ -165,10 +161,10 @@ git push origin main
 | # | 验证项 |
 |:--|:-------|
 | 1 | `##step##complete##R131` 正常 |
-| 2 | `##admin##reload_agents` 正常 |
-| 3 | `##task##list` 正常 |
-| 4 | `!whoami` 旧命令仍兼容 |
-| 5 | L1 用户被挡在新命令外 |
+| 2 | `##step##reject##R131##原因` 正常 |
+| 3 | `##step##force##R132` 正常 |
+| 4 | `!step_complete R131` 旧命令仍兼容 |
+| 5 | L1 用户被挡在 `##step` 命令外 |
 
 ---
 

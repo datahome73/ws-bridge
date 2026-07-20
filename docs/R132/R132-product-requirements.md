@@ -2,7 +2,7 @@
 
 | 字段 | 内容 |
 |:-----|:------|
-| **版本** | v1.0 |
+| **版本** | v2.0 |
 | **作者** | Hermes Agent |
 | **状态** | 开发中 |
 | **关联管线** | R132 |
@@ -15,24 +15,29 @@
 
 R131 已验证 `##query` 模式走通（whoami / status / agents / agent_info / help / audit），确认规则引擎 + 权限矩阵 + inbox 回复整条链路由一个场景匹配器 + 一个 handler 搞定。
 
-目前剩余约 **25 个 `!` 命令**仍然走旧 `commands/` 目录处理。两套模式并存的窗口期越短越好——避免开发者混淆，也避免`!`命令的拦截逻辑持续消耗维护成本。
+目前剩余部分 `!` 命令仍然走旧 `commands/` 目录处理。两套模式并存的窗口期越短越好——避免开发者混淆，也避免 `!` 命令的拦截逻辑持续消耗维护成本。
 
 ### 1.2 本轮目标
 
-> **一次性将所有剩余 `!` 命令全部迁移到 `##` 规则模式，使 `!` 命令体系接近废弃状态。**
+> **将剩余 `!` 命令一次性迁移或清理，使 `!` 命令体系接近废弃状态。**
 
-- 旧 `commands/` 目录保留但不扩展（R133 再清理）
-- 仅新增 3 个规则组（`##step`、`##admin`、`##task`），严禁引入新的命令类型
-- 所有命令走 **inbox 单播**，不存在多播 / broadcast 场景
-- **不影响任何其他 bot**——发送到 `_inbox:server`，server 回复到查询 bot 的 `_inbox`
+本轮仅新增 **1 个规则组**（`##step`）。`##admin` 和 `##task` 规则组已取消——`admin` 角色已不存在，`task` 功能已被管线任务替代。
 
-### 1.3 成功标准
+### 1.3 变更范围
+
+| 规则组 | 操作 | 原因 |
+|:-------|:----:|:------|
+| `##step`（步骤操作） | ✅ **迁移** | 管线步骤操作仍需使用 |
+| `##admin`（管理操作） | ❌ **废弃** | admin 角色已不存在 |
+| `##task`（任务操作） | ❌ **废弃** | 已被管线任务替代 |
+
+### 1.4 成功标准
 
 | # | 标准 |
 |:--|:-----|
-| 1 | 每个旧 `!` 命令有对应的 `##<group>##<action>[##<args>]` 等价物 |
+| 1 | 步骤相关 `!` 命令有对应的 `##step##<action>##<args>` 等价物 |
 | 2 | 旧 `!` 命令仍可工作（兼容期），走 commands 目录 |
-| 3 | 新增规则组全部通过 `scenario_matcher.handle_query()` 路由 |
+| 3 | 新增规则组通过 `scenario_matcher.handle_query()` 路由 |
 | 4 | 权限检查：L1 只能发 test；L3 只收不发；L4 才能写操作 |
 | 5 | 所有命令回复到查询 bot 的 `_inbox` |
 
@@ -40,45 +45,16 @@ R131 已验证 `##query` 模式走通（whoami / status / agents / agent_info / 
 
 ## 2. 命令迁移映射
 
-### 2.1 本次迁移的 3 个规则组
+### 2.1 本次迁移：`##step`（管线步骤操作）— 优先级 32
 
-#### 规则一：`##step`（管线步骤操作）— 优先级 32
-
-| 旧 `!` 命令 | 新 `##` 命令 | 级别 | 说明 |
-|:-----------|:-------------|:----:|:-----|
+| 旧 `!` 命令 | 新 `##step` 命令 | 级别 | 说明 |
+|:-----------|:-----------------|:----:|:-----|
 | `!step_complete <id>` | `##step##complete##<id>` | L4 | 步骤完成 |
 | `!step_reject <id> <原因>` | `##step##reject##<id>##<原因>` | L4 | 步骤打回 |
 | `!step_back <id>` | `##step##restart##<id>` | L4 | 步骤回退 |
 | `!step_force <id>` | `##step##force##<id>` | L4 | 强制推进 |
 | `!step_pause <id>` | `##step##pause##<id>` | L4 | 暂停步骤 |
 | `!step_resume <id>` | `##step##resume##<id>` | L4 | 恢复步骤 |
-
-#### 规则二：`##admin`（管理操作）— 优先级 34
-
-| 旧 `!` 命令 | 新 `##` 命令 | 级别 | 说明 |
-|:-----------|:-------------|:----:|:-----|
-| `!set_card <agent> <内容>` | `##admin##set_card##<agent>##<内容>` | L4 | 设置 agent 名片 |
-| `!approve <agent>` | `##admin##approve##<agent>` | L4 | 批准 agent 加入 |
-| `!reject <agent>` | `##admin##reject##<agent>` | L4 | 驳回 agent |
-| `!revoke_key <agent>` | `##admin##revoke_key##<agent>` | L4 | 吊销 agent key |
-| `!purge_history <agent>` | `##admin##purge_history##<agent>` | L4 | 清空 agent 历史 |
-| `!set_pipeline_config <key> <val>` | `##admin##set_config##<key>##<val>` | L4 | 设置管线配置 |
-| `!reset_pipeline` | `##admin##reset_pipeline` | L4 | 重置管线 |
-| `!reset_board` | `##admin##reset_board` | L4 | 重置看板 |
-| `!reload_agents` | `##admin##reload_agents` | L4 | 重载 agent 列表 |
-| `!broadcast <消息>` | **已废弃** | — | 工作室已不存在 |
-
-#### 规则三：`##task`（任务操作）— 优先级 36
-
-| 旧 `!` 命令 | 新 `##` 命令 | 级别 | 说明 |
-|:-----------|:-------------|:----:|:-----|
-| `!task_create <标题>` | `##task##create##<标题>` | L4 | 创建任务 |
-| `!task_assign <id> <agent>` | `##task##assign##<id>##<agent>` | L4 | 分配任务 |
-| `!task_status <id> <状态>` | `##task##status##<id>##<状态>` | L4 | 更新任务状态 |
-| `!task_list` | `##task##list` | L4 | 列出任务 |
-| `!task_comment <id> <内容>` | `##task##comment##<id>##<内容>` | L4 | 添加任务评论 |
-| `!task_del <id>` | `##task##delete##<id>` | L4 | 删除任务 |
-| `!roll_call` | `##task##rollcall` | L4 | 点名统计 |
 
 ### 2.2 已迁移（R131，不在此轮）
 
@@ -94,8 +70,24 @@ R131 已验证 `##query` 模式走通（whoami / status / agents / agent_info / 
 ### 2.3 废弃命令（不做迁移）
 
 | 旧命令 | 原因 |
-|:------|:-----|
+|:------|:------|
+| `!set_card` | admin 角色已不存在 |
+| `!approve` | admin 角色已不存在 |
+| `!reject` | admin 角色已不存在 |
+| `!revoke_key` | admin 角色已不存在 |
+| `!purge_history` | admin 角色已不存在 |
+| `!set_pipeline_config` | admin 角色已不存在 |
+| `!reset_pipeline` | admin 角色已不存在 |
+| `!reset_board` | admin 角色已不存在 |
+| `!reload_agents` | admin 角色已不存在 |
 | `!broadcast` | 工作室已不存在 |
+| `!task_create` | 已被管线任务替代 |
+| `!task_assign` | 已被管线任务替代 |
+| `!task_status` | 已被管线任务替代 |
+| `!task_list` | 已被管线任务替代 |
+| `!task_comment` | 已被管线任务替代 |
+| `!task_del` | 已被管线任务替代 |
+| `!roll_call` | 已被管线任务替代 |
 | `!create_workspace` | 工作室已不存在 |
 | `!invite_to_workspace` | 工作室已不存在 |
 | `!leave_workspace` | 工作室已不存在 |
@@ -103,68 +95,76 @@ R131 已验证 `##query` 模式走通（whoami / status / agents / agent_info / 
 
 ---
 
-## 3. 新规则组 handler 设计
+## 3. `##step` Handler 设计
 
-### 3.1 共享规则
+### 3.1 签名
 
-- 所有 handler 遵循 `handle_<group>(agent_id, args, level) -> dict` 签名
-- 返回格式：`{"reply": "回复文本"}` 或 `{"reply": "回复文本", "action": {...}}`
-- 权限不足时返回 `{"error": "权限不足：需要 L{min_level} 级别"}`
+```python
+def handle_step(agent_id: str, action: str, args: str, level: int) -> dict:
+    """
+    处理 ##step 命令
+    
+    返回: {"reply": "..."} 或 {"error": "..."}
+    """
+```
 
-### 3.2 `handle_step` 伪代码
+### 3.2 伪代码
 
 ```
 function handle_step(agent_id, action, args, level):
-    if level < 4: return error("需要 L4")
-    if action == "complete":
-        更新步骤状态为 completed
-    elif action == "reject":
-        更新步骤状态为 rejected，记录原因
-    elif action == "restart":
-        恢复步骤到上一个未关闭状态
-    elif action == "force":
-        跳过当前步骤检查
-    elif action == "pause":
-        标记步骤暂停
-    elif action == "resume":
-        取消暂停标记
-    else:
-        return error("未知操作: {action}")
-    return reply("步骤 #{id} 已 {action}")
-```
-
-### 3.3 `handle_admin` 伪代码
-
-```
-function handle_admin(agent_id, action, args, level):
-    if level < 4: return error("需要 L4")
+    if level < 4:
+        return {"error": "权限不足：需要 L4 级别"}
+    
     switch action:
-        set_card:       更新 agent 名片
-        approve:        批准 agent
-        reject:         驳回 agent
-        revoke_key:     吊销 key
-        purge_history:  清空历史记录
-        set_config:     更新管线配置
-        reset_pipeline: 重置管线状态
-        reset_board:    重置看板
-        reload_agents:  重载 agent 列表
-    return reply("管理操作 {action} 已完成")
+        case "complete":
+            step_id = args
+            更新 pipeline_engine 中步骤状态为 completed
+            return {"reply": f"步骤 #{step_id} 已完成 ✅"}
+        
+        case "reject":
+            parts = args.split("##", 1)
+            step_id = parts[0]
+            reason = parts[1] if len(parts) > 1 else ""
+            更新步骤状态为 rejected，记录原因
+            return {"reply": f"步骤 #{step_id} 已打回：{reason}"}
+        
+        case "restart":
+            step_id = args
+            恢复步骤到上一个未关闭状态
+            return {"reply": f"步骤 #{step_id} 已重启"}
+        
+        case "force":
+            step_id = args
+            跳过当前步骤检查，强制推进
+            return {"reply": f"步骤 #{step_id} 已强制推进"}
+        
+        case "pause":
+            step_id = args
+            标记步骤暂停
+            return {"reply": f"步骤 #{step_id} 已暂停 ⏸️"}
+        
+        case "resume":
+            step_id = args
+            取消暂停标记
+            return {"reply": f"步骤 #{step_id} 已恢复 ▶️"}
+        
+        default:
+            return {"error": f"未知步骤操作: {action}"}
 ```
 
-### 3.4 `handle_task` 伪代码
+### 3.3 权限
 
-```
-function handle_task(agent_id, action, args, level):
-    if level < 4: return error("需要 L4")
-    switch action:
-        create:  创建任务
-        assign:  分配任务给 agent
-        status:  更新任务状态
-        list:    列出所有任务
-        comment: 添加评论
-        delete:  删除任务
-        rollcall:点名统计
-    return reply("任务操作 {action} 已完成")
+在 `_QUERY_LEVEL_MAP` 中追加：
+
+```python
+_QUERY_LEVEL_MAP = {
+    # R131
+    "whoami": 1, "help": 1,
+    "status": 3, "agents": 3, "agent_info": 3,
+    "audit": 4,
+    # R132
+    "step": 4,
+}
 ```
 
 ---
@@ -174,37 +174,14 @@ function handle_task(agent_id, action, args, level):
 在 `scenario_matcher.py` 的 `MATCH_RULES` 表中追加：
 
 ```python
-# R132 — 步骤管理
-MATCH_RULES = [
-    # ... 已有 R131 规则（优先级 20-26）...
-
-    # R132 — 步骤操作（优先级 32）
-    QueryRule(
-        priority=32,
-        patterns=[
-            r"^##step##(?P<step_action>\w+)(?:##(?P<step_args>.+))?$",
-        ],
-        handler="handle_step",
-    ),
-
-    # R132 — 管理操作（优先级 34）
-    QueryRule(
-        priority=34,
-        patterns=[
-            r"^##admin##(?P<admin_action>\w+)(?:##(?P<admin_args>.+))?$",
-        ],
-        handler="handle_admin",
-    ),
-
-    # R132 — 任务操作（优先级 36）
-    QueryRule(
-        priority=36,
-        patterns=[
-            r"^##task##(?P<task_action>\w+)(?:##(?P<task_args>.+))?$",
-        ],
-        handler="handle_task",
-    ),
-]
+# R132 — 步骤操作（优先级 32）
+QueryRule(
+    priority=32,
+    patterns=[
+        r"^##step##(?P<step_action>\w+)(?:##(?P<step_args>.+))?$",
+    ],
+    handler="handle_step",
+),
 ```
 
 ---
@@ -242,18 +219,21 @@ MATCH_RULES = [
 | 来源 | 数量 |
 |:-----|:----:|
 | R131 已迁移 | 6 |
-| R132 迁移 | 23 |
-| 废弃（工作室） | 5 |
-| **合计** | **34** |
+| R132 迁移（##step） | 6 |
+| 废弃（admin / task / workspace） | 21 |
+| **合计** | **33** |
 
 ### 7.2 新旧对照速查表
 
 ```
-用户输入          →  规则路由              →  处理函数
-──────────────────────────────────────────────────────
-##step##complete##R131  →  handle_step()    →  更新步骤状态
-##admin##set_card##小谷  →  handle_admin()   →  设置名片
-##task##create##新任务   →  handle_task()    →  创建任务
+用户输入                           →  规则路由         →  处理函数
+──────────────────────────────────────────────────────────────────
+##step##complete##R131             →  handle_step()   →  更新步骤状态
+##step##reject##R131##bug太多      →  handle_step()   →  步骤打回
+##step##restart##R131              →  handle_step()   →  步骤回退重启
+##step##force##R132                →  handle_step()   →  强制推进
+##step##pause##R132               →  handle_step()   →  暂停步骤
+##step##resume##R132              →  handle_step()   →  恢复步骤
 ```
 
 ---
