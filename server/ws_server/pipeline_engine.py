@@ -573,6 +573,22 @@ class PipelineEngine:
             role_agent_map=role_agent_map,
             created_at=time.time(),
         )
+        # ═══ 生成 ctx.steps: 从 role_agent_map 填充各 step 的 agent_id ═══
+        _step_role_map = ["pm", "arch", "dev", "review", "qa", "ops"]
+        steps = []
+        for i in range(1, total_steps + 1):
+            role = _step_role_map[i - 1] if i - 1 < len(_step_role_map) else "?"
+            agent_ids = role_agent_map.get(role, [])
+            agent_id = agent_ids[0] if agent_ids else ""
+            step_name = config.PIPELINE_PM_NAME if role == "pm" else agent_id
+            steps.append({
+                "name": f"step{i}",
+                "role": role,
+                "agent_id": agent_id,
+                "agent_name": step_name,
+                "status": "pending",
+            })
+        ctx.steps = steps
         self._ctx_mgr.add(ctx)
         try:
             self._ctx_mgr.save()
@@ -846,12 +862,12 @@ class PipelineEngine:
             target_agent_id = step_info.get("agent_id", "")
 
         if not target_agent_id:
-            if self._resolve_card_key:
-                target_agent_id = self._resolve_card_key(
-                    config.PIPELINE_PM_AGENT_ID or ""
-                )
-            if not target_agent_id:
-                target_agent_id = config.PIPELINE_PM_AGENT_ID
+            logger.warning(
+                "[R106] %s step%s: ctx.steps 中未找到 agent_id，跳过自动派活。"
+                "请确认 ##start 时传入了正确的 role_agent_map 参数",
+                round_name, step_key,
+            )
+            return False
 
         if not target_agent_id:
             logger.warning("[R106] %s step%d: 找不到目标 agent", round_name, step_num)
