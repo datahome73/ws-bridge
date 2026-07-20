@@ -96,16 +96,22 @@ R134 虽然移除了 `!` 命令路由段（-1,245 行），但以下频道体系
   - `_get_agents_by_role()` 函数（L512-L544）
   - 所有 `sender_role` 分支逻辑
 
-### CLN-6（清理 F）：Rollcall + Bot ACK 检测
+### CLN-6（清理 F）：Rollcall 检测
 
 - **位置：** `main.py` L1565-L1581
-- **行为：** 删除。无大厅/工作区，无 rollcall。
+- **行为：** 删除 rollcall 相关代码。无大厅/工作区，无 rollcall。
+- **保留：** ACK 状态机核心（`_update_step_ack_state()` / `_ack_timeout_task()` / `_format_ack_status()`）— 管线派活跟踪仍需要
 - **附带清理：**
   - `_handle_rollcall_ack()` 函数
-  - `_update_step_ack_state()` 函数
   - `state._r57_rollcall_events`
   - `state._channel_ack_state`
   - `state._step_advance_buffer`
+
+### CLN-6b（清理 F2）：ACK 告警通知（已废止的 workspace 广播）
+
+- **位置：** `main.py` L1029-L1124
+- **行为：** 删除 `_send_ack_timeout_info()` 和 `_trigger_ack_escalation()`。这两个函数向已废止的 workspace 频道广播超时/升级告警，无 bot 接收。
+- **保留：** ACK 30 秒超时检测 `_ack_timeout_task()`（标记 ack_timeout 状态的逻辑仍有用）
 
 ### CLN-7（清理 G）：频道解析 fallback/Lobby 暂停/`_can_broadcast`/大厅前缀路由
 
@@ -207,7 +213,8 @@ handle_broadcast(ws, sender_id, msg)
 | CLN-3 | 速率限制代码及 state 变量全部删除 | P0 | ⬜ |
 | CLN-4 | 全局消息过滤代码及 state 变量全部删除 | P0 | ⬜ |
 | CLN-5 | 用户角色/权限代码及 `_can_broadcast` 删除 | P0 | ⬜ |
-| CLN-6 | Rollcall/ACK 检测及 state 变量删除 | P0 | ⬜ |
+| CLN-6 | Rollcall 检测代码及 state 变量删除，ACK 状态机核心保留 | P0 | ⬜ |
+| CLN-6b | ACK 告警通知函数（`_send_ack_timeout_info`/`_trigger_ack_escalation`）删除 | P0 | ⬜ |
 | CLN-7 | Lobby 暂停 + 大厅前缀路由 + 频道解析整段删除 | P0 | ⬜ |
 | CLN-8 | Registration 通道投递删除 | P0 | ⬜ |
 | CLN-9 | 统一广播 + 离线队列及其 state 变量删除 | P0 | ⬜ |
