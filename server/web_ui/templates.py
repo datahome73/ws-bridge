@@ -415,13 +415,13 @@ function createInboxMessageEl(m) {
   const sender = m.from_name || m.from || m.sender || '?';
   const receiver = m.to_name || '?';
   const cls = colorMap[sender] || 'unknown';
+  const recvCls = colorMap[receiver] || 'unknown';
   div.innerHTML =
     '<div class="meta">' +
       '<span class="ts">' + formatTime(m.ts) + '</span>' +
       '<span class="sender s-' + cls + '">' + escapeHtml(sender) + '</span>' +
       '<span style="color:#8b949e;margin:0 4px;">→</span>' +
-      const recvCls = colorMap[receiver] || 'unknown';
-    '<span class="sender s-' + recvCls + '">' + escapeHtml(receiver) + '</span>' +
+      '<span class="sender s-' + recvCls + '">' + escapeHtml(receiver) + '</span>' +
     '</div>' +
     '<div class="content">' + escapeHtml(m.content || '') + '</div>';
   return div;
