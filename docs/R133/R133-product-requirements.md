@@ -45,20 +45,20 @@ Web 端收件箱（Inbox Tab）目前通过 `colorMap` + CSS class 为 6 个 bot
 
 ### 2.1 颜色方案
 
-选择与现有 6 bot 颜色不冲突的 2 种颜色：
+选择与现有 6 bot 颜色不冲突的 2 种颜色（排除红/黄/绿已有色系）：
 
 | 发件人 | 色值 | 说明 |
 |:------|:----|:-----|
-| **系统** | `#39d2c0` | 青色 — 中性、技术感、非人格化 |
-| **经理** | `#f78166` | 鲑鱼红 — 权威、醒目、区别于 6 bot |
+| **系统** | `#58a6ff` | 蓝色 — 系统默认色、中性、与技术底色一致 |
+| **经理** | `#bc8cff` | 浅紫色 — 权威、区别于爱泰的 `#d2a8ff` |
 
 ### 2.2 CSS 改动
 
 在 `templates.py` CSS 区新增 2 个 class（接 L79 之后）：
 
 ```css
-.msg .sender.s-system{color:#39d2c0;}
-.msg .sender.s-manager{color:#f78166;}
+.msg .sender.s-system{color:#58a6ff;}
+.msg .sender.s-manager{color:#bc8cff;}
 ```
 
 ### 2.3 JavaScript colorMap 扩展
@@ -144,8 +144,8 @@ L218-231 的 `createMessageEl` 用于工作区/大厅消息，当前没有显示
 
 | # | 验收项 | 验证方法 |
 |:--|:-------|:---------|
-| A1 | 系统发消息时收件箱显示青色 `#39d2c0` | 打开 Web 收件箱，找到 `from_name=系统` 的消息，查看蓝色标签 |
-| A2 | 经理发消息时收件箱显示鲑鱼红 `#f78166` | 打开 Web 收件箱，找到 `from_name=经理` 的消息，查看红色标签 |
+| A1 | 系统发消息时收件箱显示蓝色 `#58a6ff` | 打开 Web 收件箱，找到 `from_name=系统` 的消息，查看蓝色标签 |
+| A2 | 经理发消息时收件箱显示浅紫色 `#bc8cff` | 打开 Web 收件箱，找到 `from_name=经理` 的消息，查看紫色标签 |
 | A3 | 6 个 bot 发件人颜色不受影响 | 逐一检查 6 bot 颜色不变 |
 | A4 | 未知发件人仍 fallback 灰色 `#8b949e` | 模拟未知 sender 显示灰色 |
 

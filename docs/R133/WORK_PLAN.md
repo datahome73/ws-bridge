@@ -114,8 +114,8 @@ steps:
 
 1. **CSS 区**（L79-80 之间）：新增 2 行
    ```css
-   .msg .sender.s-system{color:#39d2c0;}
-   .msg .sender.s-manager{color:#f78166;}
+   .msg .sender.s-system{color:#58a6ff;}
+   .msg .sender.s-manager{color:#bc8cff;}
    ```
 
 2. **JS colorMap**（L216）：追加 `'系统':'system','经理':'manager'`
