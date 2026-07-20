@@ -12,7 +12,8 @@ import uuid
 from aiohttp import web
 
 from server.common.config import HOST, PORT, DATA_DIR, ADMIN_AGENTS, DISPATCH_SENDER_ID  # R102: PM guard
-from .main import handle_auth, handle_broadcast, handle_register, _connections  # R87
+from .connection_manager import _connections  # R136
+from .main import handle_auth, handle_broadcast, handle_register  # R87
 from . import scenario_matcher as _sm  # R126
 from .message_store import init_db
 from server.common.persistence import get_approved_users as _get_approved_users
