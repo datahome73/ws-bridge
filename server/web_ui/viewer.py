@@ -687,8 +687,7 @@ _PIPELINE_MGR: PipelineContextManager | None = None
 
 def _get_pipeline_mgr() -> PipelineContextManager:
     global _PIPELINE_MGR
-    if _PIPELINE_MGR is None:
-        _PIPELINE_MGR = PipelineContextManager(data_dir=config.DATA_DIR)
+    _PIPELINE_MGR = PipelineContextManager(data_dir=config.DATA_DIR)
     return _PIPELINE_MGR
 
 

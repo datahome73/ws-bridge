@@ -696,6 +696,10 @@ async function init() {
           if (m.ts && m.ts > (lastTsByChannel['__inbox__'] || 0)) {
             lastTsByChannel['__inbox__'] = m.ts;
           }
+          // 🔧 F-8: Dedup by msg_id (same pattern as appendMessage)
+          const chKey = '__inbox__|' + (m.msg_id || m.content || '');
+          if (_seenMsgHashes[chKey]) continue;
+          _seenMsgHashes[chKey] = true;
           const list = document.getElementById('msgList');
           const empty = list.querySelector('.empty');
           if (empty) empty.remove();
