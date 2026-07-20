@@ -4,10 +4,8 @@
 >
 > `main.py` 占 3,706 行，是该包最大的文件，也是后续重构的主要目标。
 >
-> R134 已清理 8 个废止文件：`auto_router.py`、`command_utils.py`、`workspace_api.py`、
-> `commands/__init__.py`、`commands/admin.py`、`commands/agent_card.py`、
-> `commands/task.py`、`commands/workspace.py`。`!` 命令体系整体移除，
-> 管线操作已统一到 `##` 命令族（scenario_matcher）和 PipelineEngine。
+> R134 已清理 8 个废止文件。R135 将继续清理 `handle_broadcast` 中的死代码，
+> 包括 `_admin` 频道、大厅前缀路由、工作区相关逻辑。
 
 ---
 
@@ -16,12 +14,13 @@
 - [一、包结构与模块职责](#一包结构与模块职责)
 - [二、架构分层](#二架构分层)
 - [三、消息路由总览](#三消息路由总览)
-- [四、模块关联图](#四模块关联图)
-- [五、数据层](#五数据层)
-- [六、管线领域](#六管线领域)
-- [七、命令体系](#七命令体系)
-- [八、`main.py` 重构清单](#八mainpy-重构清单)
-- [九、启动流程](#九启动流程)
+- [四、广播路由分析（`handle_broadcast`）](#四广播路由分析handle_broadcast)
+- [五、模块关联图](#五模块关联图)
+- [六、数据层](#六数据层)
+- [七、管线领域](#七管线领域)
+- [八、命令体系](#八命令体系)
+- [九、`main.py` 重构清单](#九mainpy-重构清单)
+- [十、启动流程](#十启动流程)
 
 ---
 
@@ -34,8 +33,9 @@ ws_server/
 │
 ├── main.py               # 【核心路由器】— 3,706 行，需重构
 │   ├── WebSocket 连接管理（_connections / auth / register）
-│   ├── handle_broadcast() — 消息路由中枢
+│   ├── handle_broadcast() — 消息路由中枢（含大量死代码需清理）
 │   ├── 场景匹配规则注册 + 回调 handler 桥接
+│   ├── ## 命令处理（start/stop/status/advance/archive）
 │   ├── 管道推进 / watchdog / 超时告警
 │   ├── ACK 状态机 / 消息去重 / 速率限制
 │   └── 已提取函数的入口（惰性初始化 engine/pipeline_manager 等）
@@ -46,7 +46,7 @@ ws_server/
 │
 ├── agent_card.py         # Agent Card CRUD + 文件变更监控 + R67 迁移
 │
-├── workspace.py          # 工作区 CRUD + 状态机 + 管理员审批
+├── workspace.py          # 工作区 CRUD + 状态机 + 管理员审批（R135 后将精简）
 │
 ├── message_store.py      # SQLite 消息持久化（7天 TTL，10 万行上限）
 ├── task_store.py         # SQLite 任务持久化（R38 任务状态机）
@@ -88,31 +88,45 @@ WS 消息从入站到出站穿越 **5 层**：
 │  · aiohttp WS 会话生命周期                              │
 │  · JSON 解析 + msg_type 一级分发                        │
 └──────────────────────┬─────────────────────────────────┘
-                       │ msg_type="broadcast"
+                       │ msg_type="message"
                        ▼
 ┌────────────────────────────────────────────────────────┐
 │  L2 消息路由层  Routing Layer                           │
 │  main.py handle_broadcast()                            │
-│  · 速率限制 / 去重 / 静默前缀过滤                        │
-│  · 频道解析（lobby / workspace / inbox / _admin）      │
-│  · 广播 + ACK + 离线队列                               │
-└──────┬───────────────────────┬─────────────────────────┘
-       │ _inbox:server 通道     │ 其他通道（lobby/workspace/inbox）
-       ▼                       ▼
-┌────────────────────┐  ┌──────────────────────────────┐
-│ L3 场景匹配层       │  │ L4 管线域 + 命令域            │
-│ scenario_matcher   │  │ pipeline_engine.py            │
-│ 规则表路由          │  │ ##命令 / 状态机 / 自动派发    │
-│ ##query / ##step   │  │ (还有少量 inline 在 main.py) │
-│ ##start/stop/...   │  └──────────────┬───────────────┘
-└────────┬───────────┘                 │
-         │                              ▼
-         ▼                    ┌────────────────────┐
-  ┌────────────────┐          │ 广播 / 回复 / 派活  │
-  │ 回调 handler    │          └────────────────────┘
-  │ (在 main.py 底  │
-  │ 部注册)         │
-  └────────────────┘
+│  · 惰性启动 (watchdog/git/agent cards)                  │
+│  · _inbox:server 快速返回（交 scenario_matcher 处理）  │
+│  · 消息过滤（速率限制/去重/噪音）                        │
+│  · inbox 通道 → 单播给目标 agent                       │
+│  · 通用广播 → 投递所有在线连接                         │
+│  · 离线队列 + ACK 交付统计                             │
+└──────────────┬─────────────────────────────────────────┘
+               │ _inbox:server 通道
+               ▼
+┌────────────────────────────────────────────────────────┐
+│  L3 场景匹配层  Scenario Matching                      │
+│  scenario_matcher.py dispatch()                        │
+│  · 规则表: loopback → to_agent → ##query → ##step →   │
+│    ##cmd → PM guard → ACK → complete → reject → fail  │
+│  · 未匹配 → handle_broadcast() 正常路由                │
+└───────────────────────┬────────────────────────────────┘
+                        │
+                        ▼
+┌────────────────────────────────────────────────────────┐
+│  L4 管线域  Pipeline Domain                            │
+│  pipeline_engine.py + main.py (## 命令)                │
+│  · PipelineEngine 状态机                               │
+│  · auto_dispatch / auto_advance / try_advance          │
+│  · ##start/stop/status/advance/archive                 │
+│  · watchdag / timeout scanner / git sync               │
+└───────────────────────┬────────────────────────────────┘
+                        │
+                        ▼
+┌────────────────────────────────────────────────────────┐
+│  L5 数据层  Data Layer                                 │
+│  message_store.py / task_store.py / audit.py           │
+│  pipeline_context.py (JSON) / agent_card.py (JSON)     │
+│  workspace.py (JSON)                                   │
+└────────────────────────────────────────────────────────┘
 ```
 
 ### 各层详情
@@ -120,9 +134,9 @@ WS 消息从入站到出站穿越 **5 层**：
 | 层 | 文件 | 职责 | 关键函数 |
 |---|---|---|---|
 | **L1 传输** | `__main__.py` | WS 握手、会话管理、msg_type 一级分发 | `ws_handler()` |
-| **L2 路由** | `main.py` | `handle_broadcast()` 消息路由中枢 | 速率限制、去重、频道解析、权限检查、广播 |
+| **L2 路由** | `main.py` | `handle_broadcast()` 消息路由 | 惰性启动 / 过滤 / inbox 单播 / 广播 / ACK |
 | **L3 场景匹配** | `scenario_matcher.py` | `_inbox:server` 中继路由（规则表） | `dispatch()` → 规则链 |
-| **L4 管线域** | `pipeline_engine.py` | 管线状态机、`##` 命令处理、自动派发、模板渲染 | `try_advance()`, `auto_dispatch()`, `handle_hash_*()` |
+| **L4 管线域** | `pipeline_engine.py` + `main.py` | 管线状态机、`##` 命令处理、自动派发 | `try_advance()`, `auto_dispatch()`, `handle_hash_*()` |
 | **L5 数据层** | `message_store.py` / `task_store.py` / `audit.py` | 持久化存储 | SQLite CRUD |
 
 ---
@@ -153,51 +167,100 @@ WebSocket 入站 JSON
   │                        └─ 未匹配 → handle_broadcast() L2 路由
   │
   ├─ type="agent_card_register"  → handle_agent_card_register()
-  ├─ type="ping"                 → "pong"
-  │
-  └─ type="admin_request*"       → 行内 WS handler（在 __main__.py）
+  └─ type="ping"                 → "pong"
 ```
 
-### 广播路由（handle_broadcast 内部）
+### 关键说明
+
+- **`_inbox:server` 通道** — 所有消息直接交 `scenario_matcher.dispatch()` 规则表处理，不经过 `handle_broadcast`
+- **`_inbox:{agent_id}` 通道** — 由 `handle_broadcast` 路由，单播给收件箱主人
+- **其他通道** — 统一走广播路径（当前仅剩 `LOBBY` 和 `REGISTRATION` 两个频道）
+
+---
+
+## 四、广播路由分析（`handle_broadcast`）
+
+`handle_broadcast` 当前 3,706 行主函数中的核心部分（约 L1498-L1918）。
+以下拆解每一步的生死状态（⚡待清理 / 🟢存活）：
 
 ```
 handle_broadcast(ws, sender_id, msg)
   │
-  ├─ 1. 惰性启动 watchdog / git sync / timeout scanner / agent card watcher
+  ├─ 🟢 1. 惰性启动 — 首次消息触发
+  │      _ensure_watchdog() / _ensure_engine() / _ensure_agent_cards
   │
-  ├─ 2. inbox 快速通道（_inbox:*）→ _inbox:server 由 scenario_matcher 处理
+  ├─ 🟢 2. _inbox:server 快速返回
+  │      → scenario_matcher 已处理，直接 return
   │
-  ├─ 3. 未注册 bot → 路由到 registration channel
+  ├─ 🟢 3. 未注册 bot 保护
+  │      非 approved agent → 强制 channel = REGISTRATION_CHANNEL
   │
-  ├─ 4. 速率限制 / 去重 / 静音前缀过滤
+  ├─ 🟢 4. 速率限制
+  │      _check_rate_limit() → 超限则 return
   │
-  ├─ 5. _admin 频道 → 持久化 + 仅 ! 命令模式（实际管线操作已迁到 ## 命令）
+  ├─ 🟢 5. 消息过滤
+  │      _is_nonsense() / _is_duplicate() / 静音前缀
   │
-  ├─ 6. inbox 通道 → 单播给收件箱主人（_inbox:{owner_id}）
+  ├─ 🟢 6. 用户信息解析
+  │      users / sender_name / sender_role / admin_ids
   │
-  ├─ 7. 频道解析 → ws_mod.get_workspace(channel)
-  │      ├─ 未知频道 → 尝试自动路由到 sender 的唯一活跃工作区
-  │      └─ 仍未知 → fallback lobby
+  ├─ 🟢 7. Rollcall ACK 钩子
+  │      _r57_rollcall_events 触发
   │
-  ├─ 8. 权限检查 _can_broadcast()
+  ├─ 🟢 8. Bot ACK 检测
+  │      _update_step_ack_state()
   │
-  ├─ 9. 大厅暂停检查（管线运行时大厅静默）
+  ├─ ⚡ 9. _admin 频道 intercept  ←── 已废止
+  │      仅持久化消息，然后提示"仅支持 ! 命令"即 return
+  │      R135 应整段移除
   │
-  ├─ 10. 工作区广播 → 成员 + 管理员（排除发送者）
+  ├─ 🟢 10. Inbox 通道（_inbox:{agent_id}）
+  │      单播给收件箱主人，ACK 回复
   │
-  ├─ 11. 大厅广播 → 按消息类型（📢/📋/🆘/@）选择性路由
-  │       ├─ 📢 → 全员（仅管理员）
-  │       ├─ 📋 → 点名目标
-  │       ├─ 🆘 → 管理员
-  │       ├─ @  → 目标 + 管理员
-  │       └─ 纯文本 → 拒绝（大厅需前缀）
+  ├─ ⚡ 11. 频道解析  ←── 已废止
+  │      channel != LOBBY → 直接 channel = LOBBY
+  │      整段只做了 fallback，无实际频道解析
   │
-  └─ 12. ACK 交付统计 → 发送者 + 离线队列
+  ├─ ⚡ 12. Lobby 暂停 + _can_broadcast  ←── 已废止
+  │      _can_broadcast() 原始设计是工作区权限检查
+  │      Lobby 暂停检查（_LOBBY_PAUSED）也已无场景触发
+  │
+  ├─ ⚡ 13. 大厅前缀路由（📢/📋/🆘/@）  ←── 已废止
+  │      近 70 行代码，按消息类型选择 targets
+  │      当前所有消息直接走到统一广播路径即可
+  │
+  ├─ 🟢 14. Registration 通道
+  │      仅投递到 admin 连接
+  │
+  ├─ 🟢 15. 统一广播
+  │      构建 payload → 遍历 targets → send_str/send
+  │      持久化到 message_store → 离线队列
+  │
+  └─ 🟢 16. ACK 交付统计
+        发送 delivery_status 给发送者
+```
+
+### 清理后预期（R135）
+
+移除 ⚡ 步骤后，`handle_broadcast` 精简为约 **200 行**：
+
+```
+handle_broadcast(ws, sender_id, msg)
+  │
+  ├─ 1. 惰性启动
+  ├─ 2. _inbox:server 快速返回
+  ├─ 3. 未注册 bot 保护
+  ├─ 4. 速率限制
+  ├─ 5. 消息过滤
+  ├─ 6. Rollcall + ACK 检测
+  ├─ 7. Inbox 通道 → 单播
+  ├─ 8. Registration 通道 → 投递 admin
+  └─ 9. 统一广播 + ACK 统计
 ```
 
 ---
 
-## 四、模块关联图
+## 五、模块关联图
 
 ```
                          ┌─────────────┐
@@ -210,6 +273,7 @@ handle_broadcast(ws, sender_id, msg)
 │  handle_auth() / handle_register() / _send()      │
 │  handle_broadcast() — 消息路由中枢                 │
 │  _send_to_agent() — 单播                          │
+│  _handle_hash_start/stop/status/advance/archive   │
 │                                                   │
 │  规则注册 (底部 ~30 行)                            │
 │  _sm_handle_*() 回调                              │
@@ -244,7 +308,7 @@ handle_broadcast(ws, sender_id, msg)
 
 ---
 
-## 五、数据层
+## 六、数据层
 
 | 文件 | 存储方式 | 数据 | 文件位置 | 生命周期 |
 |---|---|---|---|---|
@@ -257,7 +321,7 @@ handle_broadcast(ws, sender_id, msg)
 
 ---
 
-## 六、管线领域
+## 七、管线领域
 
 ```
 pipeline_context.py         pipeline_engine.py          pipeline_sync.py
@@ -294,11 +358,11 @@ INIT ──→ PLANNING ──→ RUNNING ──→ COMPLETED
 
 ---
 
-## 七、命令体系
+## 八、命令体系
 
-### `##` 命令（主要入口 — scenario_matcher.py）
+### `##` 命令（主要入口 — scenario_matcher.py + main.py）
 
-R134 之后，所有管线操作统一走 `##` 命令族，由 scenario_matcher 规则表路由：
+管线操作统一走 `##` 命令族：
 
 | 命令 | 处理位置 | 说明 |
 |---|---|---|
@@ -316,60 +380,65 @@ R134 之后，所有管线操作统一走 `##` 命令族，由 scenario_matcher 
 
 ### 自动中继（规则表，无需手动输入）
 
-`_inbox:server` 通道的消息自动匹配以下前缀，触发中继逻辑：
+`_inbox:server` 通道的消息自动匹配以下前缀：
 
 | 前缀 | 规则 | 动作 |
 |---|---|---|
 | `test ✅` | 10 loopback | 双向通信测试 |
 | `收到 ✅` / `ACK ✅` | 40 ACK 转发 | 转发 PM + 标记接活 |
-| `已完成 ✅` / `✅ 完成` | 50 完成确认 | 转发 PM + 自动推进管线 |
+| `已完成 ✅` / `✅ 完成` | 50 完成确认 | 转发 PM + auto_advance 管线 |
 | `退回 🔄` | 60 退回回退 | 转发 PM + rollback |
 | `失败 ❌` | 70 失败告警 | 转发 PM + 告警 |
 | 其他未匹配 | 90 入库留痕 | 静默持久化 |
 
-### `!` 命令（R134 已移除）
+### `!` 命令（R134 已整体移除）
 
-R134 之前，`!` 命令通过 `command_utils._parse_command()` + `commands.__init__._ADMIN_COMMANDS` 注册表路由。
-R134 清理了这 40+ 个 `!` 命令和全部 5 个命令域文件。仅保留 `commands/pipeline.py` 中的
-`step_complete` / `step_verify` / `step_force` 等工序操作（仍可通过 `_admin` 频道直接调用）。
+`commands/pipeline.py` 保留 `step_complete` / `step_verify` / `step_force` 等工序操作。
 
 ---
 
-## 八、`main.py` 重构清单
+## 九、`main.py` 重构清单
 
-`main.py` 目前 3,706 行，是 ws_server 的内聚度瓶颈。R134 已清理 ~1,245 行
-（移除 `!` 命令路由、`_handle_server_query`、工作区 handlers、`_broadcast_task_notify`等）。
-以下是后续推荐提取方案：
+`main.py` 当前 3,706 行。R134 已清理 ~1,245 行（`!` 命令路由、`_handle_server_query`、工作区 handlers）。
 
-### 优先级 1 — 纯提取（零语义改动，可安全合并）
+### 第一刀（R135）：`handle_broadcast` 死代码清除
+
+| 清除目标 | 行范围 | 说明 |
+|---|---|---|
+| `_admin` 频道 intercept | L1596-L1615 | 已废止，整段删除 |
+| 频道解析 fallback | L1661-L1666 | 仅 `channel = LOBBY`，可精简到一行变量默认值 |
+| Lobby 暂停 + `_can_broadcast` | L1668-L1680 | 模块已废止 |
+| 大厅前缀路由（📢/📋/🆘/@） | L1682-L1768 | 近 90 行，全部删除 |
+| 大厅 delivery ACK 统计中的 workspace admin 分支 | L1910-L1918+ | `resolved_workspace` 恒为 None |
+
+**清理后 `handle_broadcast` 从 ~420 行降至约 200 行。**
+
+### 优先级 2 — 纯提取（零语义改动）
 
 | 提取目标 | 行范围（估值） | 目标文件 | 原因 |
 |---|---|---|---|
 | 连接管理 | L37-L210 | `connection_manager.py` | `_connections`/`_send`/`handle_auth`/`handle_register` |
 | 离线队列推送 | L386-L421 | `offline_queue.py` | `_push_offline`/`_flush_offline_push` |
 | 看门狗 | L865-L942 | `watchdog.py` | R43 看门狗循环 + 告警 |
-| 管道超时扫描 | L615-L740 | (已有 pipeline_engine.py) | R122/R124 超时扫描逻辑 |
 | ACK 状态机 | L1009-L1198 | `ack_machine.py` | R63 Phase 4 ACK 检测 |
 | Git 同步生命周期 | L569-L613 | `git_sync_lifecycle.py` | 与 pipeline_sync.py 分离的调度层 |
 
-### 优先级 2 — 行为拆分（需设计接口）
+### 优先级 3 — 行为拆分（需设计接口）
 
 | 提取目标 | 行范围（估值） | 目标文件 | 原因 |
 |---|---|---|---|
-| 管线手动推进 (`_handle_hash_*`) | L2966-L3410 | (已有 pipeline_engine.py) | `_handle_hash_start/stop/advance/archive/status` 可迁入 engine |
+| `_handle_hash_*` (## 命令) | L2966-L3410 | (已有 pipeline_engine.py) | `start/stop/advance/archive/status` 可全部迁入 engine |
 | 消息过滤 | L1982-L2014 | `message_filter.py` | `_is_nonsense`/`_is_duplicate` |
-| `_can_broadcast` | L2079-L2108 | `permission.py` | 广播权限检查独立 |
 
-### 优先级 3 — 重构设计
+### 优先级 4 — 重构设计
 
-- **`_connections` → connection pool class**：当前是 `dict[str, set[ws]]`，缺并发安全、缺连接元数据
-- **`handle_broadcast` 分拆**：按消息通道拆为独立函数 — `_handle_workspace_broadcast`, `_handle_lobby_broadcast`, `_handle_inbox_broadcast`
-- **规则注册回调统一**：底部 ~280 行的 `_sm_handle_*()` + 规则注册可统一到一个注册表文件中
-- **`_send_to_agent` → 统一网关**：现多处有 `send_str`/`send` 二选一模式（至少 15 处重复），应提取到单播网关
+- **`_connections` → connection pool class**：当前 `dict[str, set[ws]]`，缺并发安全、缺连接元数据
+- **`_send_to_agent` → 统一发送网关**：现有多处 `send_str`/`send` 二选一（至少 15 处重复），应提取单播+广播统一发送器
+- **规则注册回调统一**：底部 ~280 行的 `_sm_handle_*()` + 规则注册可统一到一个注册表文件
 
 ---
 
-## 九、启动流程
+## 十、启动流程
 
 ```
 __main__.py 启动
