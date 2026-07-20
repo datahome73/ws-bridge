@@ -105,7 +105,7 @@ ws_server/                                      行数  说明
 │  L3 场景匹配层  Scenario Matching                      │
 │  scenario_matcher.py dispatch()                        │
 │  · 规则表: loopback → to_agent → ##query → ##step →   │
-│    ##cmd → PM guard → ACK → complete → reject → fail  │
+│    ##cmd → ACK → complete → reject → fail            │
 │  · 未匹配 → handle_broadcast() L2 路由                │
 └───────────────────────┬────────────────────────────────┘
                         │
@@ -159,11 +159,10 @@ WebSocket 入站 JSON
   │                        │   25 ##query 命令
   │                        │   28 ##step 命令
   │                        │   30 ##start/status/stop/advance/archive
-  │                        │   35 PM 安全守卫
-  │                        │   40 收到 ✅ / ACK ✅ → 转发 PM
-  │                        │   50 已完成 ✅ → 转发 PM + try_advance
-  │                        │   60 退回 🔄 → 转发 PM + rollback
-  │                        │   70 失败 ❌ → 转发 PM + 告警
+  │                        │   40 收到 ✅ / ACK ✅ → 转发协调者
+  │                        │   50 已完成 ✅ → 转发协调者 + try_advance
+  │                        │   60 退回 🔄 → 转发协调者 + rollback
+  │                        │   70 失败 ❌ → 转发协调者 + 告警
   │                        │   90 兜底入库（静默留痕）
   │                        │
   │                        └─ 未匹配 → handle_broadcast()
@@ -302,10 +301,10 @@ INIT ──→ PLANNING ──→ RUNNING ──→ COMPLETED
 | 前缀 | 规则 | 动作 |
 |---|---|---|
 | `test ✅` | 10 loopback | 双向通信测试 |
-| `收到 ✅` / `ACK ✅` | 40 ACK 转发 | 转发 PM + 标记接活 |
-| `已完成 ✅` / `✅ 完成` | 50 完成确认 | 转发 PM + try_advance |
-| `退回 🔄` | 60 退回回退 | 转发 PM + rollback |
-| `失败 ❌` | 70 失败告警 | 转发 PM + 告警 |
+| `收到 ✅` / `ACK ✅` | 40 ACK 转发 | 转发协调者 + 标记接活 |
+| `已完成 ✅` / `✅ 完成` | 50 完成确认 | 转发协调者 + try_advance |
+| `退回 🔄` | 60 退回回退 | 转发协调者 + rollback |
+| `失败 ❌` | 70 失败告警 | 转发协调者 + 告警 |
 | 其他 | 90 入库留痕 | 静默持久化 |
 
 ### `!` 命令

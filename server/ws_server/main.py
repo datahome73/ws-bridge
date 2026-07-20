@@ -1979,16 +1979,6 @@ async def _sm_handle_step(ws, agent_id: str, msg: dict, matched) -> bool:
     return await _sm.handle_step(ws, agent_id, msg, matched)
 
 
-async def _sm_handle_pm_guard(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 35: PM safety guard."""
-    await _send(ws, {
-        "type": "error",
-        "error": "_inbox:server 仅接受 bot 消息，PM 请直接发 bot 收件箱.",
-    })
-    logger.warning("[Relay] 拒绝: PM %s 试图发消息到 _inbox:server", agent_id[:12])
-    return True
-
-
 async def _sm_handle_ack(ws, agent_id: str, msg: dict, matched) -> bool:
     """Rule 40: 收到 ✅ / ACK ✅ → forward to PM."""
     content = (msg.get("content") or "").strip()
@@ -2151,13 +2141,6 @@ _sm.register_rule(_sm.HandlerRule(
     priority=30,
     name="##命令路由",
     protocol_ref="§7.3",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_pm_guard,
-    handle=_sm_handle_pm_guard,
-    priority=35,
-    name="PM安全守卫",
-    protocol_ref="§7.4",
 ))
 _sm.register_rule(_sm.HandlerRule(
     match=_sm.match_ack,
