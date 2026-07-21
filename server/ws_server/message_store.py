@@ -123,17 +123,6 @@ def get_messages_by_channel(channel: str, data_dir: Path, limit: int = 100) -> l
     return [dict(r) for r in rows]
 
 
-
-def clear_messages_by_channel(channel: str, data_dir: Path):
-    """Delete all messages for a given channel (used on workspace cleanup)."""
-    db_path = str(data_dir / DEFAULT_DB_NAME)
-    if not Path(db_path).exists():
-        return
-    conn = _get_conn(db_path)
-    conn.execute("DELETE FROM messages WHERE channel = ?", (channel,))
-    conn.commit()
-
-
 def is_duplicate(channel: str, content: str, window_sec: float, data_dir: Path) -> bool:
     """R129 B-6: 检查同 channel 最近 window_sec 秒内是否有相同 content 的消息。"""
     db_path = str(data_dir / DEFAULT_DB_NAME)

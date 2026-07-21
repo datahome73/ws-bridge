@@ -16,13 +16,10 @@ from .connection_manager import _connections  # R136
 from .main import handle_auth, handle_broadcast, handle_register  # R87
 from . import scenario_matcher as _sm  # R126
 from .message_store import init_db
-from server.common.persistence import get_approved_users as _get_approved_users
 from server.common.persistence import (
     load_approved_users,
     load_web_sessions,
     load_api_keys,
-    save_approved_users,
-    save_web_sessions,
     get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
 import shared.protocol as p
@@ -150,8 +147,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if not success:
                     await ws.send_json({"type": "error", "error": msg_text})
                     continue
-                import json as _json
-                reject_payload = _json.dumps({
+                reject_payload = json.dumps({
                     "type": p.MSG_ADMIN_NOTIFICATION,
                     "workspace_id": ws_id,
                     "status": "rejected",
@@ -172,24 +168,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # ── R82: removed MSG_SET_ACTIVE_CHANNEL handler
 
-
-
-            elif msg_type == p.MSG_ADMIN_REQUEST_REJECTED and agent_id:
-                users = await _get_users()
-                if not users.get(agent_id, {}).get("role") == "admin":
-                    await ws.send_json({"type": "error", "error": "权限不足"})
-                    continue
-                ws_id = data.get(p.FIELD_WORKSPACE_ID, "").strip()
-                target_id = data.get(p.FIELD_TARGET_AGENT_ID, "").strip()
-                reason = data.get(p.FIELD_REASON, "").strip()
-                if not ws_id or not target_id:
-                    await ws.send_json({"type": "error", "error": "缺少 workspace_id 或 target_agent_id"})
-                    continue
-                success, msg_text = ws_mod.reject_admin_request(ws_id, target_id, agent_id, reason)
-                if not success:
-                    await ws.send_json({"type": "error", "error": msg_text})
-                    continue
-                await ws.send_json({"type": "ack", "message": f"❌ 已拒绝 {target_id[:12]} 的申请"})
 
             # ── R29: task_switch — fire-and-forget (only admin) ──────
             elif msg_type == p.MSG_TASK_SWITCH and agent_id:
