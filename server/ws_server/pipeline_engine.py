@@ -366,7 +366,10 @@ class PipelineEngine:
                         self._ctx_mgr.save()
                     except Exception:
                         pass
-                    asyncio.ensure_future(self.auto_dispatch(ctx, next_step))
+                    # R140 A-8: 通知完成消息发送者派活结果
+                    asyncio.ensure_future(
+                        self._auto_dispatch_with_notify(ctx, next_step, agent_id)
+                    )
                     logger.info("[R106] %s advance: step%d → step%d",
                                 round_name, completed_step, next_step)
             return True, round_name
@@ -510,7 +513,10 @@ class PipelineEngine:
     async def handle_hash_start(
         self, round_name: str, kv: dict, agent_id: str, ws
     ) -> bool:
-        """处理 ##start 命令：创建 PipelineContext + 落盘 + 自动派活 Step 1."""
+        """处理 ##start 命令：创建 PipelineContext + 落盘 + 自动派活 Step 2.
+
+        R140 A-6/A-7: 反馈真实派活状态，显示 agent 名称，失败时提示原因。
+        """
         round_name = round_name.upper()
 
         # 检查是否已存在
@@ -558,25 +564,54 @@ class PipelineEngine:
         except Exception:
             pass
 
-        await self._send_ws(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": (
-                f"✅ 管线 {round_name} 已创建并启动\n"
-                f"  任务类型: {task_kind.value}\n"
-                f"  总步数: {total_steps}\n"
-                f"  Step 1 已开始"
-            ),
-            "ts": time.time(),
-        })
+        # R140 A-6: 自动确认 Step 1（PM 发起 ##start 表示需求已就绪）
+        step1_info = ctx.steps[0] if ctx.steps else None
+        if step1_info:
+            step1_info["status"] = "done"
+            step1_info["result_msg"] = "需求已就绪（##start 创建时自动确认）"
+        ctx.current_step = 2
+        try:
+            self._ctx_mgr.save()
+        except Exception:
+            pass
 
-        # 自动派活 Step 1
-        asyncio.ensure_future(self.auto_dispatch(ctx, 1))
+        # 获取 Step 2 agent 名称（派活目标）
+        step2_agent_name = self.get_step_agent_name(ctx, 2)
 
-        logger.info("[Pipeline] ##start: %s (task=%s, steps=%d) by %s",
-                    round_name, task_kind.value, total_steps, agent_id[:12])
+        # R140 A-6/A-7: 尝试派活 Step 2，根据结果回复不同消息
+        dispatch_ok = await self.auto_dispatch(ctx, 2, notify_ws=ws, notify_agent_id=agent_id)
+        if dispatch_ok:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": (
+                    f"✅ 管线 {round_name} 已创建并启动\n"
+                    f"  任务类型: {task_kind.value}\n"
+                    f"  总步数: {total_steps}\n"
+                    f"  Step 2（技术方案）已派活给 {step2_agent_name}"
+                ),
+                "ts": time.time(),
+            })
+        else:
+            # notify_ws 已有失败通知，补充创建成功的提示
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": (
+                    f"✅ 管线 {round_name} 已创建\n"
+                    f"  任务类型: {task_kind.value}\n"
+                    f"  总步数: {total_steps}\n"
+                    f"⚠️ Step 2 自动派活失败，请使用 ##advance##{round_name}##step=2 手动派活"
+                ),
+                "ts": time.time(),
+            })
+
+        logger.info("[Pipeline] ##start: %s (task=%s, steps=%d) by %s, dispatch=%s",
+                    round_name, task_kind.value, total_steps, agent_id[:12], dispatch_ok)
         return True
 
     async def handle_hash_status(
@@ -665,7 +700,13 @@ class PipelineEngine:
     async def handle_hash_advance(
         self, round_name: str, kv: dict, agent_id: str, ws
     ) -> bool:
-        """处理 ##advance 命令：PM 手动推进管线到下一步。"""
+        """处理 ##advance 命令：手动推进管线到指定步。
+
+        R140 A-1: L4 级别即可使用（不限于 PM）。
+        R140 A-2: 支持跨步推进，自动跳过中间步骤。
+        """
+        from .scenario_matcher import _get_agent_level  # lazy import
+
         round_name = round_name.upper()
         ctx = self._ctx_mgr.get(round_name)
         if not ctx:
@@ -678,6 +719,20 @@ class PipelineEngine:
                 "ts": time.time(),
             })
             return True
+
+        # R140 A-1: L4 权限检查
+        level = _get_agent_level(agent_id)
+        if level < 4:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 权限不足：##advance 需要 L4 级别，你当前 L{level}",
+                "ts": time.time(),
+            })
+            return True
+
         target = int(kv.get("step", ctx.current_step + 1))
         if target < 1 or target > ctx.total_steps:
             await self._send_ws(ws, {
@@ -689,22 +744,39 @@ class PipelineEngine:
                 "ts": time.time(),
             })
             return True
+
+        old_step = ctx.current_step
+
+        # R140 A-2: 标记跳过中间步骤
+        for i, s in enumerate(ctx.steps):
+            step_key = s.get("name", f"step{i+1}")
+            step_num = i + 1
+            if step_num < target and s.get("status") in ("pending",):
+                s["status"] = "skipped"
+                logger.info("[R140] %s step%d skipped（##advance 跨步）",
+                            round_name, step_num)
+            elif step_num == target:
+                s["status"] = "in_progress"
+                s["dispatched_at"] = time.time()
+
         ctx.current_step = target
         try:
             self._ctx_mgr.save()
         except Exception:
             pass
+
         await self._send_ws(ws, {
             "type": "broadcast",
             "channel": f"_inbox:{agent_id}",
             "from_name": "系统",
             "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"✅ {round_name} 已推进到 Step {target}",
+            "content": f"✅ {round_name} 已推进到 Step {target}" +
+                       (f"（跳过 {target - old_step - 1} 步）" if target > old_step + 1 else ""),
             "ts": time.time(),
         })
-        asyncio.ensure_future(self.auto_dispatch(ctx, target))
-        logger.info("[Pipeline] ##advance: %s → step%d by %s",
-                    round_name, target, agent_id[:12])
+        asyncio.ensure_future(self.auto_dispatch(ctx, target, notify_ws=ws, notify_agent_id=agent_id))
+        logger.info("[Pipeline] ##advance: %s step%d → step%d by %s (L%d)",
+                    round_name, old_step, target, agent_id[:12], level)
         return True
 
     async def handle_hash_archive(
@@ -805,10 +877,16 @@ class PipelineEngine:
     # 🅳 自动调度
     # ════════════════════════════════════════════════════════════════
 
-    async def auto_dispatch(self, ctx: PipelineContext, step_num: int) -> bool:
-        """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。"""
+    async def auto_dispatch(self, ctx: PipelineContext, step_num: int,
+                           notify_ws=None, notify_agent_id: Optional[str] = None) -> bool:
+        """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。
+
+        R140 A-4/A-5: 派活失败时通过 notify_ws 或 notify_agent_id 通知发起者。
+        """
         if not config.AUTO_DISPATCH_ENABLED:
             logger.info("[R106] 自动派活已禁用（AUTO_DISPATCH_ENABLED=0）")
+            msg = f"⚠️ {ctx.round_name} Step {step_num} 派活失败：自动派活已禁用"
+            await self._send_dispatch_notify(notify_ws, notify_agent_id, msg)
             return False
         round_name = ctx.round_name
         step_key = f"step{step_num}"
@@ -834,6 +912,8 @@ class PipelineEngine:
 
         if not target_agent_id:
             logger.warning("[R106] %s step%d: 找不到目标 agent", round_name, step_num)
+            await self._send_dispatch_notify(notify_ws, notify_agent_id,
+                f"⚠️ {round_name} Step {step_num} 派活失败：未找到目标 agent（{agent_name}）")
             return False
 
         # 构建派活消息
@@ -842,6 +922,10 @@ class PipelineEngine:
         template = ""
         if hasattr(ctx, "message_templates"):
             template = ctx.message_templates.get(template_key, "")
+        if not template:
+            await self._send_dispatch_notify(notify_ws, notify_agent_id,
+                f"⚠️ {round_name} Step {step_num} 派活失败：派活模板缺失（{agent_name}）")
+            return False
         rendered = self.render_template(template, ctx, step_num) if template else (
             f"💻 **{round_name} Step {step_num}** — {agent_name}\n\n"
             f"{summary}\n\n"
@@ -858,6 +942,8 @@ class PipelineEngine:
             logger.warning("[R106] %s step%d → %s 在线连接数为 0",
                            round_name, step_num, target_agent_id[:20])
             self.enqueue_retry(ctx, step_num)
+            await self._send_dispatch_notify(notify_ws, notify_agent_id,
+                f"⚠️ {round_name} Step {step_num} 派活失败：{agent_name} 离线，已加入重试队列")
             return False
 
         # 更新 step 状态
@@ -872,6 +958,44 @@ class PipelineEngine:
         await self.notify_pm(ctx, step_num, "dispatched",
                              f"→ {agent_name}（{target_agent_id[:12]}）")
         return True
+
+    async def _send_dispatch_notify(self, notify_ws, notify_agent_id: Optional[str], msg: str) -> None:
+        """Helper: send dispatch failure notification via WS or agent inbox."""
+        if notify_ws:
+            try:
+                await self._send_ws(notify_ws, {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{notify_agent_id or 'system'}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": msg,
+                    "ts": time.time(),
+                })
+            except Exception:
+                pass
+        elif notify_agent_id:
+            try:
+                await self._send_to_agent(notify_agent_id, {
+                    "type": "broadcast",
+                    "channel": f"_inbox:{notify_agent_id}",
+                    "from_name": "系统",
+                    "from_agent": state.SYSTEM_AGENT_ID,
+                    "content": msg,
+                    "ts": time.time(),
+                })
+            except Exception:
+                pass
+
+    async def _auto_dispatch_with_notify(self, ctx: PipelineContext, step_num: int,
+                                         agent_id: str) -> None:
+        """Wrap auto_dispatch with notification to agent on failure (R140 A-8)."""
+        ok = await self.auto_dispatch(ctx, step_num, notify_agent_id=agent_id)
+        if ok:
+            logger.info("[R140] %s step%d 派活成功 → %s",
+                        ctx.round_name, step_num, agent_id[:12])
+        else:
+            logger.info("[R140] %s step%d 派活失败，已通知 %s",
+                        ctx.round_name, step_num, agent_id[:12])
 
     async def auto_re_notify(
         self, ctx, step_key: str, step_num: int
