@@ -387,7 +387,7 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
             "`##status##R{N}` — 查询管线状态\n"
             "`##stop##R{N}` — 停止管线\n"
-            "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+            "`##advance##R{N}##step=N` — 手动推进到下一步（L4可用）\n"
             "`##archive##R{N}` — 归档管线（PM使用）\n"
             "`##help` — 显示本帮助"
         )
@@ -413,7 +413,8 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     elif cmd == "stop":
         return await _e2._handle_hash_stop(round_name, agent_id, ws)
     elif cmd == "advance":
-        return await _e2._handle_hash_advance(round_name, kv, agent_id, ws)
+        engine = _e2._ensure_engine()
+        return await engine.handle_hash_advance(round_name, kv, agent_id, ws)
     elif cmd == "archive":
         return await _e2._handle_hash_archive(round_name, agent_id, ws)
     elif cmd == "help":
@@ -422,7 +423,7 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
             "`##status##R{N}` — 查询管线状态\n"
             "`##stop##R{N}` — 停止管线\n"
-            "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+            "`##advance##R{N}##step=N` — 手动推进到下一步（L4可用）\n"
             "`##archive##R{N}` — 归档管线（PM使用）\n"
             "`##help` — 显示本帮助"
         )
