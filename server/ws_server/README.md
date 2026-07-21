@@ -1,9 +1,12 @@
 # ws_server — WSS 核心进程
 
-> WSS 进程是 ws-bridge 的 WebSocket 服务核心。**共 20 个源文件（含 commands/ 及 README），约 9,000 行。**
+> **端口 8765** | WSS 核心进程是 ws-bridge 的 WebSocket 服务核心。
+> **共 21 个源文件（含 commands/ 及 README），约 8,700 行。**
 >
-> R134+R135 清理了 8 个废止文件和 ~1,800 行死代码。R136 提取了 5 个独立模块。
-> `main.py` 从峰值 **~6,400 行 → 2,197 行**。
+> 历经多轮重构：R134+R135 清理了 8 个废止文件和 ~1,800 行死代码；
+> R136 提取 5 个独立模块；R137 拆分 engine2；R138 合并回 pipeline_engine；
+> R139 提取 scenario_rules；R140 修复 ##advance 权限/跨步推进/失败通知。
+> **`main.py` 从峰值 ~6,400 行 → 559 行。**
 
 ---
 
@@ -26,8 +29,8 @@
 ```
 ws_server/                                      行数  说明
 ├── __init__.py                                    1  包声明
-├── __main__.py                                  417  aiohttp 入口 + HTTP API 端点
-├── main.py                                    2,197  消息路由 + ## 命令 + 模板渲染
+├── __main__.py                                  415  aiohttp 入口 + HTTP API 端点
+├── main.py                                      559  消息路由 + 惰性启动 + 规则注册
 │
 ├── connection_manager.py                        302  连接生命周期（auth/register/_send/单播）
 ├── ack_machine.py                               241  ACK 状态机（30秒超时/通道超时）
@@ -35,8 +38,9 @@ ws_server/                                      行数  说明
 ├── pipeline_timeout.py                          148  管线超时扫描（R122）
 ├── git_sync_scheduler.py                         65  Git 同步调度循环
 │
-├── scenario_matcher.py                          768  声明式规则表（_inbox:server 中继路由）
-├── pipeline_engine.py                         1,319  管线状态机 + 自动派发 + ## 命令
+├── scenario_matcher.py                          780  声明式规则表（_inbox:server 中继路由）
+├── scenario_rules.py                            301  规则回调 handler（R139 提取）
+├── pipeline_engine.py                         2,305  管线状态机 + 自动派发 + ## 命令
 ├── pipeline_context.py                          692  PipelineContext + PipelineContextManager
 ├── pipeline_sync.py                             203  Git 提交检测器
 │
@@ -50,7 +54,9 @@ ws_server/                                      行数  说明
 ├── timeout_tracker.py                           164  步骤级倒计时
 │
 ├── commands/
-│   └── pipeline.py                            1,201  ! 命令（step_complete/verify）
+│   └── pipeline.py                            1,201  ! 命令（step_complete/verify/force）
+│
+└── README.md                                     —  本文档
 │
 └── README.md                                     —  本文档
 ```
@@ -78,6 +84,18 @@ ws_server/                                      行数  说明
 | `watchdog.py` | 看门狗循环 + 告警 + escalation | ~300 |
 | `pipeline_timeout.py` | 超时扫描定时器 | ~60 |
 | `git_sync_scheduler.py` | Git 同步调度层 | ~30 |
+
+### R137 引擎分拆
+
+| 目标文件 | 来源 (main.py) | 说明 |
+|:---------|:---------------|:------|
+| `engine2.py` | `##` 命令 / 自动派发 / 模板渲染 | 临时分拆（~885 行），R138 合并回 pipeline_engine |
+
+### R139 提取记录
+
+| 目标文件 | 来源 (scenario_matcher.py) | 行数  |
+|:---------|:---------------------------|:-----:|
+| `scenario_rules.py` | `_sm_handle_*()` 回调 + `register_all_rules()` | ~300 |
 
 ---
 
@@ -345,7 +363,7 @@ __main__.py 启动
 | R134 删除 `!` 命令路由 + workspace handlers | ✅ 完成 | -1,245 行 |
 | R135 删除 handle_broadcast 死代码（大厅/广播/过滤/离线队列）| ✅ 完成 | -600 行 |
 | R136 提取 5 模块（connection_manager/ack/watchdog/timeout/git） | ✅ 完成 | -895 行 |
-| `##` 命令迁移到 pipeline_engine | ⬜ 待 R137 | `_handle_hash_*()` 可全部迁入引擎 |
-| `_sm_handle_*()` 回调 + 规则注册统一 | ⬜ 待 R137 | 底部 ~200 行可提取到注册表文件 |
-| `_connections` 池化 (dict→class) | ⬜ 待后续 | 并发安全 + 元数据 |
-| `_send_to_agent` 统一发送网关 | ⬜ 待后续 | 消除 15+ 处 send_str/send 二选一 |
+| R137 引擎分拆（engine2.py → ##命令/自动派发/模板渲染） | ✅ 完成 | -885 行，临时分拆 |
+| R138 引擎合并（engine2→pipeline_engine 合并为一套） | ✅ 完成 | +885 行回 pipeline_engine |
+| R139 规则回调提取（scenario_rules.py） | ✅ 完成 | -300 行 |
+| R140 管线核心路径修复（##advance 权限/跨步推进/失败通知） | ✅ 完成 | 逻辑修正，无损行数 |
