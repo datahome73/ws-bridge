@@ -7,7 +7,6 @@ _classify_lobby_message into a declarative rule table.
 
 Protocol doc: docs/inbox-message-protocol.md §7 Rule Priority Mapping
 """
-import asyncio
 import json
 import logging
 import re

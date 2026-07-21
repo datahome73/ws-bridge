@@ -20,7 +20,6 @@ from . import state  # R100: shared state container
 from . import scenario_matcher as _sm  # for _sm.dispatch() in handler()
 from . import message_store as ms
 from .audit import AuditLogger
-from . import pipeline_sync as pps  # R65: Pipeline git sync
 from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
 from .scenario_rules import register_all_rules  # R139: rule registration
 _card_watcher = None  # R100: module-level for _ensure_card_watcher()
