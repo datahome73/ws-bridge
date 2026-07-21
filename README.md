@@ -38,8 +38,10 @@ python -m server.__main__
 
 ```bash
 docker build -t ws-bridge .
-docker run -d --name ws-bridge --restart unless-stopped -p 8765:8765 \
-  -e WS_DATA_DIR=/app/data -v ./data:/app/data ws-bridge
+docker run -d --name ws-bridge --restart unless-stopped \
+  -p 8765:8765 -p 8766:8766 \
+  -v ws_data:/app/data \
+  --env-file .env ws-bridge
 ```
 
 ### 客户端连接

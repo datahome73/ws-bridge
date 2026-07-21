@@ -33,8 +33,7 @@ async def main():
         '  docker run -d --name ws-bridge --restart unless-stopped \\\n'
         '    -p 8765:8765 -p 8766:8766 \\\n'
         '    -v ws_data:/app/data \\\n'
-        '    -e DISPATCH_SENDER_ID=ws_f26e585f6479 \\\n'
-        '    -e WS_HTTP_PORT=8766 \\\n'
+        "    --env-file /opt/ws-bridge/.env \\\n"
         '    ws-bridge:latest\n\n'
         '部署完回 已完成 ✅'
     )
