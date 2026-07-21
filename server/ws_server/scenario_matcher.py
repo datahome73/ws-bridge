@@ -99,13 +99,28 @@ def match_loopback(content: str, msg: dict, agent_id: str) -> Any:
     return False
 
 def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 35: PM safety guard — detect messages targeted at _inbox:server."""
+    """Rule 35: PM safety guard — only block PM, not all bots.
+
+    Original bug (085731a→c8af582 regression): checked channel == '_inbox:server'
+    without verifying sender is PM, blocking ALL bots from sending completion
+    messages to _inbox:server (bypassing Rule 50 match_complete).
+    """
     channel = (msg.get("channel") or "").strip()
     to_agent = (msg.get("to_agent") or msg.get("to") or "").strip()
-    if channel == "_inbox:server" or to_agent == "_inbox:server":
-        return True
-    if channel.startswith("_inbox:") and agent_id and channel != f"_inbox:{agent_id}":
-        return True
+
+    # ── R141 fix: only block the PM, let other bots through ──
+    pm_id = None
+    try:
+        from server.common import config as _cfg
+        pm_id = _cfg.DISPATCH_SENDER_ID or _cfg.PIPELINE_PM_AGENT_ID
+    except Exception:
+        pass
+    if pm_id and agent_id == pm_id:
+        # PM → block sending to _inbox:server or other bot's inbox
+        if channel == "_inbox:server" or to_agent == "_inbox:server":
+            return True
+        if channel.startswith("_inbox:") and channel != f"_inbox:{agent_id}":
+            return True
     return False
 
 def match_to_agent(content: str, msg: dict, agent_id: str) -> Any:
