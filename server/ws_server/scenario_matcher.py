@@ -99,6 +99,16 @@ def match_loopback(content: str, msg: dict, agent_id: str) -> Any:
         return True
     return False
 
+def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 35: PM safety guard — detect messages targeted at _inbox:server."""
+    channel = (msg.get("channel") or "").strip()
+    to_agent = (msg.get("to_agent") or msg.get("to") or "").strip()
+    if channel == "_inbox:server" or to_agent == "_inbox:server":
+        return True
+    if channel.startswith("_inbox:") and agent_id and channel != f"_inbox:{agent_id}":
+        return True
+    return False
+
 def match_to_agent(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 20: to_agent dispatch routing."""
     to_agent = (msg.get("to_agent") or "").strip()
