@@ -3,7 +3,8 @@
 > WSS 进程是 ws-bridge 的 WebSocket 服务核心。**共 20 个源文件（含 commands/ 及 README），约 9,000 行。**
 >
 > R134+R135 清理了 8 个废止文件和 ~1,800 行死代码。R136 提取了 5 个独立模块。
-> `main.py` 从峰值 **~6,400 行 → 2,197 行**。
+> R137 引擎分拆 — engine2.py 创建，`main.py` 从 **2,197 行 → 736 行**（-60%）。
+> R138 引擎合并 — engine2.py 吞并 pipeline_engine.py，两套引擎合一（pipeline_engine 2,201 行）。
 
 ---
 
@@ -27,7 +28,7 @@
 ws_server/                                      行数  说明
 ├── __init__.py                                    1  包声明
 ├── __main__.py                                  417  aiohttp 入口 + HTTP API 端点
-├── main.py                                    2,197  消息路由 + ## 命令 + 模板渲染
+├── main.py                                    736  消息路由 + 规则注册 + 惰性启动
 │
 ├── connection_manager.py                        302  连接生命周期（auth/register/_send/单播）
 ├── ack_machine.py                               241  ACK 状态机（30秒超时/通道超时）
@@ -36,7 +37,7 @@ ws_server/                                      行数  说明
 ├── git_sync_scheduler.py                         65  Git 同步调度循环
 │
 ├── scenario_matcher.py                          768  声明式规则表（_inbox:server 中继路由）
-├── pipeline_engine.py                         1,319  管线状态机 + 自动派发 + ## 命令
+├── pipeline_engine.py                         2,201  管线状态机 + 自动派发 + ## 命令（R138 引擎合并）
 ├── pipeline_context.py                          692  PipelineContext + PipelineContextManager
 ├── pipeline_sync.py                             203  Git 提交检测器
 │
@@ -345,7 +346,7 @@ __main__.py 启动
 | R134 删除 `!` 命令路由 + workspace handlers | ✅ 完成 | -1,245 行 |
 | R135 删除 handle_broadcast 死代码（大厅/广播/过滤/离线队列）| ✅ 完成 | -600 行 |
 | R136 提取 5 模块（connection_manager/ack/watchdog/timeout/git） | ✅ 完成 | -895 行 |
-| `##` 命令迁移到 pipeline_engine | ⬜ 待 R137 | `_handle_hash_*()` 可全部迁入引擎 |
-| `_sm_handle_*()` 回调 + 规则注册统一 | ⬜ 待 R137 | 底部 ~200 行可提取到注册表文件 |
+| R137 引擎分拆 — engine2.py 创建 + 路由切换 | ✅ 完成 | main.py 2,197→736 行（-1,461）|
+| R138 引擎合并 — engine2→pipeline_engine 合一 | ✅ 完成 | pipeline_engine 1,319→2,201 行（+882）|
 | `_connections` 池化 (dict→class) | ⬜ 待后续 | 并发安全 + 元数据 |
 | `_send_to_agent` 统一发送网关 | ⬜ 待后续 | 消除 15+ 处 send_str/send 二选一 |
