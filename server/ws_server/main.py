@@ -8,10 +8,8 @@ Only the core WS routing and subsystems that will be split in Phase 2 remain.
 
 """WebSocket handler and broadcast logic — admin-relay mode + channel routing."""
 import asyncio
-import os
 import json
 import logging
-import re
 import time
 import uuid
 from typing import Optional
@@ -22,11 +20,9 @@ from . import state  # R100: shared state container
 from . import scenario_matcher as _sm  # for _sm.dispatch() in handler()
 from . import message_store as ms
 from .audit import AuditLogger
-from . import task_store as ts
-from . import workspace as ws_mod  # R134: minimal stub — pipeline sync still uses get_workspace()
-from . import timeout_tracker  # R63 Phase 1: Step countdown
 from . import pipeline_sync as pps  # R65: Pipeline git sync
 from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
+from .scenario_rules import register_all_rules  # R139: rule registration
 _card_watcher = None  # R100: module-level for _ensure_card_watcher()
 import shared.protocol as p
 from .pipeline_engine import PipelineEngine
@@ -71,7 +67,7 @@ from .connection_manager import get_connections
 
 
 # ── R99/100: Role-Agent Map Refresh (migrated from command_utils.py) ──
-logger_cu = __import__('logging').getLogger(__name__)
+logger_cu = logging.getLogger(__name__)
 
 def _refresh_role_agent_map() -> None:
     """Rebuild state._ROLE_AGENT_MAP from Agent Card pipeline_roles."""
@@ -154,7 +150,7 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
         ms.save_message(
             msg_id=msg_id, msg_type="broadcast",
             from_agent="系统", from_name=from_name,
-            content=content_text, ts=__import__("time").time(),
+            content=content_text, ts=time.time(),
             data_dir=config.DATA_DIR, channel=channel,
         )
     except Exception:
@@ -469,91 +465,12 @@ async def handler(ws):
 
 
 
-# ── Workspace Closing ──────────────────────────────────────────────
-
-async def _broadcast_workspace_closing(ws_id: str, force_finalize: bool = False) -> None:
-    """Notify workspace members of impending close and wait for ACKs."""
-    resolved_workspace = ws_mod.get_workspace(ws_id)
-    if not resolved_workspace or resolved_workspace.state != ws_mod.WorkspaceState.CLOSING:
-        return
-
-    deadline_ts = time.time() + p.WORKSPACE_CLOSING_TIMEOUT
-    payload = json.dumps({
-        "type": p.MSG_WORKSPACE_CLOSING,
-        p.FIELD_WORKSPACE_ID: ws_id,
-        p.FIELD_REASON: "task_completed",
-        p.FIELD_DEADLINE_TS: deadline_ts,
-        p.FIELD_ACK_REQUIRED: True,
-    })
-
-    # Broadcast to all members
-    for agent_id in resolved_workspace.members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(payload)
-            except Exception:
-                pass
-
-    if force_finalize:
-        ws_mod.finalize_close(ws_id)
-        await _broadcast_workspace_archived(ws_id, resolved_workspace)
-        return
-
-    # Wait for ACKs with timeout
-    await asyncio.sleep(p.WORKSPACE_CLOSING_TIMEOUT)
-
-    # Force-close any unacked members
-    resolved_workspace = ws_mod.get_workspace(ws_id)
-    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.CLOSING:
-        unacked = resolved_workspace.members - resolved_workspace.closing_acks
-        if unacked:
-            logger.warning("Workspace '%s': force-closing unacked members: %s", ws_id, unacked)
-            for aid in unacked:
-                resolved_workspace.closing_acks.add(aid)
-        ws_mod.finalize_close(ws_id)
-        await _broadcast_workspace_archived(ws_id, resolved_workspace)
-
-
-# ── Broadcast Workspace Archived ──────────────────────────────────
-
-
-async def _broadcast_workspace_archived(ws_id: str, resolved_workspace=None) -> None:
-    """Broadcast that workspace has been archived — Web UI uses to regroup tab."""
-    if resolved_workspace is None:
-        resolved_workspace = ws_mod.get_workspace(ws_id)
-    if not resolved_workspace:
-        return
-    # R82: removed active channel reset — bot uses inbox only
-    logger.info("R82: Workspace '%s' archived — no channel reset", ws_id)
-    arch_payload = json.dumps({
-        "type": "broadcast",
-        "channel": ws_id,
-        "from_name": "系统",
-        "content": f"workspace {ws_id} 已归档",
-        "_workspace_event": "archived",
-        "workspace_id": ws_id,
-        "ts": time.time(),
-    })
-    for agent_id in resolved_workspace.members:
-        for conn in list(_connections.get(agent_id, set())):
-            try:
-                if hasattr(conn, "send_str"):
-                    await conn.send_str(arch_payload)
-                elif hasattr(conn, "send"):
-                    await conn.send(arch_payload)
-            except Exception:
-                pass
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # R126: scenario_matcher rule registration
 # ═══════════════════════════════════════════════════════════════════════
 
 
 # ── Register rules (R139: extracted to scenario_rules.py) ──────────
-from .scenario_rules import register_all_rules
 register_all_rules()
+
 

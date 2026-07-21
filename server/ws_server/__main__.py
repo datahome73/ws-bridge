@@ -16,13 +16,10 @@ from .connection_manager import _connections  # R136
 from .main import handle_auth, handle_broadcast, handle_register  # R87
 from . import scenario_matcher as _sm  # R126
 from .message_store import init_db
-from server.common.persistence import get_approved_users as _get_approved_users
 from server.common.persistence import (
     load_approved_users,
     load_web_sessions,
     load_api_keys,
-    save_approved_users,
-    save_web_sessions,
     get_api_keys as _get_api_keys,  # R86 B1: key 活性检查
 )
 import shared.protocol as p

@@ -10,8 +10,6 @@ import os
 
 from .pipeline_context import PipelineContextManager
 
-_PIPELINE_CONFIG: dict[str, dict] = {}  # round_name -> read-only config from WORK_PLAN
-
 # R79: 系统消息发送者标识
 SYSTEM_AGENT_ID: str = "_system"
 # R79 D: 注册后大厅广播开关（默认关闭）
