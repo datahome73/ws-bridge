@@ -1,1537 +1,67 @@
 # -*- coding: utf-8 -*-
-"""R138: Unified pipeline engine — merged from engine2.py + pipeline_engine.py.
+"""
+R127: Pipeline Engine — 管线状态机模块提取.
 
-Contains all pipeline logic: ## commands, auto-dispatch, pipeline
-advancement, PM notifications, template rendering, utility functions,
-and the PipelineEngine class with lifecycle management.
+Extracts ~2000 lines of pipeline state-machine logic from main.py into
+a dedicated PipelineEngine class, following the R127 tech plan.
+
+┌───────────────────────┐
+│    PipelineEngine     │
+│  ┌─────────────────┐  │
+│  │ 状态推进          │  │  try_advance / auto_advance
+│  │ ## 命令           │  │  handle_hash_*
+│  │ 自动调度          │  │  auto_dispatch / auto_re_notify
+│  │ 通知/重试         │  │  notify_pm / handle_reject / retry
+│  │ 后台扫描          │  │  git_sync / timeout / restore
+│  │ 数据工具          │  │  format / render / summary
+│  └─────────────────┘  │
+│                        │
+│  依赖: ctx_mgr(注入)    │
+│        send_to_agent(回调)│
+│        send_ws(回调)    │
+└───────────────────────┘
+
+协作关系:
+  main.py → 初始化 PipelineEngine → 调用 engine.*()
+  scenario_matcher.py → engine.handle_hash_*()
+  pipeline_auto_starter.py → engine.auto_dispatch()
+
+不包含:
+  - WebSocket 连接管理（仍在 main.py）
+  - 场景匹配规则（已在 scenario_matcher.py）
+  - Git 管线自动启动器（已在 pipeline_auto_starter.py）
+  - 管线数据模型（已在 pipeline_context.py）
 """
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
-from typing import Optional, Callable, Awaitable, Any
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
 
-from server.common import auth, config, persistence
-from . import state
+from server.common import config, persistence
 from . import message_store as ms
-from . import task_store as ts
-from . import workspace as ws_mod
-from . import timeout_tracker
 from . import pipeline_sync as pps
+from . import state
+from . import task_store as ts
+from . import timeout_tracker
+from . import workspace as ws_mod
 from . import agent_card as ac_mod
+from server.common import auth
 from .pipeline_context import (
-    PipelineContext, PipelineContextManager,
-    PipelineStatus, PipelineTaskKind,
+    PipelineContext,
+    PipelineContextManager,
+    PipelineStatus,
+    PipelineTaskKind,
 )
-from .connection_manager import _connections, _send, _send_to_agent
-# PipelineEngine is defined in this file — no self-import
+import shared.protocol as p
 
 logger = logging.getLogger("ws-bridge.pipeline_engine")
 
-
-# ── Extracted from main.py L221-341: async def _auto_advance_pipeline(round_name: str, result: dict) -> str: ──
-async def _auto_advance_pipeline(round_name: str, result: dict) -> str:
-    """Git sync 检测到新产出后自动推进状态机.
-
-    Args:
-        round_name: 管线标识
-        result: PipelineGitSync.sync() 返回值
-
-    Returns:
-        广播消息文本.
-    """
-    pstate = state._PIPELINE_STATE.get(round_name)
-    if not pstate:
-        return ""
-
-    step_config = _get_step_config(round_name)
-    current_step = pstate.get("current_step", "")
-    if not current_step:
-        return ""
-
-    # 获取当前 Step 在 step_config 中的索引
-    step_keys = sorted(step_config.keys(), key=_step_sort_key)
-    try:
-        idx = step_keys.index(current_step)
-    except ValueError:
-        return ""
-
-    if idx + 1 >= len(step_keys):
-        return ""  # 已是最后一步
-
-    next_step = step_keys[idx + 1]
-    new_sha = result.get("new_sha", "")
-
-    # 1. 状态机推进
-    pstate["current_step"] = next_step
-    pstate["last_output_sha"] = new_sha
-    # 更新 Task state
-    tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
-    for t in tasks:
-        if t.get("name") == current_step and t.get("state") != p.TaskState.COMPLETED.value:
-            await _cmd_task_update("系统", {
-                "_positional": [t["id"]],
-                "state": p.TaskState.COMPLETED.value,
-                "output": new_sha,
-            })
-        if t.get("name") == next_step and t.get("state") == p.TaskState.PENDING.value:
-            await _cmd_task_update("系统", {
-                "_positional": [t["id"]],
-                "state": p.TaskState.WORKING.value,
-            })
-
-    # 2. 清理旧 ACK FAILED 标记
-    old_ack_key = f"{round_name}/{current_step}"
-    if old_ack_key in state._step_ack_states:
-        if state._step_ack_states[old_ack_key].get("state") == "FAILED":
-            state._step_ack_states.pop(old_ack_key, None)
-            logger.info("[R65] 清除 %s 的 FAILED 标记（git sync 发现新产出）", old_ack_key)
-
-    # 3. 广播自动同步消息
-    ws_id = pstate.get("ws_id", "")
-    commit_short = new_sha[:7] if new_sha else "?"
-    mode = result.get("mode", "auto")
-    mode_label = "" if mode == "default" else f"（{mode} 匹配）"
-
-    msg = (
-        f"💻 {round_name} {current_step} → {next_step} 已自动同步\n"
-        f"  commit: {commit_short}{mode_label}\n"
-        f"→ @{next_step} 到你了！"
-    )
-
-    if ws_id:
-        pm_name = config.PIPELINE_PM_NAME
-        _persist_broadcast(ws_id, pm_name, msg)
-        payload = json.dumps({
-            "type": "broadcast", "channel": ws_id,
-            "from_name": pm_name, "from": pm_name,
-            "content": msg, "ts": time.time(),
-        })
-        ws_obj = ws_mod.get_workspace(ws_id)
-        if ws_obj:
-            for member_id in ws_obj.members:
-                for conn in list(_connections.get(member_id, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(payload)
-                    except Exception:
-                        pass
-
-    # 4. 点名下一角色（复用 R63 @role_name → @bot_name 机制）
-    next_role = step_config[next_step].get("role", "")
-    if next_role:
-        cards = ac_mod.get_all_cards()
-        ws_obj = ws_mod.get_workspace(ws_id) if ws_id else None
-        if ws_obj and cards:
-            matched = _find_agents_by_role(next_role, ws_obj.members, cards)
-            users = auth.get_users()
-            for aid in matched:
-                name = users.get(aid, {}).get("name", aid[:12])
-                mention = f"@{name} 🏗️ {round_name} {next_step} 到你了！"
-                mention_payload = json.dumps({
-                    "type": "broadcast", "channel": ws_id,
-                    "from_name": pm_name, "from": pm_name,
-                    "content": mention, "ts": time.time(),
-                })
-                for conn in list(_connections.get(aid, set())):
-                    try:
-                        if hasattr(conn, "send_str"):
-                            await conn.send_str(mention_payload)
-                        elif hasattr(conn, "send"):
-                            await conn.send(mention_payload)
-                    except Exception:
-                        pass
-
-    # 5. 启动下一 Step timeout_tracker 倒计时
-        timeout_min = step_config.get(next_step, {}).get("timeout_minutes", 20)
-        timeout_tracker.start_timer(round_name, next_step, timeout_min)
-
-    logger.info("[R65] 管线 %s 已自动推进：%s → %s (sha=%s)",
-                round_name, current_step, next_step, commit_short)
-    return msg
-
-
-# ── Extracted from main.py L375-410: async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]: ──
-async def _verify_git_commit(commit_sha: str) -> tuple[bool, str]:
-    """Check remote git dev branch for the given commit SHA via git ls-remote.
-    Uses 10s timeout. On failure, degrades to a warning.
-    Returns: (ok_to_proceed, message)
-    """
-    import subprocess
-    repo_url = _r42cfg.GIT_REMOTE_URL
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                "git", "ls-remote", repo_url, "refs/heads/dev",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            ),
-            timeout=10,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            return True, (
-                f"⚠️ git ls-remote 异常退出（{stderr.decode('utf-8', errors='replace')[:40]}），"
-                f"已跳过验证，继续推进"
-            )
-        refs = stdout.decode("utf-8", errors="replace")
-        if commit_sha in refs:
-            return True, ""
-        else:
-            return False, (
-                f"❌ Commit {commit_sha[:12]} 不存在于远程仓库 "
-                f"（{repo_url}）的 dev 分支"
-            )
-    except asyncio.TimeoutError:
-        return True, "⚠️ git ls-remote 超时（10s），已跳过验证，继续推进"
-    except Exception as e:
-        return True, f"⚠️ git 验证不可达（{str(e)[:40]}），已跳过验证，继续推进"
-
-
-# ── R77: !pipeline command — unified pipeline context management ─────
-
-# ── Extracted from main.py L414-485: def _format_pipeline_context(ctx: PipelineContext) -> str: ──
-def _format_pipeline_context(ctx: PipelineContext) -> str:
-    """格式化 PipelineContext 为人类可读文本.R78 D2: 增强版 ACK 展示."""
-    from datetime import datetime
-    lines = [
-        f"📋 {ctx.round_name} [{ctx.task_kind.value}]",
-        f"  状态: {ctx.status.value}",
-        f"  Step: {ctx.current_step}/{ctx.total_steps}",
-        f"  阶段: {ctx.current_phase}",
-    ]
-    # ── R106: Step-by-step status (role mapping) ──
-    step_roles = ["pm", "arch", "dev", "review", "qa", "operations"]
-    role_names = {"pm": "PM", "arch": "架构师", "dev": "开发",
-                  "review": "审查", "qa": "测试", "operations": "运维"}
-    step_parts = []
-    for i in range(1, ctx.total_steps + 1):
-        step_key = f"step{i}"
-        role = step_roles[i - 1] if i - 1 < len(step_roles) else "?"
-        role_name = role_names.get(role, role)
-        # Determine status from current_step + ack_states
-        ack = ctx.ack_states.get(step_key, {})
-        ack_state = ack.get("state", "")
-        if ack_state == "FAILED":
-            icon = "❌"
-            desc = "失败"
-        elif ack_state == "ACKED" or i < ctx.current_step:
-            icon = "✅"
-            desc = "已完成"
-        elif i == ctx.current_step:
-            icon = "🔄"
-            desc = "进行中"
-        elif ack_state in ("SENT", "DELIVERED", "IN_PROGRESS"):
-            icon = "🔄"
-            desc = "进行中"
-        else:
-            icon = "⏳"
-            desc = "待开始"
-        step_parts.append(f"  Step{i} {icon} {role_name} → {desc}")
-    if step_parts:
-        lines.append("  步骤:")
-        lines.extend(step_parts)
-    # R78 D2: ACK 状态逐 step 展示（缩略版）
-    ack_parts = []
-    for i in range(1, ctx.total_steps + 1):
-        step = f"step{i}"
-        ack = ctx.ack_states.get(step, {})
-        state = ack.get("state", "")
-        role = ack.get("role_name", "")
-        if state == "ACKED":
-            ack_parts.append(f"step{i} ✅{role}")
-        elif state == "PENDING":
-            ack_parts.append(f"step{i} ⏳{role}")
-        elif state == "FAILED":
-            ack_parts.append(f"step{i} ❌{role}")
-        elif state in ("SENT", "DELIVERED", "IN_PROGRESS", "ACKNOWLEDGED"):
-            ack_parts.append(f"step{i} 🔄{role}")
-        else:
-            ack_parts.append(f"step{i} ⬜")
-    lines.append(f"  ACK: {' | '.join(ack_parts)}")
-    if ctx.blocked_reason:
-        lines.append(f"  阻塞: {ctx.blocked_reason}")
-    if ctx.role_agent_map:
-        parts = []
-        for role, agents in ctx.role_agent_map.items():
-            agents_str = ",".join(a[:12] for a in agents)
-            parts.append(f"{role}={agents_str}")
-        lines.append(f"  成员: {'; '.join(parts)}")
-    if ctx.workspace_id:
-        lines.append(f"  工作室: {ctx.workspace_id}")
-    if ctx.created_at:
-        lines.append(f"  创建: {datetime.fromtimestamp(ctx.created_at).strftime('%m/%d %H:%M')}")
-    return "\n".join(lines)
-
-
-
-# ── Extracted from main.py L487-515: async def _restore_pipeline_timers() -> None: ──
-async def _restore_pipeline_timers() -> None:
-    """On server start, recover pipeline timeout timers from task store."""
-    try:
-        all_tasks = ts.list_tasks_by_context("", config.DATA_DIR)
-        round_groups = {}
-        for t in all_tasks:
-            ctx = t.get("context", "")
-            state = t.get("state", "")
-            if ctx.startswith("R") and state not in ("completed", "cancelled"):
-                if ctx not in round_groups:
-                    round_groups[ctx] = []
-                round_groups[ctx].append(t)
-        for round_name, tasks in round_groups.items():
-            if round_name in state._PIPELINE_STATE:
-                continue
-            tasks_sorted = sorted(tasks, key=lambda x: x.get("created_at", 0))
-            current_step = tasks_sorted[0].get("name", "") if tasks_sorted else ""
-            started_at = tasks_sorted[0].get("created_at", time.time())
-            ws_id = "ws:" + round_name + "-dev"
-            _set_pipeline_state(round_name, {
-                "active": True,
-                "current_step": current_step,
-                "ws_id": ws_id,
-                "started_at": started_at,
-            })
-            logger.info("R49 C restored timer: %s step=%s ws=%s", round_name, current_step, ws_id)
-    except Exception:
-        pass
-
-
-
-# ── Extracted from main.py L520-545: async def _restore_pipeline_dispatches() -> None: ──
-async def _restore_pipeline_dispatches() -> None:
-    """On server start, re-dispatch the current step for all RUNNING pipelines
-    whose current step is still pending.  Handles the case where a container
-    restart lost the original auto-dispatch message."""
-    try:
-        mgr = _ensure_pipeline_manager()
-        for ctx in mgr.get_all_active():
-            if ctx.status != PipelineStatus.RUNNING:
-                continue
-            step_num = ctx.current_step
-            if step_num < 1 or step_num > ctx.total_steps:
-                continue
-            step_key = f"step{step_num}"
-            step_info = next(
-                (s for s in (ctx.steps or []) if s.get("name") == step_key), None,
-            )
-            if not step_info or step_info.get("status") not in ("pending", "in_progress"):
-                continue
-            logger.info("[R119] 恢复派活: %s step%d → %s",
-                        ctx.round_name, step_num,
-                        step_info.get("agent_id", "?")[:20])
-            _enqueue_retry(ctx, step_num)
-            _enqueue_retry(ctx, step_num)
-    except Exception:
-        pass
-
-
-
-# ── Extracted from main.py L651-674: def _extract_artifact_kv(content: str) -> dict[str, str]: ──
-def _extract_artifact_kv(content: str) -> dict[str, str]:
-    """从 '已完成 ✅ R{N} Step {N}##key=value##...' 中提取键值对。
-
-    Args:
-        content: 完整的完成消息文本
-
-    Returns:
-        提取的键值对 dict（不含 Step/round 信息）。
-        无 ## 时返回空 dict。
-    """
-    if "##" not in content:
-        return {}
-    parts = content.split("##")
-    result: dict[str, str] = {}
-    for p in parts[1:]:  # parts[0] 是前缀段，跳过
-        if "=" in p:
-            key, value = p.split("=", 1)  # 仅第一个 = 做分隔
-            key = key.strip()
-            if key:
-                result[key] = value
-        else:
-            logger.debug("[R115] 忽略不含 '=' 的 ## 段: %s", p[:50])
-    return result
-
-
-
-# ── Extracted from main.py L679-792: def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]: ──
-def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
-    """Parse 已完成 ✅ R{N} Step {N} and auto-advance pipeline context.
-
-    Returns:
-        (True, "round_name") on success, (False, reason) on skip.
-    """
-    m = re.match(r"已完成 ✅ R(\d+) Step (\d+)", content)
-    if not m:
-        return False, "no match"
-    round_name = f"R{m.group(1)}"
-    completed_step = int(m.group(2))
-    try:
-        mgr = _ensure_pipeline_manager()
-        ctx = mgr.get(round_name)
-        if not ctx:
-            logger.info("[R106] 管线 %s 无上下文，跳过自动推进", round_name)
-            return False, "no context"
-        old_step = ctx.current_step
-        # Only advance if completed_step matches current_step
-        if completed_step == old_step:
-            # ═══ R115: 提取 ##key=value 并注入 artifacts ═══
-            _kv = _extract_artifact_kv(content)
-            if _kv:
-                _step_key = f"step{completed_step}"
-                if not hasattr(ctx, 'artifacts') or not ctx.artifacts:
-                    ctx.artifacts = {}
-                ctx.artifacts[_step_key] = _kv
-                try:
-                    mgr.save()
-                except Exception:
-                    pass
-                logger.info("[R115] %s step%d artifacts: %s", round_name, completed_step, _kv)
-            # ═══ R123: advance 前记录 step output + result_msg ═══
-            _step_idx = completed_step - 1
-            _step_info = ctx.steps[_step_idx] if _step_idx < len(ctx.steps) else None
-            if _step_info:
-                _output = {}
-                if _kv:
-                    for _k in ("sha", "commit_msg", "tech_plan_url", "branch_name",
-                                "test_scope", "test_report_url", "test_summary",
-                                "review_url"):
-                        if _k in _kv:
-                            _output[_k] = _kv[_k]
-                _step_info["output"] = _output if _output else None
-                _step_info["result_msg"] = content[:200]
-                _step_info["status"] = "done"
-                try:
-                    mgr.save()
-                except Exception:
-                    pass
-            # ═══ R124: Step 产出基本验证（SHA 格式 + 可选远程 git）═══
-            if _kv:
-                _step_v = _step_info if _step_info else None
-                if _step_v:
-                    _out_v = _step_v.get("output")
-                    if not isinstance(_out_v, dict):
-                        _out_v = {}
-                    _sha_v = _kv.get("sha", "")
-                    if _sha_v:
-                        import re as _re_sha124
-                        if _re_sha124.match(r"^[0-9a-f]{7,40}$", _sha_v):
-                            _out_v["sha_validation"] = "valid_format"
-                        else:
-                            _out_v["sha_validation"] = "invalid_format"
-                        _step_v["output"] = _out_v if _out_v else None
-                        try:
-                            mgr.save()
-                        except Exception:
-                            pass
-                    # 远程 git 验证（可选、异步、不阻塞）
-                    if (config.PIPELINE_OUTPUT_VERIFICATION and _sha_v
-                            and _out_v.get("sha_validation") == "valid_format"):
-                        asyncio.ensure_future(
-                            _verify_sha_remote(round_name, completed_step, _sha_v)
-                        )
-            # ════════════════════════════════════════════════════════════════
-            asyncio.ensure_future(mgr.advance_step(round_name))
-            logger.info(
-                "[R106] %s Step %d → %d (auto-advance from completion)",
-                round_name, old_step, old_step + 1,
-            )
-            # ── R107: 自动派活下一步（受 AUTO_DISPATCH_ENABLED 控制）──
-            next_step = old_step + 1
-            if next_step <= ctx.total_steps:
-                logger.info(
-                    "[R117] %s Step %d 已完成，尝试自动派活 Step %d",
-                    round_name, old_step, next_step,
-                )
-                asyncio.ensure_future(_auto_dispatch(ctx, next_step))
-            else:
-                # 最后一步已完成，标记管线 completed
-                asyncio.ensure_future(mgr.transition_to(round_name, PipelineStatus.COMPLETED))
-                logger.info("[R107] %s 全管线已完成 ✅", round_name)
-                asyncio.ensure_future(_notify_pm(ctx, ctx.total_steps, "completed"))
-                # ═══ R124: 自动归档 ═══
-                asyncio.ensure_future(_archive_pipeline(round_name))
-                # ═══════════════════════
-            return True, round_name
-        elif completed_step < old_step:
-            logger.info(
-                "[R106] %s Step %d already past completed Step %d (skip)",
-                round_name, old_step, completed_step,
-            )
-            return False, "already past"
-        else:
-            logger.info(
-                "[R106] %s Step %d > current %d (gap, skip)",
-                round_name, completed_step, old_step,
-            )
-            return False, "future step"
-    except Exception as e:
-        logger.warning("[R106] 自动推进异常: %s", e)
-        return False, f"error: {e}"
-
-
-
-# ── Extracted from main.py L797-871: async def _notify_pm(ctx: PipelineContext, step_num: int, status: str, detail: str = "") -> None: ──
-async def _notify_pm(ctx: PipelineContext, step_num: int, status: str, detail: str = "") -> None:
-    """发送管线通知给 PM。
-    status: 'dispatched' | 'completed' | 'failed' | 'retrying'
-    """
-    pm_id = config.PIPELINE_PM_AGENT_ID
-    role_names = {1: "📋 PM", 2: "📐 Arch", 3: "💻 Dev", 4: "👁 Review", 5: "🧪 QA", 6: "🚢 Ops"}
-    step_role = role_names.get(step_num, "?")
-
-    if status == "dispatched":
-        agent_name = _get_step_agent_name(ctx, step_num)
-        content = (
-            f"✅ **{ctx.round_name} 管线自动推进**\n\n"
-            f"Step {step_num} 🚀 已派活 → {agent_name}（{step_role}）\n"
-            + (f"\n{detail}" if detail else "")
-        )
-    elif status == "completed":
-        # 构造完成摘要
-        step_lines = []
-        for i, s in enumerate(ctx.steps, 1):
-            role = role_names.get(i, "?")
-            agent = s.get("agent_name", s.get("agent_id", "?")[:12])
-            out = s.get("output", s.get("result_msg", ""))
-            out_short = out[:40] + "..." if len(str(out)) > 40 else out
-            step_lines.append(f"| {i} | {role} | {agent} | {out_short} |")
-        table_header = "| Step | 角色 | 执行者 | 产出 |\n|:---:|:-----|:-------|:-----|\n"
-        content = (
-            f"🎉 **{ctx.round_name} 管线已完成！**\n\n"
-            f"{table_header}{chr(10).join(step_lines)}"
-        )
-    elif status == "failed":
-        agent_name = _get_step_agent_name(ctx, step_num)
-        content = (
-            f"⚠️ **{ctx.round_name} 管线异常**\n\n"
-            f"Step {step_num}（{step_role}）→ {agent_name} 离线，"
-            f"自动派活失败（5 次重试）\n"
-            + (f"\n{detail}" if detail else "")
-        )
-    elif status == "retrying":
-        agent_name = _get_step_agent_name(ctx, step_num)
-        content = (
-            f"⏳ **{ctx.round_name} 派活排队中**\n\n"
-            f"Step {step_num}（{step_role}）→ {agent_name} 离线，排队中（{detail}）"
-        )
-    # ═══ R124: 驳回/卡死通知 ═══
-    elif status == "rejected":
-        content = (
-            f"⚠️ **{ctx.round_name} 管线回退**\n\n"
-            f"Step {step_num}（{step_role}）被退回\n"
-            + (f"{detail}" if detail else "")
-        )
-    elif status == "stuck":
-        content = (
-            f"🔴 **{ctx.round_name} 管线已卡死**\n\n"
-            + (f"{detail}" if detail else "")
-        )
-    elif status == "archived":
-        content = (
-            f"📦 **{ctx.round_name} 管线已完成并归档**\n\n"
-            + (f"{detail}" if detail else "")
-        )
-    # ═══════════════════════════════════════════════════
-    else:
-        return
-
-    payload = {
-        "type": "broadcast",
-        "channel": f"_inbox:{pm_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": content,
-        "ts": time.time(),
-    }
-    sent = await _send_to_agent(pm_id, payload)
-    logger.info("[R118] 通知 PM step%d status=%s sent=%d", step_num, status, sent)
-
-
-
-# ── Extracted from main.py L875-925: _pending_retries: dict[str, dict] = {}  # round_name → {ctx, step_num, retry_count, next_retry_at, notify_sent} ──
-_pending_retries: dict[str, dict] = {}  # round_name → {ctx, step_num, retry_count, next_retry_at, notify_sent}
-
-async def _retry_loop() -> None:
-    """后台循环，每 30s 扫描待重试队列。最多重试 5 次，每次间隔 60s。"""
-    while True:
-        now = time.time()
-        for round_name in list(_pending_retries.keys()):
-            entry = _pending_retries[round_name]
-            if now < entry["next_retry_at"]:
-                continue
-            ctx = entry["ctx"]
-            step_num = entry["step_num"]
-            entry["retry_count"] += 1
-            logger.info("[R118] 重试派活 %s step%d (尝试 %d/5)",
-                        round_name, step_num, entry["retry_count"])
-            result = await _auto_dispatch(ctx, step_num)
-            if result:
-                del _pending_retries[round_name]
-                logger.info("[R118] 重试成功: %s step%d", round_name, step_num)
-            elif entry["retry_count"] >= 5:
-                del _pending_retries[round_name]
-                asyncio.ensure_future(
-                    _notify_pm(ctx, step_num, "failed",
-                               f"5 次重试均失败，目标 bot 持续离线"))
-                logger.warning("[R118] 重试耗尽: %s step%d 5/5 失败", round_name, step_num)
-            else:
-                entry["next_retry_at"] = time.time() + 60
-                if not entry.get("notify_sent"):
-                    entry["notify_sent"] = True
-                    asyncio.ensure_future(
-                        _notify_pm(ctx, step_num, "retrying",
-                                   f"尝试 {entry['retry_count']+1}/5"))
-                logger.info("[R118] 重试排队: %s step%d 等待 60s",
-                            round_name, step_num)
-        await asyncio.sleep(30)
-
-
-def _enqueue_retry(ctx: PipelineContext, step_num: int) -> None:
-    """将失败的自动派活加入重试队列。"""
-    round_name = ctx.round_name
-    if round_name in _pending_retries:
-        return  # 已在队列中
-    _pending_retries[round_name] = {
-        "ctx": ctx,
-        "step_num": step_num,
-        "retry_count": 0,
-        "next_retry_at": time.time() + 60,
-        "notify_sent": False,
-    }
-    logger.info("[R118] 入重试队列: %s step%d", round_name, step_num)
-
-
-
-# ── Extracted from main.py L930-998: def _render_template(template: str, ctx: PipelineContext, step_num: int) -> str: ──
-def _render_template(template: str, ctx: PipelineContext, step_num: int) -> str:
-    """用 Pipeline Context 数据渲染模板字符串。
-
-    变量来源优先级（高→低）:
-    1. ctx.artifacts 中各 step 的产出 KV
-    2. ctx.references 中的文档 URL
-    3. ctx 基本信息 (round_name, round_title)
-
-    R123 新增 {stepN:field} 变量语法，解析优先级:
-    1. ctx.artifacts["step{N}"].get(field)
-    2. ctx.steps[idx].output.get(field)   (当 output 是 dict 时)
-    3. ctx.steps[idx].get(field)           (agent_name, result_msg 等)
-    4. ctx.references.get(field)
-    5. 空字符串
-    """
-    # ═══ R123: 先解析 {stepN:field} 占位符 ═══
-    _step_placeholder_re = re.compile(r"\{step(\d+):(\w+)\}")
-
-    def _resolve_step_var(m: re.Match) -> str:
-        _sn = int(m.group(1))
-        _field = m.group(2)
-        _sk = f"step{_sn}"
-        _idx = _sn - 1
-        # 1. ctx.artifacts["step{N}"].get(field)
-        _art = ctx.artifacts.get(_sk, {})
-        if isinstance(_art, dict) and _field in _art:
-            val = str(_art[_field])
-            return val if val else ""
-        # 2. ctx.steps[idx].output.get(field)
-        if _idx < len(ctx.steps):
-            _step = ctx.steps[_idx]
-            if isinstance(_step, dict):
-                _out = _step.get("output")
-                if isinstance(_out, dict) and _field in _out:
-                    val = str(_out[_field])
-                    return val if val else ""
-                # 3. ctx.steps[idx].get(field)
-                if _field in _step:
-                    val = str(_step[_field])
-                    return val if val else ""
-        # 4. ctx.references.get(field)
-        if isinstance(ctx.references, dict) and _field in ctx.references:
-            val = str(ctx.references[_field])
-            return val if val else ""
-        # 5. 空字符串
-        return ""
-
-    template = _step_placeholder_re.sub(_resolve_step_var, template)
-    # ════════════════════════════════════════════════════════════════
-
-    vars = {
-        "round": ctx.round_name,
-        "round_title": ctx.round_title,
-        "requirements_url": ctx.references.get("requirements_url", ""),
-        "work_plan_url": ctx.references.get("work_plan_url", ""),
-    }
-    # 补充来自 artifacts 的变量（覆盖同名变量）
-    for step_key, step_artifacts in ctx.artifacts.items():
-        if isinstance(step_artifacts, dict):
-            vars.update(step_artifacts)
-    # 填充模板中的 {var} 占位符
-    for key, value in vars.items():
-        template = template.replace(f"{{{key}}}", str(value))
-    # ═══ R123: 清理空值字段行（##key## \n 残留）═══
-    template = re.sub(r"^##\w+##\s*\n", "", template, flags=re.MULTILINE)
-    template = template.strip()
-    # ══════════════════════════════════════════════════
-    return template
-
-
-
-# ── Extracted from main.py L1000-1007: def _get_step_agent_name(ctx: PipelineContext, step_num: int) -> str: ──
-def _get_step_agent_name(ctx: PipelineContext, step_num: int) -> str:
-    """辅助函数：获取指定 step 的 agent 名称。"""
-    step_key = f"step{step_num}"
-    info = next((s for s in ctx.steps if s.get("name") == step_key), None)
-    if info:
-        return info.get("agent_name", info.get("agent_id", "?"))
-    return "?"
-
-
-
-# ── Extracted from main.py L1009-1017: # ═══ R123: 前置步骤摘要生成 ═══ ──
-# ═══ R123: 前置步骤摘要生成 ═══
-_ROLE_EMOJIS = {1: "📋", 2: "📐", 3: "💻", 4: "👁", 5: "🧪", 6: "🚢"}
-_ROLE_NAMES = {1: "PM", 2: "Arch", 3: "Dev", 4: "Review", 5: "QA", 6: "Ops"}
-_URL_FIELDS = {
-    "tech_plan_url": "技术方案", "review_url": "审查报告",
-    "test_report_url": "测试报告", "test_summary": "测试结果",
-    "requirements_url": "需求文档", "work_plan_url": "工作计划",
-}
-
-
-
-# ── Extracted from main.py L1019-1048: def _build_step_summary(ctx: PipelineContext, step_num: int) -> str: ──
-def _build_step_summary(ctx: PipelineContext, step_num: int) -> str:
-    """为 step_num 构建前序步骤完成摘要。仅显示已完成（status=done）的前置 step。"""
-    lines = ["══════ 前置步骤状态 ══════"]
-    has_prev = False
-    for i, s in enumerate(ctx.steps, 1):
-        if i >= step_num:
-            break
-        if s.get("status") != "done":
-            continue
-        has_prev = True
-        emoji = _ROLE_EMOJIS.get(i, "?")
-        rname = _ROLE_NAMES.get(i, "?")
-        agent = s.get("agent_name", s.get("agent_id", "?")[:12])
-        lines.append(f"\nStep {i} {emoji} {rname}（{agent}）✅")
-        output = s.get("output")
-        if isinstance(output, dict):
-            sha = output.get("sha", "")
-            if sha:
-                lines.append(f"  提交: `{sha}` — {output.get('commit_msg', '')}")
-            for k, label in _URL_FIELDS.items():
-                if output.get(k):
-                    lines.append(f"  产出: [{label}]({output[k]})")
-        result_msg = s.get("result_msg", "")
-        if result_msg:
-            lines.append(f"  结果: {result_msg[:80]}")
-    if not has_prev:
-        return ""
-    lines.append("\n════════════════════\n")
-    return "\n".join(lines)
-# ════════════════════════════════════════════════════════════════
-
-
-# ── Extracted from main.py L1053-1067: def _find_archive(round_name: str) -> dict | None: ──
-def _find_archive(round_name: str) -> dict | None:
-    """从 pipeline_archive.json 查找已归档轮次。"""
-    from pathlib import Path
-    archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
-    if not archive_path.exists():
-        return None
-    try:
-        records = json.loads(archive_path.read_text(encoding="utf-8"))
-        for rec in records:
-            if rec.get("round_name") == round_name:
-                return rec
-    except (OSError, json.JSONDecodeError):
-        pass
-    return None
-
-
-
-# ── Extracted from main.py L1069-1075: def _fmt_ts(ts: float) -> str: ──
-def _fmt_ts(ts: float) -> str:
-    """格式化时间戳。"""
-    if not ts:
-        return "?"
-    try:
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-    except (ValueError, OSError):
-        return str(ts)
-
-# ── Extracted from main.py L1080-1121: async def _verify_sha_remote(round_name: str, step_num: int, sha: str) -> None: ──
-async def _verify_sha_remote(round_name: str, step_num: int, sha: str) -> None:
-    """异步验证 SHA 在远程 dev 分支的存在性。不阻断管线推进。"""
-    try:
-        mgr = _ensure_pipeline_manager()
-        ctx = mgr.get(round_name)
-        if not ctx:
-            return
-        _step = ctx.steps[step_num - 1] if step_num - 1 < len(ctx.steps) else None
-        if not _step:
-            return
-        _output = _step.get("output") or {}
-        if not isinstance(_output, dict):
-            _output = {}
-        async with asyncio.timeout(5):
-            proc = await asyncio.create_subprocess_exec(
-                "git", "ls-remote", "origin", "dev",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            if sha in stdout.decode("utf-8", errors="replace"):
-                _output["sha_validation"] = "verified"
-            else:
-                _output["sha_validation"] = "not_found"
-                _step["output"] = _output
-                mgr.save()
-                return
-            proc2 = await asyncio.create_subprocess_exec(
-                "git", "log", "--oneline", sha, "-1",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout2, _ = await proc2.communicate()
-            _msg = stdout2.decode("utf-8", errors="replace")
-            _output["commit_round_match"] = "matched" if round_name in _msg else "mismatched"
-        _step["output"] = _output
-        mgr.save()
-    except asyncio.TimeoutError:
-        if ctx and _step:
-            _step["output"]["sha_validation"] = "unchecked"
-            mgr.save()
-    except Exception as e:
-        logger.warning("[R124] SHA 验证异常: %s", e)
-
-
-
-# ── Extracted from main.py L1123-1162: async def _auto_re_notify(ctx, step_key: str, step_num: int) -> None: ──
-async def _auto_re_notify(ctx, step_key: str, step_num: int) -> None:
-    """超时后重新发送派活消息给原 bot。"""
-    step_idx = step_num - 1
-    if step_idx < 0 or step_idx >= len(ctx.steps):
-        return
-    step_info = ctx.steps[step_idx]
-    target_agent_id = step_info.get("agent_id", "")
-    if not target_agent_id:
-        return
-    tmpl = ctx.message_templates.get(step_key)
-    if tmpl:
-        content = _render_template(tmpl, ctx, step_num)
-    else:
-        content = f"📋 {ctx.round_name} Step {step_num} — {step_info.get('role', '?')}，请继续完成"
-    # 头部加重发标记
-    content = f"🔄 消息重发 — {content}"
-    payload = {
-        "type": "broadcast",
-        "channel": f"_inbox:{target_agent_id}",
-        "content": content,
-        "from_name": "小谷",
-        "agent_id": "ws_f26e585f6479",
-        "id": f"retry-{ctx.round_name}-step{step_num}-{int(time.time() * 1000)}",
-        "ts": time.time(),
-    }
-    sent = await _send_to_agent(target_agent_id, payload)
-    pm_id = config.PIPELINE_PM_AGENT_ID
-    if pm_id:
-        agent_name = step_info.get("agent_name", target_agent_id[:12])
-        await _send_to_agent(pm_id, {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"🔄 {ctx.round_name} Step {step_key} 超时，已重新发送派活消息给 {agent_name}",
-            "ts": time.time(),
-        })
-    logger.info("[R124] 超时重发: %s Step %s → %s (sent=%d)",
-                ctx.round_name, step_key, target_agent_id[:12], sent if sent else 0)
-# ═══════════════════════════════════════════════════════════
-
-
-# ── Extracted from main.py L1165-1278: async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool: ──
-async def _auto_dispatch(ctx: PipelineContext, step_num: int) -> bool:
-    """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。"""
-    if not config.AUTO_DISPATCH_ENABLED:
-        logger.info(
-            "[R107] 自动派活已关闭，跳过 step%d 发送 (round=%s)",
-            step_num, ctx.round_name,
-        )
-        # 模拟：仅打印渲染结果，不实际发送
-        next_step_key = f"step{step_num}"
-        next_template = ctx.message_templates.get(next_step_key, "")
-        if next_template:
-            rendered = _render_template(next_template, ctx, step_num)
-            logger.info(
-                "[R107] [模拟] 将派活 step%d 给 %s:\n%s",
-                step_num,
-                _get_step_agent_name(ctx, step_num),
-                rendered,
-            )
-        return False
-
-    # ← 实际发送逻辑（开关打开后才执行）
-    next_step_key = f"step{step_num}"
-    next_template = ctx.message_templates.get(next_step_key)
-    if not next_template:
-        logger.warning(
-            "[R107] 管线 %s 缺少 step%d 模板，跳过自动派活",
-            ctx.round_name, step_num,
-        )
-        return False
-
-    next_step_info = next(
-        (s for s in (ctx.steps or []) if s.get("name") == next_step_key), None,
-    )
-    if not next_step_info or not next_step_info.get("agent_id"):
-        logger.warning(
-            "[R107] 管线 %s step%d 无 agent_id，跳过自动派活",
-            ctx.round_name, step_num,
-        )
-        return False
-
-    target_agent_id = next_step_info["agent_id"]
-
-    # ═══ R117 fix: card key → WS ID fallback ═══
-    if not target_agent_id.startswith("ws_"):
-        _fallback_id = _resolve_card_key_to_ws_id(target_agent_id)
-        if _fallback_id:
-            logger.info("[R117] card key %s → WS ID %s (fallback)",
-                        target_agent_id, _fallback_id)
-            target_agent_id = _fallback_id
-            next_step_info["agent_id"] = _fallback_id
-        else:
-            logger.warning(
-                "[R117] 无法解析 card key %s 为 WS ID，跳过自动派活 step %d of %s",
-                target_agent_id, step_num, ctx.round_name,
-            )
-            return False
-
-    content = _render_template(next_template, ctx, step_num)
-
-    # ═══ R123: Step ≥ 3 时前置步骤摘要注入 ═══
-    if step_num >= 3:
-        _summary = _build_step_summary(ctx, step_num)
-        if _summary:
-            content = _summary + "\n" + content
-    # ══════════════════════════════════════════════════════
-
-    payload = {
-        "type": "broadcast",
-        "channel": f"_inbox:{target_agent_id}",
-        "content": content,
-        "from_name": "系统",
-        "agent_id": state.SYSTEM_AGENT_ID,
-        "to_agent": target_agent_id,
-        "id": f"auto-{ctx.round_name}-step{step_num}-{int(time.time() * 1000)}",
-        "ts": time.time(),
-    }
-
-    # ── R109 修复: 派活消息落库 ──
-    try:
-        ms.save_message(
-            msg_id=payload["id"],
-            msg_type="broadcast",
-            from_agent=payload["agent_id"],
-            from_name=payload["from_name"],
-            content=content,
-            ts=payload["ts"],
-            data_dir=config.DATA_DIR,
-            channel=f"_inbox:{target_agent_id}",
-        )
-    except Exception:
-        pass  # 入库失败不阻塞派活
-
-    sent = await _send_to_agent(target_agent_id, payload)
-    logger.info("[R109] 自动派活 step%d → %s (%s): sent=%d",
-                step_num, target_agent_id,
-                next_step_info.get("agent_name", "?"), sent)
-    # R118: 派活成功后通知 PM
-    if sent > 0:
-        # 标记 step 为进行中，防止重复派活
-        next_step_info["status"] = "in_progress"
-        # ═══ R122: 记录派活时间戳，供超时扫描 ═══
-        next_step_info["dispatched_at"] = time.time()
-        next_step_info["timeout_alerted"] = False
-        try:
-            mgr = _ensure_pipeline_manager()
-            mgr.save()
-        except Exception:
-            pass
-        asyncio.ensure_future(_notify_pm(ctx, step_num, "dispatched"))
-    else:
-        # R118: 离线重试
-        _enqueue_retry(ctx, step_num)
-    return sent > 0
-
-
-
-# ── Extracted from main.py L1282-1357: async def _handle_reject(content: str, sender_agent_id: str) -> None: ──
-async def _handle_reject(content: str, sender_agent_id: str) -> None:
-    """处理退回 🔄 R{N} Step {N} — 原因 消息。
-    管线状态回退 + 通知 PM，不自动重新派活。
-    异步后台执行（不阻塞 relay 返回）。
-    """
-    m = re.match(r"退回 🔄 (R\d+) Step (\d+)", content)
-    if not m:
-        logger.info("[R124] 退回消息格式不匹配: %s...", content[:60])
-        return
-    round_name = m.group(1)
-    rejected_step = int(m.group(2))
-
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        logger.info("[R124] 退回: 管线 %s 不存在，忽略", round_name)
-        return
-
-    # 已完成/已归档/已取消/已卡死 → 忽略
-    from .pipeline_context import PipelineStatus as PS
-    if ctx.status in (PS.COMPLETED, "cancelled", "stopped", "stuck"):
-        logger.info("[R124] 退回: %s 状态=%s，忽略", round_name, ctx.status)
-        return
-
-    # 提取退回原因：支持全角 —、半角 --、-
-    reject_reason = ""
-    for sep in ("—", "--", "-"):
-        if sep in content:
-            reject_reason = content.split(sep, 1)[1].strip()[:200]
-            break
-    if not reject_reason:
-        reject_reason = content[:100]
-
-    # 轮次级退回计数检查（第 4 次 stuck）
-    reject_count = getattr(ctx, "reject_count", 0) + 1
-    ctx.reject_count = reject_count
-    if reject_count >= 4:
-        ctx.status = "stuck"
-        mgr.save()
-        logger.info("[R124] %s 第 4 次退回，标记 stuck", round_name)
-        await _notify_pm(
-            ctx, rejected_step, "stuck",
-            f"🔴 {round_name} Step {rejected_step} 被退回。管线已卡死"
-            f"（累计退回 {reject_count} 次），需要人工介入。\n原因: {reject_reason}",
-        )
-        return
-
-    # 确定回退起点 index：Step 1/2 → index 0，Step 3+ → index 2
-    rollback_start = 1 if rejected_step <= 2 else 2
-
-    # 重置 affected steps
-    for i in range(rollback_start, len(ctx.steps)):
-        ctx.steps[i]["status"] = "pending"
-        ctx.steps[i]["output"] = None
-        ctx.steps[i]["result_msg"] = ""
-        ctx.steps[i].pop("reject_reason", None)
-
-    # 记录退回原因到回退目标 step
-    ctx.steps[rollback_start]["reject_reason"] = reject_reason
-
-    # 回退管线 current_step（1-indexed）
-    ctx.current_step = rollback_start + 1
-
-    # 持久化 + 通知 PM
-    mgr.save()
-    await _notify_pm(
-        ctx, rejected_step, "rejected",
-        f"🔄 {round_name} Step {rejected_step} 被退回（累计 {reject_count}/3）\n"
-        f"原因: {reject_reason}\n"
-        f"管线已退回到 Step {rollback_start + 1}（编码环节），未自动派活。\n"
-        f"请 PM 决定下一步：派活 Dev 重做 or ##advance 跳过。",
-    )
-    logger.info("[R124] 退回处理完成: %s Step %d → rollback_to Step %d, reason=%s",
-                round_name, rejected_step, rollback_start + 1, reject_reason)
-# ════════════════════════════════════════════════════════════════════════════
-
-
-
-# ── Extracted from main.py L1364-1372: def _build_name_to_ws_map() -> dict[str, str]: ──
-def _build_name_to_ws_map() -> dict[str, str]:
-    """从 persistence.get_api_keys() 构建 display_name → ws_agent_id 映射."""
-    _name_to_ws: dict[str, str] = {}
-    for _aid, _rec in persistence.get_api_keys().items():
-        _dn = _rec.get("display_name", "")
-        if _dn:
-            _name_to_ws[_dn] = _aid
-    return _name_to_ws
-
-
-
-# ── Extracted from main.py L1374-1409: def _resolve_card_key_to_ws_id(card_key: str) -> str: ──
-def _resolve_card_key_to_ws_id(card_key: str) -> str:
-    """多策略解析 card key → WS 连接 ID。
-
-    优先级:
-    1. display_name → api_keys (persistence.get_api_keys())
-    2. display_name → state._r72_users name 匹配
-    3. _connections + _r72_users name 交叉匹配
-    """
-    card = ac_mod.get_agent_card(card_key)
-    if not card:
-        return ""
-    display_name = card.get("display_name", "")
-
-    # 策略 1: display_name → api_keys
-    if display_name:
-        name_to_ws = _build_name_to_ws_map()
-        _id = name_to_ws.get(display_name, "")
-        if _id and _id.startswith("ws_"):
-            return _id
-
-    # 策略 2: display_name → state._r72_users
-    if display_name:
-        for _aid, _rec in state._r72_users.items():
-            if _rec.get("name", "") == display_name:
-                return _aid
-
-    # 策略 3: _connections 中 ws_xxx → _r72_users name 匹配
-    if display_name:
-        for _aid in list(_connections.keys()):
-            if _aid.startswith("ws_"):
-                _info = state._r72_users.get(_aid, {})
-                if _info.get("name", "") == display_name:
-                    return _aid
-
-    return ""
-
-
-
-# ── Extracted from main.py L1411-1453: def _build_rich_templates(round_name: str, references: dict = None, artifacts: dict = None) -> dict[str, str]: ──
-def _build_rich_templates(round_name: str, references: dict = None, artifacts: dict = None) -> dict[str, str]:
-    """返回 6 步富上下文模板组，引用 references（文档 URL）和 artifacts（前序步产出）."""
-    ref = references or {}
-    req_url = ref.get("requirements_url", "")
-    wp_url = ref.get("work_plan_url", "")
-
-    return {
-        "step1": "",
-        "step2": (
-            f"📋 **{round_name} Step 2 — 技术方案**\n\n"
-            + (f"##需求文档## {req_url}\n" if req_url else "")
-            + (f"##工作计划## {wp_url}\n" if wp_url else "")
-            + "\n请完成技术方案并推 dev，回复：已完成 ✅ {round} Step 2"
-        ),
-        "step3": (
-            f"💻 **{round_name} Step 3 — 编码实现**\n\n"
-            + (f"##需求文档## {req_url}\n" if req_url else "")
-            + "##技术方案## {step2:tech_plan_url}\n"
-            + "\n请完成编码并推 dev，回复：已完成 ✅ {round} Step 3"
-        ),
-        "step4": (
-            f"👁 **{round_name} Step 4 — 代码审查**\n\n"
-            + (f"##需求文档## {req_url}\n" if req_url else "")
-            + "##技术方案## {step2:tech_plan_url}\n"
-            + "\n请审查代码并回复审查报告，回复：已完成 ✅ {round} Step 4"
-        ),
-        "step5": (
-            f"🧪 **{round_name} Step 5 — 测试验证**\n\n"
-            + (f"##需求文档## {req_url}\n" if req_url else "")
-            + "##测试范围## {step3:test_scope}\n"
-            + "##分支## {step3:branch_name}\n"
-            + "\n请进行测试验证，回复：已完成 ✅ {round} Step 5"
-        ),
-        "step6": (
-            f"🚀 **{round_name} Step 6 — 合并部署归档**\n\n"
-            + "##分支## {step5:branch}\n"
-            + "##commit## {step5:commit_sha}\n"
-            + "##测试结果## {step5:test_summary}\n"
-            + "##测试报告## {step5:test_report_url}\n"
-            + "\n请合并部署归档并推送 main，回复：已完成 ✅ {round} Step 6"
-        ),
-    }
-
-
-
-# ── Extracted from main.py L1457-1511: async def _handle_hash_advance(round_name: str, kv: dict, agent_id: str, ws) -> bool: ──
-async def _handle_hash_advance(round_name: str, kv: dict, agent_id: str, ws) -> bool:
-    """处理 ##advance 命令：PM 手动推进管线到下一步。
-
-    ##advance##R{N}##step=N
-    仅 PM（PIPELINE_PM_AGENT_ID）可用。
-    """
-    # ═══ 权限校验：仅 PM 可用 ═══
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    if pm_agent_id and agent_id != pm_agent_id:
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": "❌ 无权限: ##advance 仅 PM 可用",
-            "ts": time.time(),
-        })
-        return True
-
-    step_str = kv.get("step", "")
-    if not step_str.isdigit():
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": "❌ 参数错误: 缺少 `step=N` 参数",
-            "ts": time.time(),
-        })
-        return True
-    step_num = int(step_str)
-
-    # 构造完成消息并尝试推进
-    content = f"已完成 ✅ {round_name} Step {step_num}"
-    ok, reason = _try_advance_pipeline(content, agent_id)
-    if ok:
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"✅ **{round_name} Step {step_num}** 已手动推进（PM 确认）",
-            "ts": time.time(),
-        })
-    else:
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"⚠️ 推进失败: {reason}",
-            "ts": time.time(),
-        })
-    return True
-
-
-
-# ── Extracted from main.py L1514-1543: async def _handle_hash_archive(round_name: str, agent_id: str, ws) -> bool: ──
-async def _handle_hash_archive(round_name: str, agent_id: str, ws) -> bool:
-    """处理 ##archive##R{N} — PM 手动归档管线。"""
-    pm_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    if pm_id and agent_id != pm_id:
-        await _send(ws, {
-            "type": "broadcast", "channel": f"_inbox:{agent_id}",
-            "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
-            "content": "❌ 无权限: ##archive 仅 PM 可用",
-            "ts": time.time(),
-        })
-        return True
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        await _send(ws, {
-            "type": "broadcast", "channel": f"_inbox:{agent_id}",
-            "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"❌ {round_name} 管线不存在",
-            "ts": time.time(),
-        })
-        return True
-    await _archive_pipeline(round_name)
-    await _send(ws, {
-        "type": "broadcast", "channel": f"_inbox:{agent_id}",
-        "from_name": "系统", "from_agent": state.SYSTEM_AGENT_ID,
-        "content": f"📦 {round_name} 管线已手动归档",
-        "ts": time.time(),
-    })
-    return True
-# ════════════════════════════════════════════════════
-
-
-# ── Extracted from main.py L1547-1600: async def _archive_pipeline(round_name: str) -> None: ──
-async def _archive_pipeline(round_name: str) -> None:
-    """归档已完成管线：从活跃上下文移除，追加到 pipeline_archive.json。"""
-    from pathlib import Path
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        return
-    now = time.time()
-    archive_record = {
-        "round_name": ctx.round_name,
-        "status": "completed",
-        "archived_at": now,
-        "completed_at": getattr(ctx, "updated_at", now),
-        "reject_count": getattr(ctx, "reject_count", 0),
-        "steps": ctx.steps,
-        "artifacts": getattr(ctx, "artifacts", {}),
-        "references": getattr(ctx, "references", {}),
-        "summary": {
-            "total_steps": len(ctx.steps),
-            "completed_steps": sum(
-                1 for s in (ctx.steps or []) if s.get("status") == "done"
-            ),
-            "reject_count": getattr(ctx, "reject_count", 0),
-            "total_duration_sec": int(
-                now - getattr(ctx, "created_at", now)
-            ) if getattr(ctx, "created_at", None) else 0,
-        },
-    }
-    mgr._contexts.pop(round_name, None)
-    mgr.save()
-    archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
-    records: list[dict] = []
-    if archive_path.exists():
-        try:
-            records = json.loads(archive_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            records = []
-    records.append(archive_record)
-    MAX_ARCHIVE_TRIM = 50
-    KEEP_ARCHIVE = 30
-    if len(records) > MAX_ARCHIVE_TRIM:
-        records = records[-KEEP_ARCHIVE:]
-    try:
-        archive_path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("[R124] 归档完成: %s → %s (%d 条归档)",
-                    round_name, archive_path, len(records))
-        await _notify_pm(ctx, len(ctx.steps), "archived",
-                         f"📦 {round_name} 管线已完成并归档")
-    except (OSError, PermissionError) as e:
-        logger.warning("[R124] 归档写入失败: %s", e)
-
-
-
-# ── Extracted from main.py L1602-1724: async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bool: ──
-async def _handle_hash_start(round_name: str, kv: dict, agent_id: str, ws) -> bool:
-    """处理 ##start 命令：创建 PipelineContext + 落盘 + 自动派活 Step 1."""
-    mgr = _ensure_pipeline_manager()
-    if mgr.exists(round_name):
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"❌ {round_name} 管线已存在，无法重复创建",
-            "ts": time.time(),
-        })
-        return True
-
-    # 1. 刷新角色映射
-    try:
-        _refresh_role_agent_map()
-    except Exception:
-        pass
-
-    # 2. 构建 steps（从 DEFAULT_STEPS 填充 agent_id）
-    from .pipeline_context import DEFAULT_STEPS, DEFAULT_STEP_ORDER
-    from . import agent_card as _ac_mod
-
-    role_map = mgr.get_global_role_map()
-    if not role_map:
-        role_map = dict(getattr(state, '_ROLE_AGENT_MAP', {}))
-    name_to_ws = _build_name_to_ws_map()
-
-    steps_list: list[dict] = []
-    for sk in DEFAULT_STEP_ORDER:
-        step_info = DEFAULT_STEPS[sk]
-        agents = role_map.get(step_info.role, [])
-        agent_card_name = ""
-        agent_id_for_step = ""
-        if agents:
-            agent_id_for_step = agents[0]
-            card = _ac_mod.get_agent_card(agents[0])
-            agent_card_name = card.get("display_name", agents[0][:12]) if card else agents[0][:12]
-            # 通过 display_name 桥接卡 key → WS 连接 ID
-            if card:
-                _real_id = name_to_ws.get(card.get("display_name", ""))
-                if _real_id:
-                    agent_id_for_step = _real_id
-                else:
-                    # ═══ R117 fix: card key → WS ID fallback ═══
-                    _fallback = _resolve_card_key_to_ws_id(agents[0])
-                    if _fallback:
-                        agent_id_for_step = _fallback
-                        logger.info("[R117] ##start fallback: %s → %s",
-                                    agents[0], _fallback)
-
-        steps_list.append({
-            "name": sk,
-            "step_key": sk,
-            "role": step_info.role,
-            "title": step_info.title,
-            "status": "pending",
-            "agent_id": agent_id_for_step,
-            "agent_name": agent_card_name,
-            "output": None,
-            "result_msg": "",
-        })
-
-    # 3. 构建 references
-    references: dict[str, str] = {}
-    for ref_key in ("requirements_url", "work_plan_url"):
-        if kv.get(ref_key):
-            references[ref_key] = kv[ref_key]
-
-    # 4. 构建 message_templates（R118: 富上下文模板）
-    templates = _build_rich_templates(round_name, references, {})
-
-    # 5. 创建 PipelineContext
-    from pathlib import Path
-    workspace_dir = Path(getattr(config, 'REPO_PATH', '/opt/data/ws-bridge'))
-    task_dir = Path(config.DATA_DIR) / "pipeline_tasks" / round_name
-
-    ctx = PipelineContext(
-        round_name=round_name,
-        task_kind=PipelineTaskKind.DEV,
-        workspace_dir=workspace_dir,
-        task_dir=task_dir,
-        workspace_id="",
-        pm_inbox_id=config.PIPELINE_PM_AGENT_ID,
-        status=PipelineStatus.INIT,
-        current_step=1,
-        total_steps=len(DEFAULT_STEPS),
-        steps=steps_list,
-        references=references,
-        message_templates=templates,
-        round_title=kv.get("round_title", round_name),
-        created_by=agent_id,
-        created_at=time.time(),
-    )
-
-    # 6. 落盘
-    mgr.set_context(round_name, ctx)
-    await mgr.transition_to(round_name, PipelineStatus.RUNNING)
-
-    # 7. 自动派活（R118: Step 1 自动确认，PM 发 ##start 表示需求已就绪）
-    ctx.current_step = 2
-    ctx.steps[0]["status"] = "done"
-    ctx.steps[0]["result_msg"] = "需求已就绪（##start 创建时自动确认）"
-    # ═══ R119 fix: 落盘 Step 1 自动确认状态，防止容器重启后丢失 ═══
-    try:
-        mgr.save()
-    except Exception:
-        pass
-    await _auto_dispatch(ctx, 2)
-
-    # 8. 回复发送者
-    await _send(ws, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": f"✅ {round_name} 管线已启动，Step 1 已派活",
-        "ts": time.time(),
-    })
-    logger.info("[R111] ##start: %s by %s", round_name, agent_id[:16])
-    return True
-
-
-
-# ── Extracted from main.py L1726-1803: async def _handle_hash_status(round_name: str, agent_id: str, ws) -> bool: ──
-async def _handle_hash_status(round_name: str, agent_id: str, ws) -> bool:
-    """处理 ##status 命令：查询管线当前状态."""
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        # ═══ R124: 尝试从归档文件查找 ═══
-        _archive_info = _find_archive(round_name)
-        if _archive_info:
-            await _send(ws, {
-                "type": "broadcast",
-                "channel": f"_inbox:{agent_id}",
-                "from_name": "系统",
-                "from_agent": state.SYSTEM_AGENT_ID,
-                "content": (
-                    f"📦 {round_name} 已归档\n"
-                    f"状态: {_archive_info.get('status', 'completed')}\n"
-                    f"归档时间: {_fmt_ts(_archive_info.get('archived_at', 0))}\n"
-                    f"总步数: {_archive_info.get('summary', {}).get('total_steps', 0)}"
-                    f" / 完成: {_archive_info.get('summary', {}).get('completed_steps', 0)}"
-                ),
-                "ts": time.time(),
-            })
-            return True
-        # ════════════════════════════════════════════
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"❌ {round_name} 管线不存在",
-            "ts": time.time(),
-        })
-        return True
-
-    # 拼装状态文本
-    step_lines = []
-    status_icons = {
-        "pending": "⬜",
-        "active": "🟢",
-        "done": "✅",
-        "failed": "❌",
-        "skipped": "⏭",
-    }
-    step_names = {
-        "pm": "小谷",
-        "arch": "小开",
-        "dev": "爱泰",
-        "review": "小周",
-        "qa": "泰虾",
-        "operations": "小爱",
-    }
-
-    for step in ctx.steps:
-        step_key = step.get("step_key", step.get("name", "?"))
-        step_num = step_key.replace("step", "")
-        st = step.get("status", "pending")
-        icon = status_icons.get(st, "⬜")
-        role = step.get("role", "?")
-        name = step_names.get(role, role)
-        step_lines.append(f"  Step {step_num}: {icon} {name}")
-
-    status_text = (
-        f"📊 **{round_name} 管线状态**\n"
-        f"  状态: {ctx.status.value}\n"
-        f"  当前步: Step {ctx.current_step}\n"
-        + "\n".join(step_lines)
-    )
-
-    await _send(ws, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": status_text,
-        "ts": time.time(),
-    })
-    return True
-
-
-
-# ── Extracted from main.py L1805-1831: async def _handle_hash_stop(round_name: str, agent_id: str, ws) -> bool: ──
-async def _handle_hash_stop(round_name: str, agent_id: str, ws) -> bool:
-    """处理 ##stop 命令：停止/取消管线."""
-    mgr = _ensure_pipeline_manager()
-    ctx = mgr.get(round_name)
-    if not ctx:
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"❌ {round_name} 管线不存在",
-            "ts": time.time(),
-        })
-        return True
-
-    await mgr.cancel(round_name)
-    await _send(ws, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": f"🛑 {round_name} 管线已停止（CANCELLED）",
-        "ts": time.time(),
-    })
-    logger.info("[R111] ##stop: %s by %s", round_name, agent_id[:16])
-    return True
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# PipelineEngine class — unified engine with lifecycle management
-# ═══════════════════════════════════════════════════════════════════════
 
 class PipelineEngine:
     """管线状态机引擎 — 统一管理管线全生命周期。
@@ -1546,8 +76,11 @@ class PipelineEngine:
     - 后台扫描循环（git sync / timeout / restore）
     - 状态格式化（format_context）
 
-    所有管线模块级函数（_auto_advance_pipeline 等）与本 class 共存于
-    同一文件，class 方法通过薄包装器调用模块级函数。
+    不包含：
+    - WebSocket 连接管理（仍在 main.py）
+    - 场景匹配规则（已在 scenario_matcher.py）
+    - Git 管线自动启动器（已在 pipeline_auto_starter.py）
+    - 管线数据模型（已在 pipeline_context.py）
     """
 
     def __init__(
@@ -1560,6 +93,7 @@ class PipelineEngine:
         get_step_config: Optional[Callable[[str], dict]] = None,
         persist_broadcast: Optional[Callable[[str, str, str], None]] = None,
         find_agents_by_role: Optional[Callable[[str, set, list], list]] = None,
+        cmd_task_update: Optional[Callable] = None,
         set_pipeline_state: Optional[Callable[[str, dict], None]] = None,
         extract_artifact_kv: Optional[Callable[[str], dict]] = None,
     ):
@@ -1571,6 +105,7 @@ class PipelineEngine:
         self._get_step_config = get_step_config
         self._persist_broadcast = persist_broadcast
         self._find_agents_by_role = find_agents_by_role
+        self._cmd_task_update = cmd_task_update
         self._set_pipeline_state = set_pipeline_state
         self._extract_artifact_kv = extract_artifact_kv
 
@@ -1580,9 +115,9 @@ class PipelineEngine:
         self._timeout_scan_task: Optional[asyncio.Task] = None
         self._timeout_scan_started: bool = False
 
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 生命周期
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
     def start(self) -> None:
         """统一启动后台扫描循环（git sync + timeout scanner）."""
@@ -1599,44 +134,12 @@ class PipelineEngine:
             self._timeout_scan_task = None
         self._timeout_scan_started = False
 
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 🅰️ 数据/工具函数
-    # ═══════════════════════════════════════════════════════════════════
-
-    async def _cmd_task_update(self, sender_id: str, task_id: str, new_state: str, output_ref: str = "") -> str:
-        """Update a task's state (internal method)."""
-        import shared.protocol as _p
-        task = ts.get_task(task_id, config.DATA_DIR)
-        if not task:
-            return f"❌ Task {task_id[:12]} 不存在"
-        try:
-            current = _p.TaskState(task["state"])
-            target = _p.TaskState(new_state)
-        except ValueError:
-            valid = [s.value for s in _p.TaskState]
-            return f"❌ 无效状态：{new_state}。有效值：{', '.join(valid)}"
-        allowed = _p.TASK_VALID_TRANSITIONS.get(current, [])
-        if target not in allowed:
-            return f"❌ 不允许的转换：{current.value} → {target.value}"
-        if target == _p.TaskState.INPUT_REQUIRED:
-            ts.increment_reject_count(task_id, config.DATA_DIR)
-            task_d = ts.get_task(task_id, config.DATA_DIR)
-            if task_d["reject_count"] >= _p.TASK_REJECT_CEILING:
-                ts.update_state(task_id, _p.TaskState.FAILED.value, config.DATA_DIR)
-                task_d = ts.get_task(task_id, config.DATA_DIR)
-                return (f"❌ 审查已达上限 ({_p.TASK_REJECT_CEILING}次)，已锁定 FAILED\n"
-                        f"  {task_d['name']}: {task_d['state']} (rejects: {task_d['reject_count']})")
-        ts.update_state(task_id, new_state, config.DATA_DIR)
-        if output_ref:
-            ts.add_output_ref(task_id, output_ref, config.DATA_DIR)
-        task = ts.get_task(task_id, config.DATA_DIR)
-        refs = task.get("output_refs", [])
-        refs_str = f", 产出: {', '.join(refs)}" if refs else ""
-        return f"✅ Task 已更新：{task['name']} → {task['state']}{refs_str}"
+    # ════════════════════════════════════════════════════════════════
 
     def format_context(self, ctx: PipelineContext) -> str:
         """格式化 PipelineContext 为人类可读文本."""
-        from datetime import datetime
         lines = [
             f"📋 {ctx.round_name} [{ctx.task_kind.value}]",
             f"  状态: {ctx.status.value}",
@@ -1707,78 +210,578 @@ class PipelineEngine:
 
     def render_template(self, template: str, ctx: PipelineContext, step_num: int) -> str:
         """用 Pipeline Context 数据渲染模板字符串。"""
-        return _render_template(template, ctx, step_num)
+        replacements = {
+            "{round_name}": ctx.round_name,
+            "{round_title}": getattr(ctx, "round_title", ctx.round_name) or ctx.round_name,
+            "{round}": ctx.round_name,  # R129 B-5: 旧模板用 {round}
+            "{step_num}": str(step_num),
+            "{num_steps}": str(ctx.total_steps),
+        }
+        # 注入 artifacts 中各 step 的产出 KV
+        artifacts = getattr(ctx, "artifacts", {})
+        if artifacts:
+            for step_key, kv in artifacts.items():
+                if isinstance(kv, dict):
+                    for k, v in kv.items():
+                        replacements.setdefault(f"{{artifacts.{step_key}.{k}}}", str(v))
+        # 注入 references 中的文档 URL
+        references = getattr(ctx, "references", {})
+        if references:
+            for ref_key, ref_url in references.items():
+                replacements.setdefault(f"{{ref.{ref_key}}}", str(ref_url))
+        result = template
+        for placeholder, value in replacements.items():
+            if placeholder in result:
+                result = result.replace(placeholder, value)
+        return result
 
     def get_step_agent_name(self, ctx: PipelineContext, step_num: int) -> str:
         """获取指定 step 的 agent 名称。"""
-        return _get_step_agent_name(ctx, step_num)
+        step_key = f"step{step_num}"
+        step_info = next(
+            (s for s in (ctx.steps or []) if s.get("name") == step_key), None
+        )
+        if step_info:
+            return step_info.get("agent_name", step_info.get("agent_id", "?")[:20])
+        role_map = getattr(ctx, "role_agent_map", {})
+        if step_num == 1:
+            pm_id = config.PIPELINE_PM_AGENT_ID
+            users = getattr(state, "_r72_users", {})
+            display_name = users.get(pm_id, {}).get("name", pm_id[:12])
+            return display_name or pm_id[:12]
+        return "?"
 
     def build_step_summary(self, ctx: PipelineContext, step_num: int) -> str:
         """构建前置步骤完成摘要。"""
-        return _build_step_summary(ctx, step_num)
+        lines = ["══════ 前置步骤状态 ══════"]
+        role_names = {
+            1: "📋 PM", 2: "📐 Arch", 3: "💻 Dev",
+            4: "👁 Review", 5: "🧪 QA", 6: "🚢 Ops",
+        }
+        has_any = False
+        for i in range(1, step_num):
+            step_key = f"step{i}"
+            step_info = next(
+                (s for s in (ctx.steps or []) if s.get("name") == step_key), None
+            )
+            if step_info and step_info.get("status") == "done":
+                role = role_names.get(i, "?")
+                has_any = True
+                agent = step_info.get("agent_name", step_info.get("agent_id", "?")[:12])
+                line = f"Step {i} ✅ {role}（{agent}）已完成"
+                out = step_info.get("output", "")
+                if out:
+                    if isinstance(out, dict) and "sha" in out:
+                        line += f" | sha={out['sha'][:7]}"
+                    elif isinstance(out, str):
+                        line += f" | {out[:30]}"
+                lines.append(line)
+        if not has_any:
+            lines.append("暂无已完成步骤")
+        lines.append("═" * len("══════ 前置步骤状态 ══════"))
+        return "\n".join(lines)
 
     def find_archive(self, round_name: str) -> Optional[dict]:
         """从 pipeline_archive.json 查找已归档轮次。"""
-        return _find_archive(round_name)
+        archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
+        if not archive_path.exists():
+            return None
+        try:
+            data = json.loads(archive_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and entry.get("round_name") == round_name:
+                        return entry
+            elif isinstance(data, dict):
+                for key, entry in data.items():
+                    if key == round_name or (
+                        isinstance(entry, dict) and entry.get("round_name") == round_name
+                    ):
+                        return entry
+        except (json.JSONDecodeError, Exception):
+            pass
+        return None
 
-    @staticmethod
-    def _step_sort_key(step_name: str) -> tuple:
-        """Sort step keys numerically."""
-        import re as _re
-        m = _re.search(r"(\d+)", step_name)
-        return (int(m.group(1)),) if m else (0, step_name)
-
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 🅱️ 状态推进
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
     def try_advance(self, content: str, agent_id: str) -> tuple[bool, str]:
         """Parse 已完成 ✅ R{N} Step {N} and auto-advance pipeline context.
 
-        Delegates to _try_advance_pipeline (engine2 version) for the core logic.
-        Uses the engine2 regex (已完成 ✅ R) which handles the primary case.
-
         Returns:
             (True, "round_name") on success, (False, reason) on skip.
         """
-        return _try_advance_pipeline(content, agent_id)
+        m = re.search(r"(?:已完成|完成)\s*[✅✔️]\s*R(\d+)\s*[Ss]tep\s*(\d+)", content)
+
+        # ── R128 B-4: 容错匹配，不匹配的透传但不报错 ──
+        if not m:
+            # 不记录 warning（正常流量）
+            return False, "no match"
+        round_name = f"R{m.group(1)}"
+        completed_step = int(m.group(2))
+        try:
+            ctx = self._ctx_mgr.get(round_name)
+            if not ctx:
+                logger.info("[R106] 管线 %s 无上下文，跳过自动推进", round_name)
+                return False, "no context"
+            old_step = ctx.current_step
+            if completed_step == old_step:
+                _kv = {}
+                if self._extract_artifact_kv:
+                    _kv = self._extract_artifact_kv(content) or {}
+                if _kv:
+                    _step_key = f"step{completed_step}"
+                    if not hasattr(ctx, 'artifacts') or not ctx.artifacts:
+                        ctx.artifacts = {}
+                    ctx.artifacts[_step_key] = _kv
+                    try:
+                        self._ctx_mgr.save()
+                    except Exception:
+                        pass
+                    logger.info("[R115] %s step%d artifacts: %s",
+                                round_name, completed_step, _kv)
+                _step_idx = completed_step - 1
+                _step_info = ctx.steps[_step_idx] if _step_idx < len(ctx.steps) else None
+                if _step_info:
+                    _output = {}
+                    if _kv:
+                        for _k in ("sha", "commit_msg", "tech_plan_url", "branch_name",
+                                    "test_scope", "test_report_url", "test_summary",
+                                    "review_url"):
+                            if _k in _kv:
+                                _output[_k] = _kv[_k]
+                    _step_info["output"] = _output if _output else None
+                    _step_info["result_msg"] = content[:200]
+                    _step_info["status"] = "done"
+                    try:
+                        self._ctx_mgr.save()
+                    except Exception:
+                        pass
+                # Advance to next step
+                if completed_step < ctx.total_steps:
+                    next_step = completed_step + 1
+                    ctx.current_step = next_step
+                    try:
+                        self._ctx_mgr.save()
+                    except Exception:
+                        pass
+                    asyncio.ensure_future(self.auto_dispatch(ctx, next_step))
+                    logger.info("[R106] %s advance: step%d → step%d",
+                                round_name, completed_step, next_step)
+            return True, round_name
+        except Exception as e:
+            logger.warning("[R106] advance error: %s", e)
+            return False, str(e)
 
     async def auto_advance(self, round_name: str, result: dict) -> str:
         """Git sync 检测到新产出后自动推进状态机。
 
-        Delegates to _auto_advance_pipeline (engine2 version).
+        Args:
+            round_name: 管线标识
+            result: PipelineGitSync.sync() 返回值
+
+        Returns:
+            广播消息文本.
         """
-        return await _auto_advance_pipeline(round_name, result)
+        pstate = state._PIPELINE_STATE.get(round_name)
+        if not pstate:
+            return ""
 
-    # ═══════════════════════════════════════════════════════════════════
+        step_config = (self._get_step_config(round_name)
+                       if self._get_step_config else {})
+        current_step = pstate.get("current_step", "")
+        if not current_step:
+            return ""
+
+        step_keys = sorted(step_config.keys(), key=self._step_sort_key)
+        try:
+            idx = step_keys.index(current_step)
+        except ValueError:
+            return ""
+
+        if idx + 1 >= len(step_keys):
+            return ""
+
+        next_step = step_keys[idx + 1]
+        new_sha = result.get("new_sha", "")
+
+        # 1. 状态机推进
+        pstate["current_step"] = next_step
+        pstate["last_output_sha"] = new_sha
+        if self._cmd_task_update:
+            tasks = ts.list_tasks_by_context(round_name, config.DATA_DIR)
+            for t in tasks:
+                if t.get("name") == current_step and t.get("state") != p.TaskState.COMPLETED.value:
+                    await self._cmd_task_update("系统", {
+                        "_positional": [t["id"]],
+                        "state": p.TaskState.COMPLETED.value,
+                        "output": new_sha,
+                    })
+                if t.get("name") == next_step and t.get("state") == p.TaskState.PENDING.value:
+                    await self._cmd_task_update("系统", {
+                        "_positional": [t["id"]],
+                        "state": p.TaskState.WORKING.value,
+                    })
+
+        # 2. 清理旧 ACK FAILED 标记
+        old_ack_key = f"{round_name}/{current_step}"
+        if old_ack_key in state._step_ack_states:
+            if state._step_ack_states[old_ack_key].get("state") == "FAILED":
+                state._step_ack_states.pop(old_ack_key, None)
+                logger.info("[R65] 清除 %s 的 FAILED 标记（git sync 发现新产出）", old_ack_key)
+
+        # 3. 广播自动同步消息
+        ws_id = pstate.get("ws_id", "")
+        commit_short = new_sha[:7] if new_sha else "?"
+        mode = result.get("mode", "auto")
+        mode_label = "" if mode == "default" else f"（{mode} 匹配）"
+
+        msg = (
+            f"💻 {round_name} {current_step} → {next_step} 已自动同步\n"
+            f"  commit: {commit_short}{mode_label}\n"
+            f"→ @{next_step} 到你了！"
+        )
+
+        if ws_id and self._persist_broadcast:
+            pm_name = config.PIPELINE_PM_NAME
+            self._persist_broadcast(ws_id, pm_name, msg)
+            payload = json.dumps({
+                "type": "broadcast", "channel": ws_id,
+                "from_name": pm_name, "from": pm_name,
+                "content": msg, "ts": time.time(),
+            })
+            ws_obj = ws_mod.get_workspace(ws_id)
+            if ws_obj:
+                for member_id in ws_obj.members:
+                    for conn in list(state._connections.get(member_id, set())):
+                        try:
+                            if hasattr(conn, "send_str"):
+                                await conn.send_str(payload)
+                            elif hasattr(conn, "send"):
+                                await conn.send(payload)
+                        except Exception:
+                            pass
+
+        # 4. 点名下一角色
+        next_role = step_config[next_step].get("role", "")
+        if next_role and ws_id and self._find_agents_by_role:
+            cards = ac_mod.get_all_cards()
+            ws_obj = ws_mod.get_workspace(ws_id) if ws_id else None
+            if ws_obj and cards:
+                matched = self._find_agents_by_role(next_role, ws_obj.members, cards)
+                users = auth.get_users()
+                pm_name = config.PIPELINE_PM_NAME
+                for aid in matched:
+                    name = users.get(aid, {}).get("name", aid[:12])
+                    mention = f"@{name} 🏗️ {round_name} {next_step} 到你了！"
+                    mention_payload = json.dumps({
+                        "type": "broadcast", "channel": ws_id,
+                        "from_name": pm_name, "from": pm_name,
+                        "content": mention, "ts": time.time(),
+                    })
+                    for conn in list(state._connections.get(aid, set())):
+                        try:
+                            if hasattr(conn, "send_str"):
+                                await conn.send_str(mention_payload)
+                            elif hasattr(conn, "send"):
+                                await conn.send(mention_payload)
+                        except Exception:
+                            pass
+
+        # 5. 启动下一 Step timeout_tracker 倒计时
+        timeout_min = step_config.get(next_step, {}).get("timeout_minutes", 20)
+        timeout_tracker.start_timer(round_name, next_step, timeout_min)
+
+        logger.info("[R65] 管线 %s 已自动推进：%s → %s (sha=%s)",
+                    round_name, current_step, next_step, commit_short)
+        return msg
+
+    @staticmethod
+    def _step_sort_key(step_name: str) -> tuple:
+        """Sort step keys numerically."""
+        m = re.search(r"(\d+)", step_name)
+        return (int(m.group(1)),) if m else (0, step_name)
+
+    # ════════════════════════════════════════════════════════════════
     # 🅲 ## 命令
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
-    async def handle_hash_start(self, round_name: str, kv: dict, agent_id: str, ws) -> bool:
-        """处理 ##start 命令。"""
-        return await _handle_hash_start(round_name, kv, agent_id, ws)
+    async def handle_hash_start(
+        self, round_name: str, kv: dict, agent_id: str, ws
+    ) -> bool:
+        """处理 ##start 命令：创建 PipelineContext + 落盘 + 自动派活 Step 1."""
+        round_name = round_name.upper()
 
-    async def handle_hash_status(self, round_name: str, agent_id: str, ws) -> bool:
-        """处理 ##status 命令。"""
-        return await _handle_hash_status(round_name, agent_id, ws)
+        # 检查是否已存在
+        existing = self._ctx_mgr.get(round_name)
+        if existing and existing.status == PipelineStatus.RUNNING:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 管线 {round_name} 已在运行中（status={existing.status.value}）",
+                "ts": time.time(),
+            })
+            return True
 
-    async def handle_hash_stop(self, round_name: str, agent_id: str, ws) -> bool:
-        """处理 ##stop 命令。"""
-        return await _handle_hash_stop(round_name, agent_id, ws)
+        # 从 role_agent_map 创建映射
+        role_agent_map = {}
+        for k, v in kv.items():
+            if k in ("pm", "arch", "dev", "review", "qa", "ops", "operations"):
+                role_agent_map[k] = [v]
 
-    async def handle_hash_advance(self, round_name: str, kv: dict, agent_id: str, ws) -> bool:
-        """处理 ##advance 命令。"""
-        return await _handle_hash_advance(round_name, kv, agent_id, ws)
+        # 解析 task= 参数
+        task_kind_str = kv.get("task", "dev")
+        try:
+            task_kind = PipelineTaskKind(task_kind_str)
+        except ValueError:
+            task_kind = PipelineTaskKind.DEV
 
-    async def handle_hash_archive(self, round_name: str, agent_id: str, ws) -> bool:
-        """处理 ##archive 命令。"""
-        return await _handle_hash_archive(round_name, agent_id, ws)
+        # 解析 total_steps
+        total_steps = int(kv.get("steps", 6))
+
+        ctx = PipelineContext(
+            round_name=round_name,
+            task_kind=task_kind,
+            total_steps=total_steps,
+            current_step=1,
+            current_phase="planning",
+            status=PipelineStatus.RUNNING,
+            role_agent_map=role_agent_map,
+            created_at=time.time(),
+        )
+        self._ctx_mgr.add(ctx)
+        try:
+            self._ctx_mgr.save()
+        except Exception:
+            pass
+
+        await self._send_ws(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": (
+                f"✅ 管线 {round_name} 已创建并启动\n"
+                f"  任务类型: {task_kind.value}\n"
+                f"  总步数: {total_steps}\n"
+                f"  Step 1 已开始"
+            ),
+            "ts": time.time(),
+        })
+
+        # 自动派活 Step 1
+        asyncio.ensure_future(self.auto_dispatch(ctx, 1))
+
+        logger.info("[Pipeline] ##start: %s (task=%s, steps=%d) by %s",
+                    round_name, task_kind.value, total_steps, agent_id[:12])
+        return True
+
+    async def handle_hash_status(
+        self, round_name: str, agent_id: str, ws
+    ) -> bool:
+        """处理 ##status 命令：查询管线当前状态."""
+        round_name = round_name.upper()
+        ctx = self._ctx_mgr.get(round_name)
+        if ctx:
+            formatted = self.format_context(ctx)
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": formatted,
+                "ts": time.time(),
+            })
+            return True
+        # 检查归档
+        archived = self.find_archive(round_name)
+        if archived:
+            ctx_data = archived.get("context", archived)
+            lines = [f"📋 {round_name} [已归档]"]
+            if isinstance(ctx_data, dict):
+                lines.append(f"  状态: {ctx_data.get('status', 'archived')}")
+                lines.append(f"  归档时间: {archived.get('archived_at', '?')}")
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": "\n".join(lines),
+                "ts": time.time(),
+            })
+            return True
+        await self._send_ws(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"❌ 未找到管线 `{round_name}`（既不活跃也未归档）",
+            "ts": time.time(),
+        })
+        return True
+
+    async def handle_hash_stop(
+        self, round_name: str, agent_id: str, ws
+    ) -> bool:
+        """处理 ##stop 命令：停止/取消管线."""
+        round_name = round_name.upper()
+        ctx = self._ctx_mgr.get(round_name)
+        if not ctx:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 未找到活跃管线 `{round_name}`",
+                "ts": time.time(),
+            })
+            return True
+        try:
+            self._ctx_mgr.remove(round_name)
+            self._ctx_mgr.save()
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"✅ 管线 {round_name} 已停止并移除",
+                "ts": time.time(),
+            })
+            logger.info("[Pipeline] ##stop: %s by %s", round_name, agent_id[:12])
+        except Exception as e:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 停止管线 {round_name} 失败: {e}",
+                "ts": time.time(),
+            })
+        return True
+
+    async def handle_hash_advance(
+        self, round_name: str, kv: dict, agent_id: str, ws
+    ) -> bool:
+        """处理 ##advance 命令：PM 手动推进管线到下一步。"""
+        round_name = round_name.upper()
+        ctx = self._ctx_mgr.get(round_name)
+        if not ctx:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 未找到活跃管线 `{round_name}`",
+                "ts": time.time(),
+            })
+            return True
+        target = int(kv.get("step", ctx.current_step + 1))
+        if target < 1 or target > ctx.total_steps:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 无效 step: {target}（范围: 1-{ctx.total_steps}）",
+                "ts": time.time(),
+            })
+            return True
+        ctx.current_step = target
+        try:
+            self._ctx_mgr.save()
+        except Exception:
+            pass
+        await self._send_ws(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"✅ {round_name} 已推进到 Step {target}",
+            "ts": time.time(),
+        })
+        asyncio.ensure_future(self.auto_dispatch(ctx, target))
+        logger.info("[Pipeline] ##advance: %s → step%d by %s",
+                    round_name, target, agent_id[:12])
+        return True
+
+    async def handle_hash_archive(
+        self, round_name: str, agent_id: str, ws
+    ) -> bool:
+        """处理 ##archive##R{N} — PM 手动归档管线。"""
+        round_name = round_name.upper()
+        pm_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
+        if pm_id and agent_id != pm_id:
+            await self._send_ws(ws, {
+                "type": "broadcast",
+                "channel": f"_inbox:{agent_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": f"❌ 仅 PM（{pm_id[:12]}）可归档管线",
+                "ts": time.time(),
+            })
+            return True
+        await self.archive_pipeline(round_name)
+        await self._send_ws(ws, {
+            "type": "broadcast",
+            "channel": f"_inbox:{agent_id}",
+            "from_name": "系统",
+            "from_agent": state.SYSTEM_AGENT_ID,
+            "content": f"✅ 管线 {round_name} 已归档",
+            "ts": time.time(),
+        })
+        return True
 
     async def archive_pipeline(self, round_name: str) -> None:
-        """归档已完成管线。"""
-        await _archive_pipeline(round_name)
+        """归档已完成管线：从活跃上下文移除，追加到 pipeline_archive.json。"""
+        round_name = round_name.upper()
+        ctx = self._ctx_mgr.get(round_name)
+        if not ctx:
+            return
+        archive_path = Path(config.DATA_DIR) / "pipeline_archive.json"
+        archive_entry = {
+            "round_name": round_name,
+            "context": {
+                "task_kind": ctx.task_kind.value if hasattr(ctx, "task_kind") else "dev",
+                "total_steps": ctx.total_steps,
+                "current_step": ctx.current_step,
+                "status": "archived",
+                "steps": ctx.steps,
+                "artifacts": getattr(ctx, "artifacts", {}),
+                "created_at": ctx.created_at,
+            },
+            "archived_at": time.time(),
+        }
+        try:
+            existing = []
+            if archive_path.exists():
+                try:
+                    existing = json.loads(archive_path.read_text(encoding="utf-8"))
+                    if not isinstance(existing, list):
+                        existing = [existing] if isinstance(existing, dict) else []
+                except (json.JSONDecodeError, Exception):
+                    existing = []
+            existing.append(archive_entry)
+            archive_path.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("[Pipeline] 归档写入失败 %s: %s", round_name, e)
+        # 从活跃列表移除
+        try:
+            self._ctx_mgr.remove(round_name)
+            self._ctx_mgr.save()
+        except Exception:
+            pass
+        await self.notify_pm(ctx, 0, "archived")
+        logger.info("[Pipeline] 管线 %s 已归档", round_name)
 
-    async def broadcast_workspace_archived(self, ws_id: str, resolved_workspace=None) -> None:
+    async def broadcast_workspace_archived(
+        self, ws_id: str, resolved_workspace=None
+    ) -> None:
         """广播工作区已归档 — Web UI 用此重组 tab。"""
         if resolved_workspace is None:
             resolved_workspace = ws_mod.get_workspace(ws_id)
@@ -1798,135 +801,222 @@ class PipelineEngine:
                     except Exception:
                         pass
 
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 🅳 自动调度
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
     async def auto_dispatch(self, ctx: PipelineContext, step_num: int) -> bool:
-        """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。
-
-        以 engine2 的 _auto_dispatch 为核心，增加了模板不存在时的
-        默认消息回退（旧 pipeline_engine 特性），修复 B-5 PM fallback bug。
-        """
+        """自动派活下一步。受 AUTO_DISPATCH_ENABLED 开关控制。"""
         if not config.AUTO_DISPATCH_ENABLED:
-            logger.info("[R107] 自动派活已关闭，跳过 step%d (round=%s)",
-                        step_num, ctx.round_name)
+            logger.info("[R106] 自动派活已禁用（AUTO_DISPATCH_ENABLED=0）")
             return False
-
-        next_step_key = f"step{step_num}"
-        next_template = ctx.message_templates.get(next_step_key) if hasattr(ctx, "message_templates") else None
-
-        if not next_template:
-            # ── 默认模板回退（旧版特性） ──
-            agent_name = _get_step_agent_name(ctx, step_num)
-            summary = _build_step_summary(ctx, step_num)
-            rendered = (
-                f"💻 **{ctx.round_name} Step {step_num}** — {agent_name}\n\n"
-                f"{summary}\n\n"
-                f"请完成当前步骤后回复：已完成 ✅ {ctx.round_name} Step {step_num}"
-            ) if step_num != 1 else (
-                # Step 1 通常是 PM/需求，给默认提示
-                f"📋 **{ctx.round_name} Step {step_num}** — {agent_name}\n\n"
-                f"{summary}\n\n"
-                f"请完成当前步骤后回复：已完成 ✅ {ctx.round_name} Step {step_num}"
-            )
-        else:
-            rendered = _render_template(next_template, ctx, step_num)
-            # ═══ R123: Step ≥ 3 时前置步骤摘要注入 ═══
-            if step_num >= 3:
-                _summary = _build_step_summary(ctx, step_num)
-                if _summary:
-                    rendered = _summary + "\n" + rendered
+        round_name = ctx.round_name
+        step_key = f"step{step_num}"
+        agent_name = self.get_step_agent_name(ctx, step_num)
+        logger.info("[R106] 自动派活: %s step%d → %s",
+                    round_name, step_num, agent_name)
 
         # 查找 target_agent_id
         target_agent_id = ""
         step_info = next(
-            (s for s in (ctx.steps or []) if s.get("name") == next_step_key), None
+            (s for s in (ctx.steps or []) if s.get("name") == step_key), None
         )
         if step_info:
             target_agent_id = step_info.get("agent_id", "")
 
         if not target_agent_id:
-            logger.warning("[R106] %s step%d: ctx.steps 中未找到 agent_id，跳过自动派活",
-                           ctx.round_name, step_num)
+            if self._resolve_card_key:
+                target_agent_id = self._resolve_card_key(
+                    config.PIPELINE_PM_AGENT_ID or ""
+                )
+            if not target_agent_id:
+                target_agent_id = config.PIPELINE_PM_AGENT_ID
+
+        if not target_agent_id:
+            logger.warning("[R106] %s step%d: 找不到目标 agent", round_name, step_num)
             return False
 
-        # R117 fix: card key → WS ID fallback
-        if not target_agent_id.startswith("ws_"):
-            _fallback_id = _resolve_card_key_to_ws_id(target_agent_id)
-            if _fallback_id:
-                logger.info("[R117] card key %s → WS ID %s (fallback)",
-                            target_agent_id, _fallback_id)
-                target_agent_id = _fallback_id
-                if step_info:
-                    step_info["agent_id"] = _fallback_id
-            else:
-                logger.warning("[R117] 无法解析 card key %s → WS ID", target_agent_id)
-                return False
+        # 构建派活消息
+        summary = self.build_step_summary(ctx, step_num)
+        template_key = f"step{step_num}"
+        template = ""
+        if hasattr(ctx, "message_templates"):
+            template = ctx.message_templates.get(template_key, "")
+        rendered = self.render_template(template, ctx, step_num) if template else (
+            f"💻 **{round_name} Step {step_num}** — {agent_name}\n\n"
+            f"{summary}\n\n"
+            f"请完成当前步骤后回复：已完成 ✅ {round_name} Step {step_num}"
+        )
 
         payload = {
-            "type": "broadcast",
+            "type": "message",
             "channel": f"_inbox:{target_agent_id}",
             "content": rendered,
-            "from_name": "系统",
-            "agent_id": state.SYSTEM_AGENT_ID,
-            "to_agent": target_agent_id,
-            "id": f"auto-{ctx.round_name}-step{step_num}-{int(time.time() * 1000)}",
-            "ts": time.time(),
         }
-
-        # 派活消息落库
-        try:
-            ms.save_message(
-                msg_id=payload["id"], msg_type="broadcast",
-                from_agent=payload["agent_id"], from_name=payload["from_name"],
-                content=rendered, ts=payload["ts"],
-                data_dir=config.DATA_DIR, channel=f"_inbox:{target_agent_id}",
-            )
-        except Exception:
-            pass
-
-        sent = await self._send_to_agent(target_agent_id, payload) if self._send_to_agent else 0
-        logger.info("[R109] 自动派活 step%d → %s: sent=%d",
-                    step_num, target_agent_id, sent)
-
-        if sent > 0:
-            if step_info:
-                step_info["status"] = "in_progress"
-                step_info["dispatched_at"] = time.time()
-                step_info["timeout_alerted"] = False
-                try:
-                    self._ctx_mgr.save()
-                except Exception:
-                    pass
-            await self.notify_pm(ctx, step_num, "dispatched",
-                                f"→ {_get_step_agent_name(ctx, step_num)}（{target_agent_id[:12]}）")
-            return True
-        else:
-            logger.info("[R106 B-5 fix] auto_dispatch 返回 False — 无 PM fallback 风险")
+        sent = await self._send_to_agent(target_agent_id, payload)
+        if sent == 0:
+            logger.warning("[R106] %s step%d → %s 在线连接数为 0",
+                           round_name, step_num, target_agent_id[:20])
             self.enqueue_retry(ctx, step_num)
             return False
 
-    async def auto_re_notify(self, ctx, step_key: str, step_num: int) -> None:
+        # 更新 step 状态
+        if step_info:
+            step_info["status"] = "in_progress"
+            step_info["dispatched_at"] = time.time()
+            try:
+                self._ctx_mgr.save()
+            except Exception:
+                pass
+
+        await self.notify_pm(ctx, step_num, "dispatched",
+                             f"→ {agent_name}（{target_agent_id[:12]}）")
+        return True
+
+    async def auto_re_notify(
+        self, ctx, step_key: str, step_num: int
+    ) -> None:
         """超时后重新发送派活消息给原 bot。"""
-        return await _auto_re_notify(ctx, step_key, step_num)
+        step_idx = step_num - 1
+        step_info = ctx.steps[step_idx] if step_idx < len(ctx.steps) else None
+        if not step_info:
+            return
+        target_id = step_info.get("agent_id", "")
+        if not target_id:
+            return
+        payload = {
+            "type": "message",
+            "channel": f"_inbox:{target_id}",
+            "content": (
+                f"⏰ **{ctx.round_name} Step {step_num} 重发提醒**\n\n"
+                f"此步骤已超过 30 分钟未收到回复。\n"
+                f"请继续完成：{ctx.round_name} Step {step_num}\n\n"
+                f"完成后回复：已完成 ✅ {ctx.round_name} Step {step_num}"
+            ),
+        }
+        await self._send_to_agent(target_id, payload)
 
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 🅴 通知/排队
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
-    async def notify_pm(self, ctx: PipelineContext, step_num: int,
-                        status: str, detail: str = "") -> None:
+    async def notify_pm(
+        self, ctx: PipelineContext, step_num: int,
+        status: str, detail: str = ""
+    ) -> None:
         """发送管线通知给 PM。"""
-        await _notify_pm(ctx, step_num, status, detail)
+        pm_id = config.PIPELINE_PM_AGENT_ID
+        role_names = {
+            1: "📋 PM", 2: "📐 Arch", 3: "💻 Dev",
+            4: "👁 Review", 5: "🧪 QA", 6: "🚢 Ops",
+        }
+        step_role = role_names.get(step_num, "?")
+        content = ""
 
-    async def handle_reject(self, content: str, sender_agent_id: str) -> None:
+        if status == "dispatched":
+            agent_name = self.get_step_agent_name(ctx, step_num)
+            content = (
+                f"✅ **{ctx.round_name} 管线自动推进**\n\n"
+                f"Step {step_num} 🚀 已派活 → {agent_name}（{step_role}）\n"
+                + (f"\n{detail}" if detail else "")
+            )
+        elif status == "completed":
+            step_lines = []
+            for i, s in enumerate(ctx.steps, 1):
+                role = role_names.get(i, "?")
+                agent = s.get("agent_name", s.get("agent_id", "?")[:12])
+                out = s.get("output", s.get("result_msg", ""))
+                out_short = str(out)[:40] + "..." if len(str(out)) > 40 else out
+                step_lines.append(f"| {i} | {role} | {agent} | {out_short} |")
+            table_header = (
+                "| Step | 角色 | 执行者 | 产出 |\n"
+                "|:---:|:-----|:-------|:-----|\n"
+            )
+            content = (
+                f"🎉 **{ctx.round_name} 管线已完成！**\n\n"
+                f"{table_header}{chr(10).join(step_lines)}"
+            )
+        elif status == "failed":
+            agent_name = self.get_step_agent_name(ctx, step_num)
+            content = (
+                f"⚠️ **{ctx.round_name} 管线异常**\n\n"
+                f"Step {step_num}（{step_role}）→ {agent_name} 离线，"
+                f"自动派活失败（5 次重试）\n"
+                + (f"\n{detail}" if detail else "")
+            )
+        elif status == "retrying":
+            content = (
+                f"⏳ **{ctx.round_name} 派活排队中**\n\n"
+                f"Step {step_num}（{step_role}）排队中（{detail}）"
+            )
+        elif status == "rejected":
+            content = (
+                f"⚠️ **{ctx.round_name} 管线回退**\n\n"
+                f"Step {step_num}（{step_role}）被退回\n"
+                + (f"{detail}" if detail else "")
+            )
+        elif status == "stuck":
+            content = (
+                f"🔴 **{ctx.round_name} 管线已卡死**\n\n"
+                + (f"{detail}" if detail else "")
+            )
+        elif status == "archived":
+            content = (
+                f"📦 **{ctx.round_name} 管线已完成并归档**\n\n"
+                + (f"{detail}" if detail else "")
+            )
+
+        if content and pm_id:
+            await self._send_to_agent(pm_id, {
+                "type": "broadcast",
+                "channel": f"_inbox:{pm_id}",
+                "from_name": "系统",
+                "from_agent": state.SYSTEM_AGENT_ID,
+                "content": content,
+                "ts": time.time(),
+            })
+
+    async def handle_reject(
+        self, content: str, sender_agent_id: str
+    ) -> None:
         """处理退回 🔄 R{N} Step {N} 消息。"""
-        await _handle_reject(content, sender_agent_id)
+        m = re.match(r"退回 🔄 R(\d+) Step (\d+)(.*)", content)
+        if not m:
+            return
+        round_name = f"R{m.group(1)}"
+        step_num = int(m.group(2))
+        reason = m.group(3).strip()
+        ctx = self._ctx_mgr.get(round_name)
+        if not ctx:
+            return
+        # 回退状态
+        if step_num > 1:
+            ctx.current_step = step_num - 1
+        try:
+            self._ctx_mgr.save()
+        except Exception:
+            pass
+        detail = ""
+        if reason:
+            detail = f"原因: {reason}"
+        await self.notify_pm(ctx, step_num, "rejected", detail)
+        logger.info("[Pipeline] 退回: %s step%d by %s, reason=%s",
+                    round_name, step_num, sender_agent_id[:12], reason)
 
     def enqueue_retry(self, ctx: PipelineContext, step_num: int) -> None:
-        """将失败的自动派活加入重试队列。"""
-        _enqueue_retry(ctx, step_num)
+        """将失败的自动派活加入重试队列。R128 B-2: 15s 首轮间隔 + 退避。"""
+        round_name = ctx.round_name
+        if round_name in self._pending_retries:
+            return
+        self._pending_retries[round_name] = {
+            "ctx": ctx,
+            "step_num": step_num,
+            "retry_count": 0,
+            "next_retry_at": time.time() + 15,  # R128 B-2: 15s 首轮
+            "notify_sent": False,
+            "pm_notified_3": False,
+        }
+        logger.info("[R128] 入重试队列: %s step%d（首轮 15s）", round_name, step_num)
 
     async def _retry_loop(self) -> None:
         """后台循环，每 15s 扫描待重试队列。R128 B-2: 退避 + PM 通知。"""
@@ -1952,10 +1042,13 @@ class PipelineEngine:
                         self.notify_pm(ctx, step_num, "stuck",
                                        f"重试 5 次均失败，目标 bot 持续离线。管线已标记为卡死。")
                     )
-                    logger.warning("[R128] 重试耗尽: %s step%d 5/5 失败", round_name, step_num)
+                    logger.warning("[R128] 重试耗尽: %s step%d 5/5 失败，标记卡死",
+                                   round_name, step_num)
                 else:
+                    # 退避: 15s → 30s → 60s → 120s → 180s
                     backoff = min(15 * (2 ** (attempt - 1)), 180)
                     entry["next_retry_at"] = time.time() + backoff
+                    # 3 次后通知 PM
                     if attempt >= 3 and not entry.get("pm_notified_3"):
                         entry["pm_notified_3"] = True
                         asyncio.ensure_future(
@@ -1972,9 +1065,9 @@ class PipelineEngine:
                                 round_name, step_num, backoff)
             await asyncio.sleep(15)
 
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
     # 🅵 后台扫描
-    # ═══════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
 
     def _ensure_git_scan(self) -> None:
         """启动 git 同步定时循环。"""
@@ -2030,7 +1123,9 @@ class PipelineEngine:
         logger.info("[R122] 管线超时扫描已启动（timeout=%dmin, interval=%ds）",
                     timeout_min, scan_interval)
 
-    async def _start_timeout_scan_loop(self, timeout_min: int, scan_interval: int) -> None:
+    async def _start_timeout_scan_loop(
+        self, timeout_min: int, scan_interval: int
+    ) -> None:
         """独立的超时扫描定时循环。"""
         while True:
             await asyncio.sleep(scan_interval)
@@ -2166,10 +1261,9 @@ class PipelineEngine:
 
     async def restore_pipeline_dispatches(self) -> None:
         """On server start, re-dispatch the current step for all RUNNING pipelines."""
-        from .pipeline_context import PipelineStatus as PS
         try:
             for ctx in self._ctx_mgr.get_all_active():
-                if ctx.status != PS.RUNNING:
+                if ctx.status != PipelineStatus.RUNNING:
                     continue
                 step_num = ctx.current_step
                 if step_num < 1 or step_num > ctx.total_steps:
@@ -2186,16 +1280,3 @@ class PipelineEngine:
                 self.enqueue_retry(ctx, step_num)
         except Exception:
             pass
-
-
-# ── R137: Forwarders for scenario_matcher ──
-
-def _ensure_engine():
-    """Forward to main._ensure_engine()."""
-    from .main import _ensure_engine
-    return _ensure_engine()
-
-def _ensure_pipeline_manager():
-    """Forward to main._ensure_pipeline_manager()."""
-    from .main import _ensure_pipeline_manager
-    return _ensure_pipeline_manager()

@@ -123,6 +123,39 @@ def get_messages_by_channel(channel: str, data_dir: Path, limit: int = 100) -> l
     return [dict(r) for r in rows]
 
 
+def search_messages(
+    query: str,
+    data_dir: Path,
+    limit: int = 50,
+    channel: str | None = None,
+    sender: str | None = None,
+) -> list[dict]:
+    """Search messages by content or sender name (LIKE query), optionally filtered by channel and/or sender."""
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return []
+    conn = _get_conn(db_path)
+    try:
+        conditions = ["(content LIKE ? OR from_name LIKE ?)"]
+        params = [f"%{query}%", f"%{query}%"]
+        if channel:
+            conditions.append("channel = ?")
+            params.append(channel)
+        if sender:
+            conditions.append("from_name LIKE ?")
+            params.append(f"%{sender}%")
+        where = " AND ".join(conditions)
+        cur = conn.execute(
+            f"SELECT msg_id, from_name, content, ts, channel "
+            f"FROM messages WHERE {where} ORDER BY ts DESC LIMIT ?",
+            params + [limit],
+        )
+        return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
 
 def clear_messages_by_channel(channel: str, data_dir: Path):
     """Delete all messages for a given channel (used on workspace cleanup)."""
@@ -149,6 +182,65 @@ def is_duplicate(channel: str, content: str, window_sec: float, data_dir: Path) 
         return cur.fetchone() is not None
     except Exception:
         return False
+    finally:
+        conn.close()
+
+
+# ── R76: LIKE pattern query ──────────────────────────────────────────
+
+
+def get_messages_by_channel_pattern(
+    pattern: str, data_dir: Path, limit: int = 50, since: float | None = None
+) -> list[dict]:
+    """Retrieve messages from channels matching a SQL LIKE pattern.
+
+    Pattern uses '%' as wildcard (e.g. '_inbox:%' matches all inbox channels).
+    Since the `channel` column has an index (idx_messages_channel),
+    a LIKE query with a prefix pattern still hits the index.
+    """
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return []
+    conn = _get_conn(db_path)
+    try:
+        query = (
+            "SELECT msg_id, msg_type, from_agent, from_name, content, ts, channel "
+            "FROM messages WHERE channel LIKE ?"
+        )
+        params: list = [pattern]
+        if since is not None:
+            query += " AND ts > ?"
+            params.append(since)
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# ── R76: Time range query ────────────────────────────────────────────
+
+
+def get_messages_by_time_range(
+    start_ts: float, end_ts: float, data_dir: Path
+) -> list[dict]:
+    """Retrieve all messages within a time range, ordered by timestamp ascending."""
+    db_path = str(data_dir / DEFAULT_DB_NAME)
+    if not Path(db_path).exists():
+        return []
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT msg_id, msg_type, from_agent, from_name, content, ts, channel "
+            "FROM messages WHERE ts >= ? AND ts <= ? ORDER BY ts ASC",
+            (start_ts, end_ts),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 
 
 def clean_old_messages(

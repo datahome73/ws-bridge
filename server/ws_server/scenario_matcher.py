@@ -121,6 +121,13 @@ def match_hash_cmd(content: str, msg: dict, agent_id: str) -> Any:
         return content
     return False
 
+def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 35: PM safety guard — reject PM sending to _inbox:server."""
+    pm_id = DISPATCH_SENDER_ID or PIPELINE_PM_AGENT_ID
+    if pm_id and agent_id == pm_id:
+        return True
+    return False
+
 def match_ack(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 40: 收到 ✅ / ACK ✅ forward to PM."""
     if content.startswith("收到 ✅") or content.startswith("ACK ✅"):
@@ -142,6 +149,12 @@ def match_reject(content: str, msg: dict, agent_id: str) -> Any:
 def match_fail(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 70: 失败 ❌ alert."""
     if content.startswith("失败 ❌"):
+        return True
+    return False
+
+def match_exclamation(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 80: ! command passthrough."""
+    if content.startswith("!"):
         return True
     return False
 
@@ -168,8 +181,6 @@ _QUERY_LEVEL_MAP = {
     "agents": 3,
     "agent_info": 3,
     "audit": 4,
-    # R132
-    "step": 4,
 }
 
 
@@ -212,7 +223,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # ── Route sub-commands ──
-    from . import pipeline_engine as _e2
+    from . import main as _main
 
     if sub_cmd == "whoami":
         from server.common import auth, persistence
@@ -263,15 +274,15 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 
 async def _format_query_status(round_name: str) -> str:
     """Format pipeline status response."""
-    from . import pipeline_engine as _e2
+    from . import main as _main
     if round_name:
         # Specific round
-        mgr = _e2._ensure_pipeline_manager()
+        mgr = _main._ensure_pipeline_manager()
         ctx = mgr.get(round_name.upper())
         if ctx:
-            return _e2._ensure_engine().format_context(ctx)
+            return _main._ensure_engine().format_context(ctx)
         # Check archive
-        archive = _e2._ensure_engine().find_archive(round_name.upper())
+        archive = _main._ensure_engine().find_archive(round_name.upper())
         if archive:
             from datetime import datetime
             ts = archive.get("archived_at", 0)
@@ -281,7 +292,7 @@ async def _format_query_status(round_name: str) -> str:
             return f"📦 {round_name.upper()} 已归档\\n状态: completed\\n归档时间: {time_str}\\n总步数: {total} / 完成: {done}"
         return f"❌ 管线 {round_name.upper()} 不存在"
     # All active pipelines
-    mgr = _e2._ensure_pipeline_manager()
+    mgr = _main._ensure_pipeline_manager()
     active = mgr.get_all_active()
     if not active:
         return "📋 当前无活跃管线"
@@ -404,18 +415,18 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             kv[k.strip()] = v.strip()
 
     # Import callbacks registered by main.py
-    from . import pipeline_engine as _e2
+    from . import main as _main
 
     if cmd == "start":
-        return await _e2._handle_hash_start(round_name, kv, agent_id, ws)
+        return await _main._handle_hash_start(round_name, kv, agent_id, ws)
     elif cmd == "status":
-        return await _e2._handle_hash_status(round_name, agent_id, ws)
+        return await _main._handle_hash_status(round_name, agent_id, ws)
     elif cmd == "stop":
-        return await _e2._handle_hash_stop(round_name, agent_id, ws)
+        return await _main._handle_hash_stop(round_name, agent_id, ws)
     elif cmd == "advance":
-        return await _e2._handle_hash_advance(round_name, kv, agent_id, ws)
+        return await _main._handle_hash_advance(round_name, kv, agent_id, ws)
     elif cmd == "archive":
-        return await _e2._handle_hash_archive(round_name, agent_id, ws)
+        return await _main._handle_hash_archive(round_name, agent_id, ws)
     elif cmd == "help":
         await _send_reply(ws, agent_id,
             "📋 **## 命令帮助**\n\n"
@@ -437,19 +448,6 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
 # ── R131: ##query commands (rule 25) ────────────────────────────────
 
 _QUERY_SHORTCUTS = ("##whoami", "##agents", "##status", "##agent_info", "##audit", "##help")
-
-
-# ── R132: ##step match (rule 28) ────────────────────────────────────
-
-def match_step(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 28: ##step commands.
-    Priority 28 — between query (25) and hash_cmd (30).
-    Matches: ##step##<action>[##<args>]
-    """
-    if content.startswith("##step"):
-        return content
-    return False
-
 
 def match_query(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 25: ##query commands (+ shortcuts).
@@ -500,7 +498,7 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
         return True
 
     # 6 个子命令路由（复用 main.py 函数）
-    from . import pipeline_engine as _e2
+    from . import main as _main
 
     if sub_cmd == "whoami":
         from server.common import auth as _auth
@@ -535,92 +533,6 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     else:
         await _send_reply(ws, agent_id,
             f"❌ 未知子命令: {sub_cmd}，可用: whoami / agents / status / agent_info / audit / help")
-
-    return True
-
-
-# ── R132: ##step handler (rule 28) ──────────────────────────────────
-
-_STEP_ACTIONS = ("complete", "reject", "restart", "force", "pause", "resume")
-
-
-async def handle_step(ws, agent_id: str, msg: dict, matched: Any) -> bool:
-    """Handle ##step commands: ##step##<action>[##<args>]
-    Priority 28 — between query (25) and hash_cmd (30).
-    Permission: L4 required (uses _get_agent_level).
-    Actions: complete / reject / restart / force / pause / resume
-    """
-    content = matched
-    parts = content.split("##")
-    if len(parts) < 3:
-        await _send_reply(ws, agent_id,
-            "📋 **##step 命令帮助**\n\n"
-            "`##step##complete##<id>` — 步骤完成 (L4)\n"
-            "`##step##reject##<id>##<原因>` — 步骤打回 (L4)\n"
-            "`##step##restart##<id>` — 步骤回退重启 (L4)\n"
-            "`##step##force##<id>` — 强制推进 (L4)\n"
-            "`##step##pause##<id>` — 暂停步骤 (L4)\n"
-            "`##step##resume##<id>` — 恢复步骤 (L4)"
-        )
-        return True
-
-    action = parts[2].lower()
-    args = parts[3] if len(parts) > 3 else ""
-
-    # ── Permission check: L4 required (matches R131 active pattern) ──
-    level = _get_agent_level(agent_id)
-    if level < 4:
-        await _send_reply(ws, agent_id,
-            "❌ 权限不足：需要 L4 级别"
-        )
-        return True
-
-    # ── Route actions ──
-    from .commands.pipeline import (
-        _cmd_step_complete,
-        _cmd_step_reject,
-        _cmd_step_force,
-        _cmd_step_handoff,
-    )
-
-    if action == "complete":
-        params = {"step_name": args}
-        reply = await _cmd_step_complete(agent_id, params)
-        await _send_reply(ws, agent_id, reply)
-
-    elif action == "reject":
-        step_parts = args.split("##", 1)
-        step_id = step_parts[0]
-        reason = step_parts[1] if len(step_parts) > 1 else ""
-        params = {"step_name": step_id, "reason": reason}
-        reply = await _cmd_step_reject(agent_id, params)
-        await _send_reply(ws, agent_id, reply)
-
-    elif action == "restart":
-        # Use handoff to mark complete and hand to next role
-        params = {"step_name": args}
-        reply = await _cmd_step_handoff(agent_id, params)
-        await _send_reply(ws, agent_id, reply)
-
-    elif action == "force":
-        params = {"step_name": args}
-        reply = await _cmd_step_force(agent_id, params)
-        await _send_reply(ws, agent_id, reply)
-
-    elif action == "pause":
-        await _send_reply(ws, agent_id,
-            f"⏸️ 步骤 #{args} 已暂停"
-        )
-
-    elif action == "resume":
-        await _send_reply(ws, agent_id,
-            f"▶️ 步骤 #{args} 已恢复"
-        )
-
-    else:
-        await _send_reply(ws, agent_id,
-            f"❌ 未知步骤操作: {action}"
-        )
 
     return True
 
@@ -722,6 +634,27 @@ def _format_audit_log(limit_str: str) -> str:
     )
 
 
+# ── Moved from main.py: _classify_lobby_message ──────────────────────
+def classify_lobby_message(content: str) -> tuple[str, list[str]]:
+    """Classify lobby message by prefix.
+    Returns (type, extracted_names).
+    Types: 'announce', 'checkin', 'help', 'mention', 'plain'
+    """
+    content = content.strip()
+    # R45 B (F-4): Strip [R{N}测试] test tags before prefix check
+    content = re.sub(r'^\[R\d+测试\]\s*', '', content).strip()
+    if content.startswith(state.PREFIX_ANNOUNCE):
+        return 'announce', []
+    if content.startswith(state.PREFIX_CHECKIN):
+        names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
+        return 'checkin', names
+    if content.startswith(state.PREFIX_HELP):
+        return 'help', []
+    names = [m.group(1) for m in re.finditer(r'@(\S+)', content)]
+    if names:
+        return 'mention', names
+    return 'plain', []
+
 # ── Helper ────────────────────────────────────────────────────────────
 
 async def _send_reply(ws, agent_id: str, content: str) -> None:
@@ -748,14 +681,4 @@ register_rule(HandlerRule(
     priority=25,
     name="##query 命令",
     protocol_ref="§R131",
-))
-
-# ── R132: Register rule 28 (##step) ─────────────────────────────────
-
-register_rule(HandlerRule(
-    match=match_step,
-    handle=handle_step,
-    priority=28,
-    name="##step 命令",
-    protocol_ref="§R132",
 ))

@@ -1,15 +1,12 @@
 # Server — WS Bridge 服务端
 
-> 本目录是 ws-bridge 服务端的全部核心代码。**共 33 个 .py 文件，约 17,100 行。**
+> 本目录是 ws-bridge 服务端的全部核心代码。**共 28 个 .py 文件，约 13,200 行。**
 >
 > 🏗️ **R101+ 双进程架构** — WSS 核心（端口 8765）与 Web 服务（端口 8766）独立运行，
 > 通过 Supervisor 管理。Web 界面不依赖 WebSocket 推流，改用 5 秒 HTTP 轮询。
 >
 > R126/R127 已完成场景匹配规则（scenario_matcher.py）和管线状态机（pipeline_engine.py）
 > 的模块化提取，大幅降低了 main.py 的复杂度。
->
-> R131 完成 `##query` 命令族全面迁移（6 个 ! 命令规则化为 ## 命令），
-> R133 完成 Web 收件箱发件人颜色扩展（支持 系统/经理 颜色 + 收件人颜色显示）。
 
 ---
 
@@ -45,21 +42,16 @@ server/
 │         ▼                                                      │
 │  ws_server/main.py（核心消息路由）                               │
 │   ├─ handler()             WS 会话主循环                       │
-│   ├─ handle_broadcast()    消息路由 + 广播（含 ##/! 命令分发） │
+│   ├─ handle_broadcast()    消息路由 + 广播（含 !命令分发）     │
 │   ├─ _handle_server_relay() inbox 中继（场景匹配规则路由）     │
 │   ├─ _handle_server_query() _inbox:server 查询路由             │
 │   ├─ handle_auth()         认证入口                            │
-│   ├─ handle_register()     bot 注册入口 (R72)                  │
+│   ├─ handle_register()     bot 注册入口                        │
 │   └─ _send()               WebSocket 写入                     │
 │         │                                                      │
-│         ├── scenario_matcher.py  ← 规则表 + 匹配引擎 (R126)    │
-│         ├── pipeline_engine.py   ← 管线状态机 (R127)          │
-│         └── commands/            ← ##/! 命令注册表 (R100)     │
-│               ├── pipeline.py    管线命令 (2085行)             │
-│               ├── workspace.py   工作区命令                    │
-│               ├── agent_card.py  Agent 卡片命令                │
-│               ├── task.py        任务命令                      │
-│               └── admin.py       管理命令                      │
+│         ├── scenario_matcher.py  ← 规则表 + 匹配引擎           │
+│         ├── pipeline_engine.py   ← 管线状态机                  │
+│         └── commands/            ← !命令注册表                 │
 └────────────────────────────────────────────────────────────────┘
                          │ HTTP 轮询（10s 后台线程）
                          ▼
@@ -70,13 +62,11 @@ server/
 │   ├─ /                      HTML 页面                          │
 │   ├─ /api/chat             聊天历史 API                        │
 │   ├─ /api/chat/inbox       收件箱 API                          │
-│   ├─ /api/chat/archive     归档历史 API (R76)                  │
-│   ├─ /api/chat/search      消息搜索 (R76)                      │
 │   ├─ /api/channels         频道列表 API                        │
-│   ├─ /api/bot_status       bot 在线状态（内存缓存） ← R102     │
+│   ├─ /api/bot_status       bot 在线状态（内存缓存） ← R102    │
 │   ├─ /api/workspaces       工作区列表（代理到 WSS 核心）       │
 │   ├─ /api/pipelines        管线状态列表 ← R112                │
-│   └─ /api/agent_status     Agent 健康/离线 ← R131             │
+│   └─ ... 其他 API 端点                                        │
 │         │                                                      │
 │         ├── 后台定时轮询 WSS 核心 /api/status → 内存缓存       │
 │         └── 前端 5s 轮询 Web 服务 API（非 WS 推流）           │
@@ -86,7 +76,6 @@ server/
                      ┌────────────────┐
                      │  浏览器 Web UI  │
                      │  纯数据查看器    │
-                     │  📬📂🏠📚📊   │
                      └────────────────┘
 ```
 
@@ -119,46 +108,46 @@ server/
 
 | 文件 | 行数 | 职责 |
 |:-----|:----:|:------|
-| **`config.py`** | 114 | 全部环境变量配置。**其他模块不应自行 os.getenv** |
+| **`config.py`** | 112 | 全部环境变量配置。**其他模块不应自行 os.getenv** |
 | **`persistence.py`** | 128 | JSON 文件原子读写。维护：API Keys、授权用户、Web 会话。线程安全 |
 | **`auth.py`** | 137 | is_approved() / get_users() / is_workspace_admin() / agent_name 查询 |
-| **`message_store.py`** | 140 | 消息存储接口层（ws_server/message_store.py 的封装） |
+| **`message_store.py`** | 140 | 消息存储接口层（message_store_impl.py 的封装） |
 
 ### 🟢 WSS 核心 — 入口与路由（进程 1）
 
 | 文件 | 行数 | 职责 |
 |:-----|:----:|:------|
-| **`__main__.py`** | 846 | **WSS 核心入口**。aiohttp app 启动/停止，端点注册（`/ws`, `/api/status`, `/api/health`, `/api/workspaces`），后台循环 |
-| **`main.py`** | 4,951 | **核心消息路由** — WS 会话主循环 + 消息广播 + inbox 中继/查询 + 认证入口 + 全部 ##/! 命令。**应继续拆分为更多子模块** |
-| **`message_store.py`** | 260 | 消息持久化实现（SQLite, 7天 TTL + R129 去重） |
-| **`state.py`** | 130 | 共享模块级状态：`_PIPELINE_STATE`、`_PIPELINE_CONFIG`、`_connections`、`SYSTEM_AGENT_ID` 等 |
+| **`__main__.py`** | 836 | **WSS 核心入口**。aiohttp app 启动/停止，端点注册（`/ws`, `/api/status`, `/api/health`, `/api/workspaces`），后台循环 |
+| **`main.py`** | 4,925 | **核心消息路由** — WS 会话主循环 + 消息广播 + inbox 中继/查询 + 认证入口 + 全部 !命令。**应继续拆分为更多子模块** |
+| **`message_store.py`** | 264 | 消息持久化实现（SQLite, 7天 TTL） |
+| **`state.py`** | 130 | 共享模块级状态：`_PIPELINE_STATE`、`_PIPELINE_CONFIG`、`_connections` 等 |
 | **`command_utils.py`** | 205 | 命令路由工具：`_parse_command()`、权限检查、审计、广播 |
 
 ### 🟠 场景匹配与管线引擎（R126/R127 提取）
 
 | 文件 | 行数 | 职责 |
 |:-----|:----:|:------|
-| **`scenario_matcher.py`** | 795 | **R126 提取** — 场景匹配规则表。从 main.py 提取为声明式 HandlerRule 列表，含 inbox 中继规则 + 大厅前缀规则 + ## 命令规则 + PM 安全守卫。显式优先级排序 |
-| **`pipeline_engine.py`** | 1,282 | **R127 提取** — 管线状态机。`PipelineEngine` 类封装了 start/stop/advance/archive/status/dispatch/retry/notify_pm 等全部管线操作逻辑 |
+| **`scenario_matcher.py`** | 260 | **R126 提取** — 场景匹配规则表。将 7 条 inbox 中继规则 + 4 条大厅前缀规则 + 6 条 ## 命令规则从 main.py 提取为声明式 HandlerRule 列表。显式优先级排序 |
+| **`pipeline_engine.py`** | 1,282 | **R127 提取** — 管线状态机。`PipelineEngine` 类封装了 start/stop/advance/archive/status/dispatch 等全部管线操作逻辑，从 main.py 提取为独立模块 |
 
-### 🟠 命令处理（##/! 命令）
+### 🟠 !命令处理
 
 | 文件 | 行数 | 职责 |
 |:-----|:----:|:------|
-| **`commands/__init__.py`** | 202 | 构建 `_ADMIN_COMMANDS` 注册表，导入各子模块的命令函数（R131 新增 ##query 规则组） |
-| **`commands/pipeline.py`** | 2,085 | 管线命令族：start/stop/status/activate/handoff/reject/force/verify/step/archive/advance/retry/review |
-| **`commands/workspace.py`** | 455 | 工作区命令：create/close/list/join/leave/add/remove/list_members |
-| **`commands/agent_card.py`** | 258 | Agent 卡片命令：list/get/set/unset/reload/register/auto_register/role_map |
-| **`commands/task.py`** | 197 | 任务命令：create/update/query/list |
-| **`commands/admin.py`** | 176 | 管理命令：approve_ws_admin/reject_ws_admin/list_pending/audit_log/revoke_api_key |
+| **`commands/__init__.py`** | — | 构建 `_ADMIN_COMMANDS` 注册表，导入各子模块的命令函数 |
+| **`commands/pipeline.py`** | — | pipeline: start/stop/status/activate/handoff/reject/force/verify/... |
+| **`commands/workspace.py`** | — | workspace: create/close/list/join/leave/add/remove/list_members |
+| **`commands/agent_card.py`** | — | agent_card: list/get/set/unset/reload/register/auto_register/role_map |
+| **`commands/task.py`** | — | task: create/update/query/list |
+| **`commands/admin.py`** | — | admin: approve_ws_admin/reject_ws_admin/list_pending/audit_log/revoke_api_key |
 
 ### 🟡 Web 服务（进程 2）
 
 | 文件 | 行数 | 职责 |
 |:-----|:----:|:------|
 | **`web_ui/main.py`** | 113 | **独立 Web HTTP 入口**。启动 aiohttp 服务（端口 8766），注册 viewer.py 的全部 Web API 路由，后台轮询 WSS 核心 bot 状态。**R101 新增，R102 扩展** |
-| **`web_ui/viewer.py`** | 779 | Web HTTP API 处理函数 + 会话管理 + GitHub OAuth。含聊天历史 / 收件箱 / 频道列表 / 搜索 / 归档 / 管线状态 / Agent 状态等全部 API |
-| **`web_ui/templates.py`** | 850 | Web 聊天界面 HTML/CSS/JS 内联模板（单文件，无外部依赖）。含 5-Tab 布局（📬收件箱 🏠大厅 📂工作区 📚历史 📊管线）、收件箱发件人8色系统（R133）、管线 Dashboard、工作室面板 |
+| **`web_ui/viewer.py`** | 780 | Web HTTP API 处理函数 + 会话管理 + GitHub OAuth。含聊天历史 / 收件箱 / 频道列表 / 搜索 / 归档 / 管线状态 / Agent 状态等全部 API |
+| **`web_ui/templates.py`** | 910 | Web 聊天界面 HTML/CSS/JS 内联模板（单文件，无外部依赖）。含 4-Tab 布局、收件箱、管线 Dashboard、工作室面板 |
 
 ### 🟡 工作区
 
@@ -174,7 +163,8 @@ server/
 | **`pipeline_context.py`** | 692 | PipelineContext dataclass + PipelineContextManager（CRUD + 状态机 + JSON 持久化 + JSONL 历史归档） |
 | **`pipeline_sync.py`** | 203 | 管线 Git 同步检测（检查 dev 分支新提交，通过 commit message 匹配推进状态） |
 | **`timeout_tracker.py`** | 164 | Step 超时计时器（纯内存，无 async 无依赖） |
-| **`auto_router.py`** | 750 | 🚂 管线自动路由服务 — **独立外挂进程，已停用（R129 确认退役）**，保留为独立 CLI 脚本 |
+| **`auto_router.py`** | 750 | 🚂 管线自动路由服务 — **独立外挂进程，已停用（R129 确认退役）** |
+| **`pipeline_auto_starter.py`** | — | PipelineAutoStarter — **已退役（R129 清理）** |
 
 ### 🔴 Agent 管理
 
@@ -182,7 +172,7 @@ server/
 |:-----|:----:|:------|
 | **`agent_card.py`** | 429 | Agent Card 加载/迁移/注册/热更新/离线检测 |
 | **`task_store.py`** | 184 | SQLite 任务存储（R38 任务状态机，与 pipeline 关联） |
-| **`audit.py`** | 94 | AuditLogger — 审计日志（##/! 命令执行 → _audit_log.jsonl） |
+| **`audit.py`** | 94 | AuditLogger — 审计日志（!命令执行 → _audit_log.jsonl） |
 
 ---
 
@@ -198,10 +188,9 @@ server/
                       │
               解析 MSG type
               ├── "auth"             → handle_auth()
-              ├── "register"         → handle_register()          (R72)
-              ├── "agent_card_register" → handle_agent_card_register()
+              ├── "register"         → handle_register()
               ├── "message"          → handle_broadcast()
-              │                        ├─ 解析 ##/! 命令 → commands/注册表
+              │                        ├─ 解析 !command → commands/注册表
               │                        ├─ _inbox:server → _handle_server_relay()
               │                        │                    └─ scenario_matcher.py 规则表
               │                        │                       ├─ test ✅ 回路测试
@@ -215,6 +204,7 @@ server/
               │                                             │
               │                                     save_message(DB)
               │
+              ├── "agent_card_register" → handle_agent_card_register()
               └── 其他 msg_type      → 各自 handler
 ```
 
@@ -233,8 +223,7 @@ server/
    │                                      │  GET /api/status ──────────→  _connections
    ├─ 下拉刷新 → 同 5s 轮询              │                              │
    ├─ 每 Ns → GET /api/pipelines ──────→  viewer.py       ──读 JSON──→ pipeline_contexts.json
-   ├─ 每 15s → GET /api/workspaces ────→  workspace_api   ──读 JSON──→ workspace.py
-   └─ 每 15s → GET /api/agent_status ──→  viewer.py       ──读 JSON──→ agent_card.py
+   └─ 每 15s → GET /api/workspaces ────→  workspace_api   ──读 JSON──→ workspace.py
 ```
 
 > **R101 关键变更：** 23 处 `write_chat_log()` 全部从 WSS 核心移除。消息持久化仅靠
@@ -246,10 +235,6 @@ server/
 >
 > **R126/R127 关键变更：** 场景匹配规则（scenario_matcher.py）和管线状态机（pipeline_engine.py）
 > 从 main.py 提取为独立模块。
->
-> **R131 关键变更：** 6 个 `!` 查询命令规则化为 `##query` 命令族。
->
-> **R133 关键变更：** Web 收件箱颜色系统扩展为 8 色（+系统蓝 + 经理紫），收件人使用 bot 颜色。
 
 ### 3.3 数据持久化层次
 
@@ -301,7 +286,7 @@ server/
 
 ```
 ① PM 编写需求文档 + WORK_PLAN → 推 dev
-② 经理/用户发 ##start##R{N} 到 _inbox:server 启动管线
+② PM 发 ##start##R{N} 到 _inbox:server 启动管线
 ③ 管线自动派活 Step 1 → PM 推 dev
 ④ 完成后 bot 回复 ✅ 完成到 _inbox:server
 ⑤ 场景匹配器检测 → 推进到下一步 → 自动派活
@@ -309,33 +294,22 @@ server/
 ```
 
 > 推进不依赖 AutoRouter。所有推进通过 `scenario_matcher.py` 规则引擎自动检测完成消息，
-> 调用 `pipeline_engine.py` 推进状态机。
+> 调用 `pipeline_engine.py` 推进状态机。详见 `docs/inbox-message-protocol.md`。
 
 ### 4.3 场景匹配规则优先级
 
 | 优先级 | 规则 | 说明 |
 |:------:|:-----|:------|
-| 10 | `test ✅` 回路测试 | 健康检查回路 |
-| 20 | `to_agent` 派活路由 | 定向派活流程 |
-| 30 | `##` 命令 | 转 commands/ 或 pipeline_engine |
+| 10 | `test ✅` 回路测试 | §7.1 |
+| 20 | `to_agent` 派活路由 | §7.2 |
+| 30 | `##` 命令 | §7.3 → 转 pipeline_engine |
 | 35 | PM 安全守卫 | 拒绝 PM 本人发 `_inbox:server` |
-| 40 | `收到 ✅` / `ACK ✅` PM 通知 | 进度通知 |
-| 50 | `已完成 ✅` / `✅ 完成` 自动确认 | **触发管线推进** |
-| 60 | `退回 🔄` 驳回回退 | 回退重做 |
-| 70 | `失败 ❌` 告警通知 | 异常告警 |
-| 80 | `!` 命令透传 | 旧格式兼容 |
-| 90 | 无匹配 → 入库留痕 | 默认兜底 |
-
-### 4.4 Bot 权限等级（R99/R131）
-
-| 等级 | 能力 |
-|:----:|:------|
-| **L1** | 测试 + `##whoami` |
-| **L3** | 查询、收消息（不能主动发消息给其他 bot） |
-| **L4** | 完整读写：发消息 + 管线操作 + 管理命令（含 `##start`/`##step`/`##task`） |
-
-> 权限检查函数 `_check_level(channel, sender_id, min_level)` 定义在 main.py。
-> `##query` 命令族（R131）使用 `_QUERY_LEVEL_MAP` 表按子命令细分权限级别。
+| 40 | `收到 ✅` / `ACK ✅` PM 通知 | §7.5 |
+| 50 | `已完成 ✅` / `✅ 完成` 自动确认 | §7.6 → 触发管线推进 |
+| 60 | `退回 🔄` 驳回回退 | §7.7 |
+| 70 | `失败 ❌` 告警通知 | §7.8 |
+| 80 | `!` 命令透传 | §7.9 |
+| 90 | 无匹配 → 入库留痕 | §7.10 |
 
 ---
 
@@ -392,10 +366,10 @@ web_ui/main.py
 
 | 文件 | 职责 |
 |:-----|:------|
-| **`main.py`** | 只做 WebSocket 消息路由、消息广播、命令路由分发。所有 `##/!` 命令处理逻辑 → 拆到 `commands/*.py` |
+| **`main.py`** | 只做 WebSocket 消息路由、消息广播、命令路由分发。所有 !命令处理逻辑 → 拆到 `commands/*.py` |
 | **`scenario_matcher.py`** | 场景匹配规则表 — 声明式规则，显式优先级。不涉及 WS 通信 |
 | **`pipeline_engine.py`** | 管线状态机 — start/stop/advance/archive/dispatch 全部管线操作。不涉及 WS 通信 |
-| **`commands/*.py`** | 只处理 `##/!` 命令的业务逻辑。不能直接操作 WebSocket 连接，只能返回字符串响应 |
+| **`commands/*.py`** | 只处理 !命令的业务逻辑。不能直接操作 WebSocket 连接，只能返回字符串响应 |
 | **`state.py`** | 持有共享状态，不包含业务逻辑 |
 | **`command_utils.py`** | 命令路由的纯工具函数，不包含业务逻辑 |
 | **`pipeline_*.py`** | 只关心管线数据模型、状态机、持久化。不涉及 WS 通信 |
@@ -404,7 +378,7 @@ web_ui/main.py
 
 ### 6.2 新增功能的约定
 
-1. **新增 `##/!` 命令** → 在 `commands/` 下对应领域文件加函数，`commands/__init__.py` 注册，**不要碰 main.py**
+1. **新增 !命令** → 在 `commands/` 下对应领域文件加函数，`commands/__init__.py` 注册，**不要碰 main.py**
 2. **新增 Web API** → 在 `web_ui/viewer.py` 加 handler + `setup_routes()` 注册，**不要碰 `__main__.py`**
 3. **新增后台循环** → 判断属于哪个进程：WSS 核心在 `__main__.py` 的 `on_startup` 启动；Web 服务在 `web_ui/main.py` 的 `on_startup` 启动
 4. **WS 连接状态** → 留在 `main.py` 的 `_connections` 里
@@ -449,7 +423,7 @@ Phase 4  📋 统一管线状态
   → 管线相关辅助函数从 commands/pipeline.py 进一步拆分
 
 Phase 5  📋 main.py 进一步拆分
-  → main.py 当前仍有 4,951 行，继续拆分认证、广播、中继等模块
+  → main.py 当前仍有 4,925 行，继续拆分认证、广播、中继等模块
 ```
 
 ---
