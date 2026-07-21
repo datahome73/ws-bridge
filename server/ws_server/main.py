@@ -4566,6 +4566,7 @@ async def handler(ws):
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
 
 
+
 # ── Workspace Closing ──────────────────────────────────────────────
 
 async def _broadcast_workspace_closing(ws_id: str, force_finalize: bool = False) -> None:
