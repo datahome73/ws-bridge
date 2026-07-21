@@ -19,6 +19,7 @@ from typing import Optional
 from . import agent_card as ac_mod  # R67: unified Agent Card interface
 from server.common import auth, config, persistence
 from . import state  # R100: shared state container
+from . import scenario_matcher as _sm  # for _sm.dispatch() in handler()
 from . import message_store as ms
 from .audit import AuditLogger
 from . import task_store as ts
@@ -466,271 +467,93 @@ async def handler(ws):
                 del _connections[agent_id]
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
 
-async def _sm_handle_loopback(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 10: test ✅ loopback."""
-    from_name = msg.get("from_name", "?")
-    logger.info("🔄 Loopback test from %s (%s)", from_name, agent_id[:16])
-    try:
-        await _send(ws, {
-            "type": "broadcast",
-            "channel": f"_inbox:{agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"✅ test 确认 — 双向通信正常（{from_name}）",
-            "ts": time.time(),
-        })
-    except Exception as e:
-        logger.warning("R96: 回路测试回复失败: %s", e)
-    return True
 
 
-async def _sm_handle_to_agent(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 20: to_agent dispatch routing."""
-    to_agent = matched  # resolved by match_to_agent
-    # Validate agent_id format
-    if not _is_valid_agent_id(to_agent):
-        logger.warning("[Dispatch] 拒绝: 非法 to_agent=%s", to_agent)
-        return True
-    relay_payload = {
+# ── Workspace Closing ──────────────────────────────────────────────
+
+async def _broadcast_workspace_closing(ws_id: str, force_finalize: bool = False) -> None:
+    """Notify workspace members of impending close and wait for ACKs."""
+    resolved_workspace = ws_mod.get_workspace(ws_id)
+    if not resolved_workspace or resolved_workspace.state != ws_mod.WorkspaceState.CLOSING:
+        return
+
+    deadline_ts = time.time() + p.WORKSPACE_CLOSING_TIMEOUT
+    payload = json.dumps({
+        "type": p.MSG_WORKSPACE_CLOSING,
+        p.FIELD_WORKSPACE_ID: ws_id,
+        p.FIELD_REASON: "task_completed",
+        p.FIELD_DEADLINE_TS: deadline_ts,
+        p.FIELD_ACK_REQUIRED: True,
+    })
+
+    # Broadcast to all members
+    for agent_id in resolved_workspace.members:
+        for conn in list(_connections.get(agent_id, set())):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(payload)
+                elif hasattr(conn, "send"):
+                    await conn.send(payload)
+            except Exception:
+                pass
+
+    if force_finalize:
+        ws_mod.finalize_close(ws_id)
+        await _broadcast_workspace_archived(ws_id, resolved_workspace)
+        return
+
+    # Wait for ACKs with timeout
+    await asyncio.sleep(p.WORKSPACE_CLOSING_TIMEOUT)
+
+    # Force-close any unacked members
+    resolved_workspace = ws_mod.get_workspace(ws_id)
+    if resolved_workspace and resolved_workspace.state == ws_mod.WorkspaceState.CLOSING:
+        unacked = resolved_workspace.members - resolved_workspace.closing_acks
+        if unacked:
+            logger.warning("Workspace '%s': force-closing unacked members: %s", ws_id, unacked)
+            for aid in unacked:
+                resolved_workspace.closing_acks.add(aid)
+        ws_mod.finalize_close(ws_id)
+        await _broadcast_workspace_archived(ws_id, resolved_workspace)
+
+
+# ── Broadcast Workspace Archived ──────────────────────────────────
+
+
+async def _broadcast_workspace_archived(ws_id: str, resolved_workspace=None) -> None:
+    """Broadcast that workspace has been archived — Web UI uses to regroup tab."""
+    if resolved_workspace is None:
+        resolved_workspace = ws_mod.get_workspace(ws_id)
+    if not resolved_workspace:
+        return
+    # R82: removed active channel reset — bot uses inbox only
+    logger.info("R82: Workspace '%s' archived — no channel reset", ws_id)
+    arch_payload = json.dumps({
         "type": "broadcast",
-        "channel": f"_inbox:{to_agent}",
+        "channel": ws_id,
         "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": msg.get("content", "").strip(),
-        "ts": time.time(),
-    }
-    # R109: persist relay message
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="broadcast",
-            from_agent=state.SYSTEM_AGENT_ID,
-            from_name="系统",
-            content=relay_payload["content"],
-            ts=relay_payload["ts"],
-            data_dir=config.DATA_DIR,
-            channel=relay_payload["channel"],
-        )
-    except Exception:
-        pass
-    await _send_to_agent(to_agent, relay_payload)
-    logger.info("[Dispatch] %s → %s: %s...",
-                 agent_id[:12], to_agent[:16],
-                 (msg.get("content") or "")[:60])
-    return True
-
-
-async def _sm_handle_hash(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 30: ## commands → scenario_matcher.handle_hash_cmd."""
-    return await _sm.handle_hash_cmd(ws, agent_id, msg, matched)
-
-
-async def _sm_handle_query(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 25: ##query commands → scenario_matcher.handle_query."""
-    return await _sm.handle_query(ws, agent_id, msg, matched)
-
-
-async def _sm_handle_step(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 28: ##step commands → scenario_matcher.handle_step."""
-    return await _sm.handle_step(ws, agent_id, msg, matched)
-
-
-async def _sm_handle_ack(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 40: 收到 ✅ / ACK ✅ → forward to PM."""
-    content = (msg.get("content") or "").strip()
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    if pm_agent_id:
-        await _send_to_agent(pm_agent_id, {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"📬 {sender_name} 已接活:\n{content}",
-            "ts": time.time(),
-        })
-    logger.info("[Relay] ACK: %s → PM", sender_name)
-    return True
-
-
-async def _sm_handle_complete(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 50: 已完成 ✅ / ✅ 完成 → forward PM + auto-confirm + advance."""
-    content = (msg.get("content") or "").strip()
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    # Forward to PM
-    if pm_agent_id:
-        await _send_to_agent(pm_agent_id, {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"✅ {sender_name} 任务完成:\n{content}",
-            "ts": time.time(),
-        })
-    # Auto-confirm to bot
-    await _send_to_agent(agent_id, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": "✅ 确认，已收到你的完成通知.本轮任务完成.",
+        "content": f"workspace {ws_id} 已归档",
+        "_workspace_event": "archived",
+        "workspace_id": ws_id,
         "ts": time.time(),
     })
-    logger.info("[Relay] 完成: %s → PM + 自动确认", sender_name)
-    _ensure_engine().try_advance(content, agent_id)
-    return True
+    for agent_id in resolved_workspace.members:
+        for conn in list(_connections.get(agent_id, set())):
+            try:
+                if hasattr(conn, "send_str"):
+                    await conn.send_str(arch_payload)
+                elif hasattr(conn, "send"):
+                    await conn.send(arch_payload)
+            except Exception:
+                pass
 
 
-async def _sm_handle_reject(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 60: 退回 🔄 → forward PM + auto-confirm + rollback."""
-    content = (msg.get("content") or "").strip()
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    if pm_agent_id:
-        await _send_to_agent(pm_agent_id, {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"🔄 {sender_name} 退回:\n{content}",
-            "ts": time.time(),
-        })
-    await _send_to_agent(agent_id, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": "🔄 已记录退回.",
-        "ts": time.time(),
-    })
-    logger.info("[Relay] 退回: %s → PM + 自动确认", sender_name)
-    asyncio.ensure_future(_ensure_engine().handle_reject(content, agent_id))
-    return True
+# ═══════════════════════════════════════════════════════════════════════
+# R126: scenario_matcher rule registration
+# ═══════════════════════════════════════════════════════════════════════
 
 
-async def _sm_handle_fail(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 70: 失败 ❌ → forward PM + auto-confirm."""
-    content = (msg.get("content") or "").strip()
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    pm_agent_id = config.DISPATCH_SENDER_ID or config.PIPELINE_PM_AGENT_ID
-    if pm_agent_id:
-        await _send_to_agent(pm_agent_id, {
-            "type": "broadcast",
-            "channel": f"_inbox:{pm_agent_id}",
-            "from_name": "系统",
-            "from_agent": state.SYSTEM_AGENT_ID,
-            "content": f"⚠️ {sender_name} 失败:\n{content}",
-            "ts": time.time(),
-        })
-    await _send_to_agent(agent_id, {
-        "type": "broadcast",
-        "channel": f"_inbox:{agent_id}",
-        "from_name": "系统",
-        "from_agent": state.SYSTEM_AGENT_ID,
-        "content": "⚠️ 已记录失败.",
-        "ts": time.time(),
-    })
-    logger.info("[Relay] 失败: %s → PM + 自动确认", sender_name)
-    return True
-
-
-async def _sm_handle_catchall(ws, agent_id: str, msg: dict, matched) -> bool:
-    """Rule 90: no match → store silently."""
-    content = (msg.get("content") or "").strip()
-    sender_name = state._r72_users.get(agent_id, {}).get("name", agent_id[:12])
-    channel = msg.get("channel", "")
-    try:
-        ms.save_message(
-            msg_id=str(uuid.uuid4()),
-            msg_type="message",
-            channel=channel,
-            from_agent=agent_id,
-            from_name=sender_name,
-            content=content,
-            ts=time.time(),
-            data_dir=config.DATA_DIR,
-        )
-    except Exception:
-        pass
-    logger.info("[Relay] 沉默: %s 内容=%s...", sender_name, content[:60])
-    return True
-
-
-# ── Register all rules ──────────────────────────────────────────────
-
-from . import scenario_matcher as _sm
-
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_loopback,
-    handle=_sm_handle_loopback,
-    priority=10,
-    name="回路测试",
-    protocol_ref="§7.1",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_to_agent,
-    handle=_sm_handle_to_agent,
-    priority=20,
-    name="to_agent派活路由",
-    protocol_ref="§7.2",
-))
-# ── R131: ##query commands (rule 25) ──
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_query,
-    handle=_sm_handle_query,
-    priority=25,
-    name="##query命令",
-    protocol_ref="§R131",
-))
-# ── R132: ##step commands (rule 28) ──
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_step,
-    handle=_sm_handle_step,
-    priority=28,
-    name="##step命令",
-    protocol_ref="§R132",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_hash_cmd,
-    handle=_sm_handle_hash,
-    priority=30,
-    name="##命令路由",
-    protocol_ref="§7.3",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_ack,
-    handle=_sm_handle_ack,
-    priority=40,
-    name="ACK转发",
-    protocol_ref="§7.5",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_complete,
-    handle=_sm_handle_complete,
-    priority=50,
-    name="完成确认",
-    protocol_ref="§7.6",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_reject,
-    handle=_sm_handle_reject,
-    priority=60,
-    name="退回回退",
-    protocol_ref="§7.7",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_fail,
-    handle=_sm_handle_fail,
-    priority=70,
-    name="失败告警",
-    protocol_ref="§7.8",
-))
-_sm.register_rule(_sm.HandlerRule(
-    match=_sm.match_catchall,
-    handle=_sm_handle_catchall,
-    priority=90,
-    name="入库留痕",
-    protocol_ref="§7.10",
-))
+# ── Register rules (R139: extracted to scenario_rules.py) ──────────
+from .scenario_rules import register_all_rules
+register_all_rules()
 

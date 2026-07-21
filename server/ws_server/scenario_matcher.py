@@ -512,7 +512,8 @@ async def handle_query(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             f"📛 名称: {name}\n"
             f"🎚️ 级别: L{level}")
     elif sub_cmd == "status":
-        reply = await _format_pipeline_status(params, _main)
+        from . import main as _main_lazy  # lazy import at use site
+        reply = await _format_pipeline_status(params, _main_lazy)
         await _send_reply(ws, agent_id, reply)
     elif sub_cmd == "agents":
         reply = _format_agent_list()
