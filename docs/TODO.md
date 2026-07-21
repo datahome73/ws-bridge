@@ -74,6 +74,7 @@
 | B-3 | **`##status` 显示 bug：`in_progress` 状态无对应图标** — `_auto_dispatch` 将 step 状态设为 `"in_progress"`，但 `_handle_hash_status` 的 `status_icons` 映射表缺少 `"in_progress"` key，导致已派活的 step 仍显示 `⬜`（与 pending 混淆）。修复：`status_icons["in_progress"] = "🔄"` 一行 | 🟡 P2 | 待分配 | ⬜ 待修复 |
 | B-4 | **Bot 完成消息格式容错不足** — `_try_advance_pipeline` 以严格正则 `r"已完成 ✅ R(\d+) Step (\d+)"` 匹配完成消息，bot 格式稍有偏差（标点/空格/前缀差异）即静默忽略，不推进、不报错、不通知。修复建议：增加模糊匹配（re.search + 容差），不匹配时提示 bot 正确格式 | 🟡 P2 | R128 | ⬜ 待修复 |
 | B-5 | **R141 自动推进 Step 2 完成后重复派活** — Step 2 完成后系统发了 2 条消息：正确派活给 Step 3（爱泰），但同时又给 Step 2 重复发了一条。推测 `_try_advance_pipeline` 或完成检测被触发了两次 | 🔴 P1 | R141 | ⬜ 待排查 |
+| R-1 | **去除 Step 超时提醒（无用噪音）** — Step 超时后重复派活消息无意义（实际已推进到后续步骤），管线状态更新滞后。建议：要么修管线状态同步，要么直接去掉超时提醒 | 🟢 P3 | 下轮 | ⬜ 待排期 |
 | C-1 | **R127: `engine` 变量永远为 None，所有 ## 命令无声失败** — `main.py` 模块级 `engine: Optional[PipelineEngine] = None` 在 scenario_matcher 引用时可能未初始化，导致 ##start/status/stop/advance 全部无声失败 | 🔴 Critical | R128 | ⬜ 待修复 |
 | C-3 | **R127: `engine._retry_loop()` 在 engine=None 时崩溃** — `__main__.py` on_startup 直接引用 `engine._retry_loop()` 而未先确保 engine 已初始化，容器启动即挂 | 🔴 Critical | R128 | ⬜ 待修复 |
 
