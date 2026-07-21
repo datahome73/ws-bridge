@@ -170,10 +170,10 @@ reply = await _format_pipeline_status(params, _main_lazy)
 | T5 | `##step##complete` 正常 | 步骤完成 | P0 |
 | T6 | `##start##R{N}` 正常启动 | 创建管线 + 派活 Step 1 | P0 |
 | T7 | `##stop##R{N}` 正常停止 | 管线停止 | P0 |
-| T8 | `收到 ✅` / `ACK ✅` 转发正常 | ACK → PM 收到通知 | P0 |
+| T8 | `收到 ✅` / `ACK ✅` 转发正常 | ACK → 管线协调者收到通知 | P0 |
 | T9 | `已完成 ✅` 自动推进正常 | 完成 → 推进到下一步 | P0 |
 | T10 | `退回 🔄` 驳回回退正常 | 退回 → rollback | P0 |
-| T11 | `失败 ❌` 告警正常 | 失败 → PM 收到告警 | P1 |
+| T11 | `失败 ❌` 告警正常 | 失败 → 管线协调者收到告警 | P1 |
 | T12 | 兜底入库（规则 90）正常 | 无匹配消息 → 静默入库 | P1 |
 | T13 | inbox 单播正常 | `_inbox:{bot_id}` 发消息 → 目标收到 | P0 |
 
@@ -193,7 +193,7 @@ reply = await _format_pipeline_status(params, _main_lazy)
 |:--------|:-----|
 | 重命名 `_sm_handle_*()` 函数 | 保持接口不变，零行为变更 |
 | 修改 match 函数签名 | 不影响匹配逻辑 |
-| 统一/优化回调函数逻辑（如 ACK/完成/退回的 PM 通知有重复代码） | 纯提取轮，不重构不优化 |
+| 统一/优化回调函数逻辑（如 ACK/完成/退回的协调者通知有重复代码） | 纯提取轮，不重构不优化 |
 | 修改 scenario_matcher 的 dispatch 逻辑 | 规则表路由不变 |
 | 修改 handle_broadcast 路由逻辑 | 不变 |
 
