@@ -99,6 +99,16 @@ def match_loopback(content: str, msg: dict, agent_id: str) -> Any:
         return True
     return False
 
+def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 35: PM safety guard — detect messages targeted at _inbox:server."""
+    channel = (msg.get("channel") or "").strip()
+    to_agent = (msg.get("to_agent") or msg.get("to") or "").strip()
+    if channel == "_inbox:server" or to_agent == "_inbox:server":
+        return True
+    if channel.startswith("_inbox:") and agent_id and channel != f"_inbox:{agent_id}":
+        return True
+    return False
+
 def match_to_agent(content: str, msg: dict, agent_id: str) -> Any:
     """Rule 20: to_agent dispatch routing."""
     to_agent = (msg.get("to_agent") or "").strip()
@@ -159,8 +169,15 @@ def match_exclamation(content: str, msg: dict, agent_id: str) -> Any:
     return False
 
 def match_catchall(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 90: catch-all — store silently."""
+    """Rule 80: Catchall — always returns True."""
     return True
+
+
+def match_exclamation(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 50: ! commands."""
+    if content.startswith("!"):
+        return content
+    return False
 
 
 # ── R131: ##query match ──────────────────────────────────────────────
@@ -398,7 +415,7 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
             "`##status##R{N}` — 查询管线状态\n"
             "`##stop##R{N}` — 停止管线\n"
-            "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+            "`##advance##R{N}##step=N` — 手动推进到下一步（L4可用）\n"
             "`##archive##R{N}` — 归档管线（PM使用）\n"
             "`##help` — 显示本帮助"
         )
@@ -424,7 +441,8 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
     elif cmd == "stop":
         return await _main._handle_hash_stop(round_name, agent_id, ws)
     elif cmd == "advance":
-        return await _main._handle_hash_advance(round_name, kv, agent_id, ws)
+        engine = _e2._ensure_engine()
+        return await engine.handle_hash_advance(round_name, kv, agent_id, ws)
     elif cmd == "archive":
         return await _main._handle_hash_archive(round_name, agent_id, ws)
     elif cmd == "help":
@@ -433,7 +451,7 @@ async def handle_hash_cmd(ws, agent_id: str, msg: dict, matched: Any) -> bool:
             "`##start##R{N}##k=v` — 创建管线 + 派活 Step 1\n"
             "`##status##R{N}` — 查询管线状态\n"
             "`##stop##R{N}` — 停止管线\n"
-            "`##advance##R{N}##step=N` — 手动推进到下一步（PM使用）\n"
+            "`##advance##R{N}##step=N` — 手动推进到下一步（L4可用）\n"
             "`##archive##R{N}` — 归档管线（PM使用）\n"
             "`##help` — 显示本帮助"
         )
