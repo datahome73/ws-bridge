@@ -156,8 +156,15 @@ def match_fail(content: str, msg: dict, agent_id: str) -> Any:
     return False
 
 def match_catchall(content: str, msg: dict, agent_id: str) -> Any:
-    """Rule 90: catch-all — store silently."""
+    """Rule 80: Catchall — always returns True."""
     return True
+
+
+def match_exclamation(content: str, msg: dict, agent_id: str) -> Any:
+    """Rule 50: ! commands."""
+    if content.startswith("!"):
+        return content
+    return False
 
 
 # ── R131: ##query match ──────────────────────────────────────────────
