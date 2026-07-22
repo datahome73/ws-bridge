@@ -108,6 +108,7 @@ def match_pm_guard(content: str, msg: dict, agent_id: str) -> Any:
     to_agent = (msg.get("to_agent") or msg.get("to") or "").strip()
 
     # ── R141 fix: only block the PM, let other bots through ──
+    # (deployed 2026-07-21)
     pm_id = None
     try:
         from server.common import config as _cfg

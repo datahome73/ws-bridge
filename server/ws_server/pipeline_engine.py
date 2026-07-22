@@ -357,6 +357,41 @@ def _extract_artifact_kv(content: str) -> dict[str, str]:
 
 
 
+# ═══ R142: 容错完成消息匹配 ═══
+def _try_extract_step_completion(content: str) -> tuple[Optional[int], Optional[int], dict]:
+    """多模式容错匹配完成消息，提取 R{N}、Step {N} 和 ##key=value 参数。"""
+    patterns = [
+        r"已完成\s*✅?\s*R(\d+)\s*Step\s*(\d+)",
+        r"✅\s*完成.*?R(\d+).*?Step\s*(\d+)",
+        r"R(\d+)\s*Step\s*(\d+).*?(?:完成|已推|done)",
+        r"已完成.*?R(\d+).*?Step\s*(\d+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, content, re.IGNORECASE)
+        if m:
+            round_num = int(m.group(1))
+            step_num = int(m.group(2))
+            kv = _extract_artifact_kv(content)
+            return round_num, step_num, kv
+    return None, None, {}
+
+# ═══ R142: 完成消息格式提示 ═══
+async def _send_format_hint(agent_id: str) -> None:
+    """向 bot 发送完成消息格式提示。"""
+    await _send_to_agent(agent_id, {
+        "type": "broadcast",
+        "channel": f"_inbox:{agent_id}",
+        "from_name": "系统",
+        "from_agent": state.SYSTEM_AGENT_ID,
+        "content": (
+            "❌ 完成消息格式不识别。请使用以下格式之一：\n"
+            "  ✅ 已完成 ✅ R142 Step 3##sha=xxx\n"
+            "  ✅ ✅ 完成，R142 Step 3 已推 dev"
+        ),
+        "ts": time.time(),
+    })
+# ═══════════════════════════════
+
 # ── Extracted from main.py L679-792: def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]: ──
 def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
     """Parse 已完成 ✅ R{N} Step {N} and auto-advance pipeline context.
@@ -364,11 +399,16 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
     Returns:
         (True, "round_name") on success, (False, reason) on skip.
     """
-    m = re.match(r"已完成 ✅ R(\d+) Step (\d+)", content)
-    if not m:
+    _rn, _sn, _kv_comp = _try_extract_step_completion(content)
+    if _rn is None:
+        # ═══ R142: 格式提示（F-7）═══
+        _lower = content.lower()
+        if any(kw in _lower for kw in ("完成", "done", "推", "push", "merge", "deploy")):
+            asyncio.ensure_future(_send_format_hint(agent_id))
+        # ══════════════════════════
         return False, "no match"
-    round_name = f"R{m.group(1)}"
-    completed_step = int(m.group(2))
+    round_name = f"R{_rn}"
+    completed_step = _sn
     try:
         mgr = _ensure_pipeline_manager()
         ctx = mgr.get(round_name)
@@ -378,8 +418,8 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
         old_step = ctx.current_step
         # Only advance if completed_step matches current_step
         if completed_step == old_step:
-            # ═══ R115: 提取 ##key=value 并注入 artifacts ═══
-            _kv = _extract_artifact_kv(content)
+            # ═══ R142: 使用 _try_extract_step_completion 返回的 kv ═══
+            _kv = _kv_comp
             if _kv:
                 _step_key = f"step{completed_step}"
                 if not hasattr(ctx, 'artifacts') or not ctx.artifacts:
@@ -404,6 +444,7 @@ def _try_advance_pipeline(content: str, agent_id: str) -> tuple[bool, str]:
                 _step_info["output"] = _output if _output else None
                 _step_info["result_msg"] = content[:200]
                 _step_info["status"] = "done"
+                _step_info["completed_at"] = time.time()  # ═══ R142: 记录完成时间 ═══
                 try:
                     mgr.save()
                 except Exception:
@@ -496,8 +537,12 @@ async def _notify_pm(ctx: PipelineContext, step_num: int, status: str, detail: s
         for i, s in enumerate(ctx.steps, 1):
             role = role_names.get(i, "?")
             agent = s.get("agent_name", s.get("agent_id", "?")[:12])
-            out = s.get("output", s.get("result_msg", ""))
-            out_short = out[:40] + "..." if len(str(out)) > 40 else out
+            out = s.get("output") or {}
+            if isinstance(out, dict):
+                sha = out.get("sha", "")
+                out_short = f"sha={sha[:12]}" if sha else "-"
+            else:
+                out_short = str(out)[:40]
             step_lines.append(f"| {i} | {role} | {agent} | {out_short} |")
         table_header = "| Step | 角色 | 执行者 | 产出 |\n|:---:|:-----|:-------|:-----|\n"
         content = (
@@ -1561,6 +1606,7 @@ async def _handle_hash_status(round_name: str, agent_id: str, ws) -> bool:
     status_icons = {
         "pending": "⬜",
         "active": "🟢",
+        "in_progress": "🔄",   # R142 新增
         "done": "✅",
         "failed": "❌",
         "skipped": "⏭",
@@ -1582,6 +1628,21 @@ async def _handle_hash_status(round_name: str, agent_id: str, ws) -> bool:
         role = step.get("role", "?")
         name = step_names.get(role, role)
         step_lines.append(f"  Step {step_num}: {icon} {name}")
+    # ═══ R142: 状态证据 ═══
+    for step in ctx.steps:
+        evidence_parts = []
+        st = step.get("status", "pending")
+        if st == "done" and step.get("completed_at"):
+            evidence_parts.append(f"完成于: {_fmt_ts(step['completed_at'])}")
+        if st == "in_progress" and step.get("dispatched_at"):
+            elapsed = int(time.time() - step["dispatched_at"])
+            evidence_parts.append(f"已进行: {elapsed//60}分{elapsed%60}秒")
+        if step.get("result_msg"):
+            msg_snippet = step["result_msg"][:60].replace("\n", " ")
+            evidence_parts.append(f"消息: {msg_snippet}")
+        if evidence_parts:
+            step_lines.append("  " + " | ".join(evidence_parts))
+    # ══════════════════════
 
     status_text = (
         f"📊 **{round_name} 管线状态**\n"
