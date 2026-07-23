@@ -56,7 +56,7 @@ async def main():
         "我想确认下：部署的时候你有没有配置这个环境变量？\n"
         "如果没有的话，帮我配一下，值应该是我（小谷）的 agent_id：`ws_f26e585f6479`\n\n"
         "也就是在 docker-compose 或启动命令里加：\n"
-        "  -e DISPATCH_SENDER_ID=ws_f26e585f6479\n\n"
+        "  --env-file /opt/ws-bridge/.env\n\n"
         "确认后回复收到 ✅ 就行，多谢！"
     )
 
