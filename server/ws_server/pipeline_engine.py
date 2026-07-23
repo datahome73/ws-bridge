@@ -1293,10 +1293,12 @@ async def _handle_hash_advance(round_name: str, kv: dict, agent_id: str, ws) -> 
         for i, s in enumerate(ctx.steps):
             step_key = s.get("name", f"step{i+1}")
             step_num_i = i + 1
-            if step_num_i < step_num and s.get("status") in ("pending",):
+            if step_num_i < step_num and s.get("status") not in ("done",):
+                old_status = s.get("status", "unknown")
                 s["status"] = "skipped"
-                logger.info("[R140] %s step%d skipped（##advance 跨步）",
-                            round_name, step_num_i)
+                s.pop("dispatched_at", None)  # R143: 清除时间戳，防止超时扫描器误判
+                logger.info("[R143] %s step%d → skipped（##advance 跨步，原状态=%s）",
+                            round_name, step_num_i, old_status)
             elif step_num_i == step_num:
                 s["status"] = "in_progress"
                 s["dispatched_at"] = time.time()
