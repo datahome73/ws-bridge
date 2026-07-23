@@ -588,8 +588,7 @@ class WSBridgeAdapter(BasePlatformAdapter):
 
         # R82+ inbox routing: redirect reply to sender's inbox
         from_agent = raw_msg.get("from_agent") or raw_msg.get("agent_id") or ""
-        from_name = raw_msg.get("from_name", "")
-        if broadcast_channel.startswith("_inbox:") and from_agent and from_name != "系统":
+        if broadcast_channel.startswith("_inbox:") and from_agent:
             broadcast_channel = f"_inbox:{from_agent}"
             logger.warning(
                 "[WSBridge] Inbox redirect: %s → %s (reply to sender's inbox)",
