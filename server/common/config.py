@@ -105,7 +105,7 @@ PIPELINE_TIMEOUT_SCAN_INTERVAL: int = int(
     os.environ.get("R122_TIMEOUT_SCAN_INTERVAL", "300")
 )
 # ── R130: 状态栏 Agent 白名单 ──────────────────────────────
-AGENT_WHITELIST: set[str] = {"小爱", "小谷", "小开", "爱泰", "小周", "泰虾", "经理"}
+AGENT_WHITELIST: set[str] = {"小爱", "小谷", "小开", "爱泰", "小周", "泰虾", "经理", "晓周"}
 # ── R124: Step 产出基本验证（默认关闭，0=off 1=on）───
 PIPELINE_OUTPUT_VERIFICATION: bool = os.environ.get("PIPELINE_OUTPUT_VERIFICATION", "0") == "1"
 DISPATCH_SENDER_ID: str = os.environ.get(
