@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""R100: WS message handler core — extracted from handler.py (renamed to main.py).
+"""WS message handler core — extracted from handler.py (renamed to main.py).
 
 This file was created by splitting the original handler.py (7,024 lines)
 into state.py + command_utils.py + commands/ + main.py.
@@ -14,25 +14,74 @@ import time
 import uuid
 from typing import Optional
 
-from . import agent_card as ac_mod  # R67: unified Agent Card interface
-from server.common import auth, config, persistence
-from . import state  # R100: shared state container
-from . import scenario_matcher as _sm  # for _sm.dispatch() in handler()
-from . import message_store as ms
-from .audit import AuditLogger
-from .pipeline_context import PipelineContextManager, PipelineStatus, PipelineTaskKind, PipelineContext  # R77
-from .scenario_rules import register_all_rules  # R139: rule registration
-_card_watcher = None  # R100: module-level for _ensure_card_watcher()
 import shared.protocol as p
+
+from server.common import auth, config, persistence
+
+from . import agent_card as ac_mod  # unified Agent Card interface
+from . import message_store as ms
+from . import scenario_matcher as _sm  # for _sm.dispatch() in handler()
+from . import state  # shared state container
+from .ack_machine import (
+    ACK_TIMEOUT_SEC,
+    _ack_timeout_task,
+    _channel_ack_timeout,
+    _format_ack_status,
+    _resolve_ws_by_ack_task_id,
+    _send_ack_timeout_info,
+    _task_ack_timeout,
+    _trigger_ack_escalation,
+)
+from .audit import AuditLogger
+from .connection_manager import (
+    _build_admin_notification,
+    _build_registration_welcome,
+    _connections,
+    _find_agent_by_name,
+    _force_disconnect_revoked_agent,
+    _is_valid_agent_id,
+    _send,
+    _send_to_agent,
+    _should_notify_admins,
+    _update_agent_online_status,
+    get_connections,
+    handle_agent_card_register,
+    handle_auth,
+    handle_register,
+)
+from .git_sync_scheduler import (
+    _ensure_git_scan,
+    _pipeline_git_sync_scan,
+    _start_git_sync_loop,
+)
+from .pipeline_context import PipelineContext, PipelineContextManager, PipelineStatus, PipelineTaskKind
 from .pipeline_engine import PipelineEngine
+from .pipeline_timeout import (
+    _ensure_timeout_scanner,
+    _pipeline_timeout_scan,
+    _start_timeout_scan_loop,
+)
+from .scenario_rules import register_all_rules  # rule registration
+from .watchdog import (
+    _check_watchdog_alert,
+    _clear_watchdog_alert,
+    _elapsed_hours_display,
+    _ensure_watchdog,
+    _get_step_timeout,
+    _send_clear_alert,
+    _send_watchdog_alert,
+    _trigger_timeout_escalation,
+    _watchdog_loop,
+    _watchdog_rerollcall,
+    _watchdog_scan,
+)
 
+_card_watcher = None  # module-level for _ensure_card_watcher()
 logger = logging.getLogger("ws-bridge")
-
-from .connection_manager import _connections
-# P6: message send stats
 _audit_logger = AuditLogger(config.DATA_DIR)
 # ── PipelineEngine 实例（惰性初始化） ──
 engine: Optional[PipelineEngine] = None
+
 
 def _ensure_engine() -> PipelineEngine:
     global engine
@@ -54,23 +103,23 @@ def _ensure_engine() -> PipelineEngine:
             extract_artifact_kv=_extract_artifact_kv,
         )
         # ── 注入 engine 引用到 scenario_matcher ──
-        from . import scenario_matcher as _sm
         _sm._engine = _ensure_engine()
     return engine
+
+
 def _ensure_pipeline_manager() -> PipelineContextManager:
     """惰性初始化 PipelineContextManager."""
     if state._pipeline_manager is None:
         state._pipeline_manager = PipelineContextManager(data_dir=config.DATA_DIR)
     return state._pipeline_manager
-from .connection_manager import get_connections
 
 
-# ── R99/100: Role-Agent Map Refresh (migrated from command_utils.py) ──
 logger_cu = logging.getLogger(__name__)
 
+
+# ── Role-Agent Map Refresh ──
 def _refresh_role_agent_map() -> None:
     """Rebuild state._ROLE_AGENT_MAP from Agent Card pipeline_roles."""
-    from . import agent_card as ac_mod
     cards = ac_mod.get_all_cards()
     state._ROLE_AGENT_MAP = {}
     for aid, card in cards.items():
@@ -80,19 +129,18 @@ def _refresh_role_agent_map() -> None:
                 state._ROLE_AGENT_MAP[role] = []
             if aid not in state._ROLE_AGENT_MAP[role]:
                 state._ROLE_AGENT_MAP[role].append(aid)
-    logger_cu.info("R63 role-agent map refreshed: %d roles, %d entries",
+    logger_cu.info("role-agent map refreshed: %d roles, %d entries",
                 len(state._ROLE_AGENT_MAP),
                 sum(len(v) for v in state._ROLE_AGENT_MAP.values()))
-    # R78 A2: 同步写到 Manager 全局快照
+    # 同步写到 Manager 全局快照
     try:
-        from .pipeline_context import PipelineContextManager
         mgr = PipelineContextManager.get_instance()
         mgr.set_global_role_map(dict(state._ROLE_AGENT_MAP))
     except Exception:
         pass
 
 
-# ── _broadcast_to_channel (migrated from command_utils.py) ──
+# ── _broadcast_to_channel ──
 async def _broadcast_to_channel(channel: str, payload: dict) -> int:
     """向指定频道的所有连接广播消息。返回发送数。同时持久化。"""
     payload_json = json.dumps(payload)
@@ -123,29 +171,15 @@ async def _broadcast_to_channel(channel: str, payload: dict) -> int:
         pass
     return sent
 
-from .connection_manager import (
-    _force_disconnect_revoked_agent,
-    _send,
-    handle_auth,
-    _update_agent_online_status,
-    _find_agent_by_name,
-    handle_register,
-    _build_registration_welcome,
-    _build_admin_notification,
-    _should_notify_admins,
-    handle_agent_card_register,
-)
-
 
 def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
     """Persist a broadcast message to message store and chat log.
 
-    R41 D: Ensures rollcall and other WS-send-only paths have proper
+    Ensures rollcall and other WS-send-only paths have proper
     persistence (message_store + chat_log) for offline members and web UI.
     """
     try:
-        import uuid as _uuid
-        msg_id = str(_uuid.uuid4())
+        msg_id = str(uuid.uuid4())
         ms.save_message(
             msg_id=msg_id, msg_type="broadcast",
             from_agent="系统", from_name=from_name,
@@ -156,10 +190,7 @@ def _persist_broadcast(channel: str, from_name: str, content_text: str) -> None:
         pass
 
 
-
-# ── R49 B: Agent Card persistence ──────────────────────────────────────
-
-
+# ── Agent Card persistence ──
 def _get_agent_display(agent_id: str) -> str:
     """统一 agent 显示名：display_name > name > role > agent_id[:12]"""
     cards = ac_mod.get_all_cards()
@@ -173,6 +204,7 @@ def _get_agent_display(agent_id: str) -> str:
     if u.get("role"):
         return u["role"]
     return agent_id[:12]
+
 
 def _ensure_agent_cards_loaded() -> None:
     """Ensure agent cards are loaded and role map is built at startup.
@@ -198,62 +230,6 @@ def _ensure_card_watcher() -> None:
     _card_watcher.start()
 
 
-    pass  # _ensure_watchdog extracted to watchdog.py
-
-# ── R65 A2: Git sync lifecycle ──────────────────────────────────
-from .git_sync_scheduler import (
-    _ensure_git_scan,
-    _start_git_sync_loop,
-    _pipeline_git_sync_scan,
-)
-
-# ═══ R122: 管线超时告警扫描 ════
-from .pipeline_timeout import (
-    _ensure_timeout_scanner,
-    _start_timeout_scan_loop,
-    _pipeline_timeout_scan,
-)
-
-
-
-# ── R43: Watchdog ────────────────────────────────────────────────
-from .watchdog import (
-    _ensure_watchdog,
-    _watchdog_loop,
-    _watchdog_scan,
-    _get_step_timeout,
-    _trigger_timeout_escalation,
-)
-
-
-# ── R63 Phase 4: ACK state machine ──────────────────────────────
-from .ack_machine import (
-    ACK_TIMEOUT_SEC,
-    _ack_timeout_task,
-    _send_ack_timeout_info,
-    _trigger_ack_escalation,
-    _format_ack_status,
-)
-
-
-from .watchdog import (
-    _check_watchdog_alert,
-    _clear_watchdog_alert,
-    _elapsed_hours_display,
-    _send_watchdog_alert,
-    _watchdog_rerollcall,
-    _send_clear_alert,
-)
-# ── R55 C: Git commit verification ──────────────────────────
-
-
-
-
-# ═══ R119: 启动时恢复活跃管线的自动派活 ═══
-
-
-# ════════════════════════════════════════════════════════════
-
 async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     """Admin-relay mode:
     - Non-admin (member) → relay ONLY to admin(s)
@@ -261,22 +237,22 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
     - All messages → written to chat log (大宏/网页端可见)
     - Channel messages (non-lobby) → scoped to workspace members + admin
     """
-    # ── R43 A: Lazy-start watchdog on first message ──
+    # Lazy-start watchdog on first message
     _ensure_watchdog()
-    # R49 C: Restore pipeline timers on start
+    # Restore pipeline timers on start
     await _ensure_engine().restore_pipeline_timers()
-    # ── R65 A2: Start git sync loop (via PipelineEngine) ──
+    # Start git sync loop (via PipelineEngine)
     _ensure_engine()._ensure_git_scan()
-    # ── R122: Start timeout scanner (via PipelineEngine) ──
+    # Start timeout scanner (via PipelineEngine)
     _ensure_engine()._ensure_timeout_scanner()
-    # ── R67 B1: Ensure agent cards loaded + watcher running ──
+    # Ensure agent cards loaded + watcher running
     _ensure_agent_cards_loaded()
     _ensure_card_watcher()
 
     content = msg.get("content", "")
     channel = msg.get(p.FIELD_CHANNEL, "")
 
-    # R82 A1: Inbox fast path — skip all filters and routing
+    # Inbox fast path — skip all filters and routing
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
         # _inbox:server → handled by scenario matcher (rules handle it)
         if channel == f"{p.INBOX_CHANNEL_PREFIX}server":
@@ -285,26 +261,25 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         # Fall through to normal inbox handling below
 
     users = auth.get_users()
-    # R72: R72 agents live in state._r72_users, not in users
+    # R72 agents live in state._r72_users, not in users
     sender_name = users.get(sender_id, {}).get("name") or \
                   state._r72_users.get(sender_id, {}).get("name", sender_id)
 
-    # ── R68 A2: Inbox channel intercept ──
+    # Inbox channel intercept
     if channel.startswith(p.INBOX_CHANNEL_PREFIX):
         owner_id = persistence.resolve_inbox_owner(channel)
         if not owner_id:
             await _send(ws, {"type": "error", "error": "❌ 无效的收件箱通道"})
             return
 
-        # 权限：不允许向自己的收件箱发消息（防自刷）
-        # 其他人均可写收件箱（回复路由）
+        # 不允许向自己的收件箱发消息（防自刷）
         if sender_id == owner_id:
             await _send(ws, {"type": "error", "error": "❌ 不允许向自己的收件箱发消息"})
             return
 
-        # 仅投递给目标 agent（单播，不广播给其他人）
+        # 仅投递给目标 agent（单播）
         targets = [(aid, conns) for aid, conns in _connections.items() if aid == owner_id]
-        # 持久化到 DB（R84: 确保 inbox 消息有完整 from_name/to_name 字段）
+        # 持久化到 DB
         ms.save_message(
             msg_id=str(uuid.uuid4()), msg_type="broadcast",
             from_agent=sender_id, from_name=sender_name,
@@ -334,57 +309,6 @@ async def handle_broadcast(ws, sender_id: str, msg: dict) -> None:
         return
 
 
-# ── R12 P0.3: Task ack timeout ────────────────────────────────────
-from .ack_machine import (
-    _task_ack_timeout,
-    _channel_ack_timeout,
-    _resolve_ws_by_ack_task_id,
-)
-
-
-# ── R87: _inbox:server 中继转发 ─────────────────────────────
-
-
-from .connection_manager import (
-    _is_valid_agent_id,
-    _send_to_agent,
-)
-
-
-# ═══════════════════════════════════════════════════════════════
-# R115: ## 键值对提取 — 从完成消息中解析产出上下文
-# ═══════════════════════════════════════════════════════════════
-
-
-# ── R118: PM 通知函数 ──────────────────────────────────
-
-
-# ── R118: 离线重试队列 ──────────────────────────────────
-
-# ── R107: 消息模板渲染 ──────────────────────────────────
-
-
-
-
-
-
-
-# ═══ R124: 远程 git SHA 验证 ──────────────────────
-
-# ═══ R124: 驳回管线状态回退 ═══
-# ════════════════════════════════════════════════════════════════
-# R111: ## 命令 — 简洁可靠的自动派活入口
-# ════════════════════════════════════════════════════════════════
-
-
-
-
-# ═══ R124: 手动归档 ─────────────────────────────
-
-# ═══ R124: 管线自动归档 ═══
-# ════════════════════════════════════════════════════════════════
-
-
 async def handler(ws):
     """Per-connection WebSocket handler (legacy — used by websockets library)."""
     agent_id = None
@@ -404,14 +328,14 @@ async def handler(ws):
                     _connections.setdefault(agent_id, set()).add(ws)
                     logger.info("Agent %s connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
-            elif msg_type == p.MSG_REGISTER and agent_id is None:  # R72: 新增
+            elif msg_type == p.MSG_REGISTER and agent_id is None:
                 agent_id = await handle_register(ws, msg)
                 if agent_id:
                     _connections.setdefault(agent_id, set()).add(ws)
                     logger.info("Agent %s registered and connected (%d total)", agent_id[:20], sum(len(c) for c in _connections.values()))
 
             elif msg_type == "message" and agent_id:
-                # ── R86 B1: key 活性检查 ──
+                # key 活性检查
                 agent_keys = persistence.get_api_keys()
                 agent_key_record = agent_keys.get(agent_id)
                 if not agent_key_record or agent_key_record.get("status") == "revoked":
@@ -420,11 +344,10 @@ async def handler(ws):
                         "error": "认证已失效：你的 api_key 已被吊销.请重新 register.",
                     })
                     continue  # skip this message, keep connection alive
-                # ═══ R87+R126: _inbox:server 中继拦截（规则表调度）═══
+                # _inbox:server 中继拦截（规则表调度）
                 if await _sm.dispatch(ws, agent_id, msg):
                     continue
-                # ════════════════════════════════════════
-                # ═══ R99: 权限检查 — _inbox:<bot_id> 需要 level>=4 ═══
+                # 权限检查 — _inbox:<bot_id> 需要 level>=4
                 _channel = msg.get("channel", "")
                 if _channel.startswith(p.INBOX_CHANNEL_PREFIX) and _channel != state.SERVER_INBOX_CHANNEL:
                     _sender_level = auth.get_level(agent_id)
@@ -434,19 +357,17 @@ async def handler(ws):
                             "error": f"❌ 无权限：当前等级 L{_sender_level}，需 L4 才能向其他 Bot 发消息.请提交 Agent Card 或联系管理员提升等级.",
                         })
                         logger.info(
-                            "[R99] 拒绝: %s (L%d) 试图发消息到 %s",
+                            "拒绝: %s (L%d) 试图发消息到 %s",
                             agent_id[:12], _sender_level, _channel,
                         )
                         continue
-                # ════════════════════════════════════════════════════
 
                 await handle_broadcast(ws, agent_id, msg)
 
-            elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:  # R72: 新增
+            elif msg_type == p.MSG_AGENT_CARD_REGISTER and agent_id:
                 result = await handle_agent_card_register(ws, agent_id, msg)
                 await _send(ws, result)
 
-            # ★ 删除: elif msg_type == "approve" and agent_id:  — 旧 approve 路径已移除（R72）
             elif msg_type == "ping":
                 await _send(ws, {"type": "pong"})
 
@@ -463,13 +384,9 @@ async def handler(ws):
             logger.info("Agent %s disconnected (%d remaining)", agent_id[:20] if agent_id else "unknown", len(_connections))
 
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# R126: scenario_matcher rule registration
+# scenario_matcher rule registration
 # ═══════════════════════════════════════════════════════════════════════
 
-
-# ── Register rules (R139: extracted to scenario_rules.py) ──────────
+# Register rules (extracted to scenario_rules.py)
 register_all_rules()
-
-
